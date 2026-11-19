@@ -19,6 +19,36 @@ Windows may show a SmartScreen warning because community builds are not code-sig
 
 Requirements: Python 3.10 or newer. No pip packages are required at runtime.
 
+### Debian, Ubuntu, Mint, and similar distributions
+
+Download the `.deb` file from the latest release, then run:
+
+```bash
+sudo apt install ./Public_ChannelForge-*-linux-all.deb
+public-channelforge
+```
+
+### Arch Linux and Omarchy
+
+Download the `.pkg.tar.zst` file from the latest release, then run:
+
+```bash
+sudo pacman -U ./public-channelforge-*-any.pkg.tar.zst
+public-channelforge
+```
+
+### Universal Linux user installation
+
+Download and extract the `linux-x64.tar.gz` archive, open its `Public_ChannelForge` directory, and run:
+
+```bash
+chmod +x install.sh uninstall.sh
+./install.sh
+public-channelforge
+```
+
+Developers can alternatively clone the repository:
+
 ```bash
 git clone https://github.com/dethkorex/Public_ChannelForge.git
 cd Public_ChannelForge

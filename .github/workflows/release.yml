@@ -44,3 +44,35 @@ jobs:
           files: release/*
           generate_release_notes: true
 
+  linux-installers:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y zstd
+      - name: Build Linux, Debian, Arch and Omarchy packages
+        run: |
+          chmod +x packaging/build_linux_packages.sh scripts/install_linux.sh scripts/uninstall_linux.sh
+          VERSION="${GITHUB_REF_NAME#v}"
+          packaging/build_linux_packages.sh "$VERSION"
+      - name: Test portable Linux installer
+        run: |
+          TEST_HOME="$RUNNER_TEMP/channel-forge-home"
+          mkdir -p "$TEST_HOME"
+          HOME="$TEST_HOME" XDG_DATA_HOME="$TEST_HOME/.local/share" XDG_CONFIG_HOME="$TEST_HOME/.config" bash scripts/install_linux.sh
+          HOME="$TEST_HOME" XDG_DATA_HOME="$TEST_HOME/.local/share" XDG_CONFIG_HOME="$TEST_HOME/.config" "$TEST_HOME/.local/bin/public-channelforge" --help
+      - name: Inspect Debian package
+        run: dpkg-deb --info release/Public_ChannelForge-*-linux-all.deb
+      - name: Inspect Arch package
+        run: tar --zstd -tf release/public-channelforge-*-any.pkg.tar.zst | grep -E 'usr/bin/public-channelforge|opt/public-channelforge/Public_ChannelForge.py'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Public_ChannelForge-Linux
+          path: release/*
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release/*
+          generate_release_notes: true
+
