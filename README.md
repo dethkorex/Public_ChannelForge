@@ -20,7 +20,7 @@ Windows may show a SmartScreen warning because community builds are not code-sig
 Requirements: Python 3.10 or newer. No pip packages are required at runtime.
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_NAME/Public_ChannelForge.git
+git clone https://github.com/dethkorex/Public_ChannelForge.git
 cd Public_ChannelForge
 chmod +x scripts/install_linux.sh scripts/uninstall_linux.sh
 ./scripts/install_linux.sh
