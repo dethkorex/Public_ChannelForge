@@ -36,6 +36,19 @@ class CoreTests(unittest.TestCase):
         tools = app.plugin_tools()
         self.assertTrue(any(tool["id"] == "example_summary" for tool in tools))
 
+    def test_generates_original_channel_asset(self):
+        asset = app.generate_asset({"name": "My Station", "kind": "logo", "primary": "#112233", "secondary": "#abcdef"})
+        self.assertEqual(asset["kind"], "logo")
+        content = (app.ASSETS_DIR / asset["filename"]).read_text(encoding="utf-8")
+        self.assertIn("My Station", content)
+        self.assertNotIn("Fish", content)
+
+    def test_rejects_active_svg_upload(self):
+        import base64
+        unsafe = base64.b64encode(b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>').decode()
+        with self.assertRaisesRegex(ValueError, "scripts"):
+            app.upload_asset({"name": "Unsafe", "kind": "logo", "data": "data:image/svg+xml;base64," + unsafe})
+
 
 if __name__ == "__main__":
     unittest.main()

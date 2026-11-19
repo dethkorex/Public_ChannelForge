@@ -8,11 +8,33 @@
 </head>
 <body>
   <header><div class="mark">CF</div><div><h1>Public ChannelForge</h1><p>Build personal TV guides from your Plex library.</p></div><span id="version"></span></header>
-  <nav><button data-view="channels" class="active">Channels</button><button data-view="setup">Setup</button><button data-view="exports">Guide exports</button><button data-view="tools">Tools</button></nav>
+  <nav><button data-view="channels" class="active">Channels</button><button data-view="assets">Asset Studio</button><button data-view="setup">Setup</button><button data-view="exports">Guide exports</button><button data-view="tools">Tools</button></nav>
   <main>
     <section id="channels" class="view active">
       <div class="section-title"><div><h2>Your channels</h2><p>Create a lineup, arrange its titles, and export a guide.</p></div><button id="new-channel" class="primary">Create channel</button></div>
       <div id="channel-list" class="cards"></div>
+    </section>
+    <section id="assets" class="view">
+      <div class="section-title"><div><h2>Asset Studio</h2><p>Create original channel branding or upload artwork you own. No Fish Audio service or private artwork is included.</p></div></div>
+      <div class="asset-workspace">
+        <form id="generate-asset" class="panel form-grid">
+          <h3 class="wide">Generate an asset</h3>
+          <label>Channel or asset name<input id="asset-name" required maxlength="100" placeholder="Retro Movie Night"></label>
+          <label>Asset type<select id="asset-kind"><option value="logo">Channel logo</option><option value="guide-background">Guide background</option><option value="corner-bug">Corner bug</option></select></label>
+          <label>Primary color<input id="asset-primary" type="color" value="#68e0b8"></label>
+          <label>Secondary color<input id="asset-secondary" type="color" value="#6da9ff"></label>
+          <button class="primary wide">Generate artwork</button>
+        </form>
+        <form id="upload-asset" class="panel form-grid">
+          <h3 class="wide">Upload your artwork</h3>
+          <label>Asset name<input id="upload-name" required maxlength="100"></label>
+          <label>Asset type<select id="upload-kind"><option value="logo">Channel logo</option><option value="guide-background">Guide background</option><option value="corner-bug">Corner bug</option></select></label>
+          <label class="wide">Image file<input id="upload-file" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" required></label>
+          <p class="muted wide">PNG, JPEG, WebP, or SVG up to 8 MB. Only upload artwork you have permission to use.</p>
+          <button class="primary wide">Add artwork</button>
+        </form>
+      </div>
+      <h3>Your asset library</h3><div id="asset-list" class="asset-grid"></div>
     </section>
     <section id="setup" class="view">
       <h2>Connect Plex</h2><p>Your Plex URL and token stay on this computer. They are never bundled into exports.</p>
@@ -38,7 +60,7 @@
   <dialog id="channel-dialog"><form id="channel-form" method="dialog">
     <div class="section-title"><h2 id="dialog-title">Create channel</h2><button type="button" class="icon" id="close-dialog">×</button></div>
     <input id="channel-id" type="hidden">
-    <div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label class="wide">Plex library<select id="library" required><option value="">Choose a library</option></select></label></div>
+    <div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label>Channel logo<select id="channel-logo"><option value="">No logo</option></select></label><label>Plex library<select id="library" required><option value="">Choose a library</option></select></label></div>
     <div id="media-status" class="muted">Choose a Plex library to load titles.</div><div id="media-list" class="media-list"></div>
     <footer><button type="button" id="cancel-dialog">Cancel</button><button class="primary" value="default">Save channel</button></footer>
   </form></dialog>

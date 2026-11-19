@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import importlib.util
 import json
@@ -24,7 +25,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -45,6 +46,7 @@ CONFIG_FILE = DATA_DIR / "config.json"
 CHANNELS_FILE = DATA_DIR / "channels.json"
 EXPORT_DIR = DATA_DIR / "exports"
 PLUGINS_DIR = DATA_DIR / "plugins"
+ASSETS_DIR = DATA_DIR / "assets"
 WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
 LOCK = threading.RLock()
 
@@ -82,6 +84,106 @@ def config(public: bool = False) -> dict:
 def channels() -> list[dict]:
     value = load_json(CHANNELS_FILE, [])
     return value if isinstance(value, list) else []
+
+
+def asset_manifest() -> list[dict]:
+    manifest = load_json(ASSETS_DIR / "manifest.json", [])
+    return manifest if isinstance(manifest, list) else []
+
+
+def safe_asset_id(value: str) -> str:
+    cleaned = "".join(char for char in value.lower() if char.isalnum() or char in "-_").strip("-_")
+    return cleaned[:60] or secrets.token_hex(6)
+
+
+def save_asset_record(record: dict, content: bytes) -> dict:
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    values = asset_manifest()
+    stem = safe_asset_id(record.get("name", "asset"))
+    asset_id = f"{stem}-{secrets.token_hex(3)}"
+    extension = record["extension"]
+    filename = f"{asset_id}.{extension}"
+    (ASSETS_DIR / filename).write_bytes(content)
+    item = {
+        "id": asset_id, "name": str(record.get("name", "Asset"))[:100],
+        "kind": str(record.get("kind", "logo"))[:30], "filename": filename,
+        "content_type": record["content_type"], "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    values.append(item)
+    atomic_json(ASSETS_DIR / "manifest.json", values)
+    return item
+
+
+def generate_asset(payload: dict) -> dict:
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise ValueError("Asset name is required.")
+    kind = str(payload.get("kind", "logo"))
+    if kind not in {"logo", "guide-background", "corner-bug"}:
+        raise ValueError("Invalid asset type.")
+    primary = str(payload.get("primary", "#68e0b8"))
+    secondary = str(payload.get("secondary", "#6da9ff"))
+    for color in (primary, secondary):
+        if len(color) != 7 or not color.startswith("#") or any(char not in "0123456789abcdefABCDEF" for char in color[1:]):
+            raise ValueError("Choose valid colors.")
+    dimensions = {"logo": (1200, 675), "guide-background": (1920, 1080), "corner-bug": (600, 600)}
+    width, height = dimensions[kind]
+    radius = 90 if kind == "corner-bug" else 48
+    label = html.escape(name)
+    subtitle = {"logo": "CHANNEL", "guide-background": "NOW PLAYING", "corner-bug": "LIVE"}[kind]
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="{primary}"/><stop offset="1" stop-color="{secondary}"/></linearGradient></defs>
+<rect width="100%" height="100%" rx="{radius}" fill="#08111f"/><circle cx="{width*.82}" cy="{height*.18}" r="{min(width,height)*.32}" fill="url(#g)" opacity=".3"/>
+<rect x="{width*.06}" y="{height*.1}" width="{width*.02}" height="{height*.8}" rx="12" fill="url(#g)"/>
+<text x="{width*.13}" y="{height*.48}" fill="#f5f7fb" font-family="Arial,sans-serif" font-size="{max(42,min(128,width//10))}" font-weight="800">{label}</text>
+<text x="{width*.13}" y="{height*.62}" fill="{primary}" font-family="Arial,sans-serif" font-size="{max(24,min(48,width//24))}" font-weight="700" letter-spacing="8">{subtitle}</text></svg>'''
+    return save_asset_record({"name": name, "kind": kind, "extension": "svg", "content_type": "image/svg+xml"}, svg.encode("utf-8"))
+
+
+def upload_asset(payload: dict) -> dict:
+    name, kind = str(payload.get("name", "")).strip(), str(payload.get("kind", "logo"))
+    data_url = str(payload.get("data", ""))
+    allowed = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/svg+xml": "svg"}
+    if not name or kind not in {"logo", "guide-background", "corner-bug"}:
+        raise ValueError("Enter a name and valid asset type.")
+    if not data_url.startswith("data:") or ";base64," not in data_url:
+        raise ValueError("Choose a valid image file.")
+    header, encoded = data_url.split(",", 1)
+    content_type = header[5:].split(";", 1)[0]
+    if content_type not in allowed:
+        raise ValueError("Use PNG, JPEG, WebP, or SVG artwork.")
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise ValueError("The image data was invalid.") from exc
+    if not content or len(content) > 8_000_000:
+        raise ValueError("Artwork must be smaller than 8 MB.")
+    if content_type == "image/svg+xml":
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError as exc:
+            raise ValueError("The SVG file was invalid.") from exc
+        for node in root.iter():
+            tag = node.tag.rsplit("}", 1)[-1].lower()
+            if tag in {"script", "foreignobject", "iframe", "object", "embed"}:
+                raise ValueError("SVG files cannot contain scripts or embedded documents.")
+            for attribute, value in node.attrib.items():
+                key = attribute.rsplit("}", 1)[-1].lower()
+                if key.startswith("on") or (key == "href" and str(value).lower().startswith(("http:", "https:", "javascript:"))):
+                    raise ValueError("SVG files cannot contain event handlers or external links.")
+    return save_asset_record({"name": name, "kind": kind, "extension": allowed[content_type], "content_type": content_type}, content)
+
+
+def delete_asset(asset_id: str) -> None:
+    with LOCK:
+        values = asset_manifest()
+        match = next((item for item in values if item.get("id") == asset_id), None)
+        if not match:
+            raise ValueError("Asset not found.")
+        path = ASSETS_DIR / Path(match["filename"]).name
+        if path.exists():
+            path.unlink()
+        atomic_json(ASSETS_DIR / "manifest.json", [item for item in values if item.get("id") != asset_id])
 
 
 def plex_request(path: str, settings: dict | None = None) -> ET.Element:
@@ -156,6 +258,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
     return {
         "id": existing_id or secrets.token_hex(8), "name": name[:100], "number": number[:12],
         "section": str(payload.get("section", ""))[:20], "items": normalized,
+        "logo_asset_id": str(payload.get("logo_asset_id", ""))[:80],
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -199,6 +302,9 @@ def generate_exports(values: list[dict] | None = None) -> dict:
         node = ET.SubElement(tv, "channel", {"id": f"public-channelforge.{channel['id']}"})
         ET.SubElement(node, "display-name").text = channel["name"]
         ET.SubElement(node, "display-name").text = channel["number"]
+        logo = next((item for item in asset_manifest() if item.get("id") == channel.get("logo_asset_id")), None)
+        if logo:
+            ET.SubElement(node, "icon", {"src": f"http://{HOST}:{settings['port']}/user-assets/{logo['filename']}"})
     start = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     end = start + timedelta(hours=settings["guide_hours"])
     for channel in values:
@@ -296,7 +402,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/api/status":
-                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": channels(), "tools": plugin_tools(), "data_dir": str(DATA_DIR)})
+                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": channels(), "assets": asset_manifest(), "tools": plugin_tools(), "data_dir": str(DATA_DIR)})
             elif parsed.path == "/api/plex/libraries":
                 self.send_json(200, {"libraries": plex_libraries()})
             elif parsed.path == "/api/plex/items":
@@ -310,6 +416,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not path.exists():
                     generate_exports()
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+            elif parsed.path.startswith("/user-assets/"):
+                filename = Path(parsed.path).name
+                match = next((item for item in asset_manifest() if item.get("filename") == filename), None)
+                if not match:
+                    raise FileNotFoundError
+                self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
             elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
@@ -342,6 +454,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"channel": save_channel(payload)})
             elif parsed.path == "/api/exports":
                 self.send_json(200, generate_exports())
+            elif parsed.path == "/api/assets/generate":
+                self.send_json(200, {"asset": generate_asset(payload)})
+            elif parsed.path == "/api/assets/upload":
+                self.send_json(200, {"asset": upload_asset(payload)})
             elif parsed.path.startswith("/api/tools/"):
                 self.send_json(200, {"result": run_plugin(parsed.path.rsplit("/", 1)[-1], payload)})
             else:
@@ -360,6 +476,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         try:
+            if self.path.startswith("/api/assets/"):
+                delete_asset(self.path.rsplit("/", 1)[-1])
+                return self.send_json(200, {"ok": True})
             if not self.path.startswith("/api/channels/"):
                 return self.send_json(404, {"error": "Not found"})
             delete_channel(self.path.rsplit("/", 1)[-1])
@@ -372,6 +491,7 @@ def ensure_files() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(exist_ok=True)
     PLUGINS_DIR.mkdir(exist_ok=True)
+    ASSETS_DIR.mkdir(exist_ok=True)
     example = PLUGINS_DIR / "example_summary.py"
     bundled = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "plugins" / "example_summary.py"
     if not example.exists() and bundled.exists():

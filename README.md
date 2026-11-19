@@ -2,7 +2,11 @@
 
 Public ChannelForge is a private, local-first channel guide builder for Plex users. It lets each user connect their own Plex server, select library titles, build channel rotations, and export XMLTV and M3U files. It includes a small Python extension system for community tools.
 
+The built-in **Asset Studio** creates original channel logos, guide backgrounds, and corner bugs from a channel name and user-selected colors. Users can also upload artwork they own and assign a logo to an XMLTV channel. Artwork remains in the user's local application-data folder.
+
 This repository is the sanitized public edition. It contains **no private API credentials, Plex tokens, personal channel presets, media databases, logs, backups, or custom artwork** from the original ChannelForge installation.
+
+The interface and asset workflow remain part of ChannelForge. Only the original owner's private Fish Audio integration and personal channel assets/presets are excluded. This public edition does not contact Fish Audio or ship any Fish API code.
 
 ## Windows installation
 
