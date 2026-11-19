@@ -4,16 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Public ChannelForge</title>
-  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css"><link rel="stylesheet" href="/plex.css"><link rel="stylesheet" href="/overlays.css"><link rel="stylesheet" href="/onboarding.css">
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css"><link rel="stylesheet" href="/plex.css"><link rel="stylesheet" href="/overlays.css"><link rel="stylesheet" href="/onboarding.css"><link rel="stylesheet" href="/ux.css">
 </head>
 <body>
   <header><div class="mark">CF</div><div><h1>Public ChannelForge</h1><p>Standalone live TV server for your Plex library.</p></div><span id="version"></span></header>
-  <nav><button data-view="watch" class="active">Watch TV</button><button data-view="channels">Channels</button><button data-view="assets">Asset Studio</button><button data-view="setup">Setup</button><button data-view="exports">Guide exports</button><button data-view="tools">Tools</button><button data-view="updates">Updates</button></nav>
+  <nav><button data-view="start" class="active">Get Started</button><button data-view="watch">Watch TV</button><button data-view="channels">Channels</button><button data-view="assets">Asset Studio</button><button data-view="setup">Setup</button><button data-view="exports">Guide exports</button><button data-view="tools">Tools</button><button data-view="updates">Updates</button></nav>
   <main>
-    <section id="watch" class="view active">
-      <div class="section-title"><div><h2>Live TV</h2><p>Choose a channel to watch directly in ChannelForge. No Plex DVR setup is needed.</p></div><button id="refresh-guide">Refresh guide</button></div>
+    <section id="start" class="view active">
+      <div class="welcome"><span class="channel-number">QUICK SETUP</span><h2>Build your first live channel</h2><p>Follow these four steps. ChannelForge handles the server, TV guide, and stream URLs for you.</p></div>
+      <div class="setup-steps">
+        <article><span>1</span><div><h3>Connect Plex</h3><p id="step-connect-status">Sign in so ChannelForge can see your libraries.</p><button id="start-connect" class="primary">Connect Plex</button></div></article>
+        <article><span>2</span><div><h3>Create a channel</h3><p>Pick a library, select movies or episodes, then choose how they play.</p><button id="start-channel">Create my channel</button></div></article>
+        <article><span>3</span><div><h3>Watch and verify</h3><p>Tune the channel inside ChannelForge and check the guide.</p><button data-view="watch">Open Watch TV</button></div></article>
+        <article><span>4</span><div><h3>Use it elsewhere</h3><p>Copy the XMLTV and M3U addresses into an IPTV client or DVR.</p><button data-view="exports">View stream URLs</button></div></article>
+      </div>
+      <div class="panel help-box"><h3>How channel schedules work</h3><p><b>Play in order</b> repeats your selected titles in their listed order. <b>Shuffle</b> creates a stable mixed lineup that remains consistent after restart. <b>Series marathon</b> mixes the order of selected shows, but keeps every show's episodes in season and episode order.</p></div>
+    </section>
+    <section id="watch" class="view">
+      <div class="section-title"><div><h2>Live TV</h2><p>Choose a channel to watch directly in ChannelForge. No Plex DVR setup is needed.</p></div></div>
       <div class="tv-shell"><div class="player-panel"><div class="video-frame"><img id="channel-bg" class="channel-bg" alt=""><video id="tv-player" controls playsinline></video><img id="channel-bug" class="channel-bug" alt=""><div id="player-placeholder"><span>CF</span><p>Select a live channel</p></div></div><div class="now-playing"><span id="playing-channel">ChannelForge Live</span><h3 id="playing-title">Select a channel from the guide</h3><div class="progress"><i id="playing-progress"></i></div><p id="playing-time" class="muted"></p></div></div><div id="watch-channels" class="watch-channels"></div></div>
-      <div class="guide-heading"><h3>Six-hour channel guide</h3><span id="guide-updated" class="muted"></span></div><div id="guide-grid" class="guide-grid"></div>
+      <div class="guide-heading"><div><h3>Channel guide</h3><span id="guide-range" class="muted"></span></div><div class="guide-controls"><button id="guide-earlier">← Earlier</button><button id="guide-now" class="primary">Now</button><button id="guide-later">Later →</button><button id="refresh-guide">Refresh</button></div></div><div id="guide-grid" class="guide-grid"></div>
     </section>
     <section id="channels" class="view">
       <div class="section-title"><div><h2>Your live channels</h2><p>ChannelForge keeps every lineup on a continuous 24/7 clock and hosts the streams and guide.</p></div><button id="new-channel" class="primary">Create channel</button></div>
@@ -51,7 +61,7 @@
         <label>Network access<select id="bind-host"><option value="127.0.0.1">This computer only</option><option value="0.0.0.0">Local network</option></select></label>
         <label class="wide">Public/base URL <input id="public-url" placeholder="Optional, e.g. http://192.168.1.50:8787"></label>
         <p class="muted wide">For TVs or DVRs on another device, choose Local network and enter this computer's LAN URL. Restart ChannelForge after changing network access.</p>
-        <div class="wide"><button class="primary">Test and save</button> <span id="token-status"></span></div>
+        <div class="wide setup-actions"><button type="button" id="setup-plex-signin" class="primary">Sign in with Plex</button><button type="button" id="test-plex">Test connection</button><button type="submit">Save settings</button></div><div id="setup-result" class="connection-result wide" role="status"></div><span id="token-status" class="wide"></span>
       </form>
       <details class="panel"><summary>Automatic Plex token setup</summary><p>In Plex Web, open any media item, choose <b>Get Info</b> → <b>View XML</b>, then copy the complete browser URL and paste it into Plex server URL. ChannelForge automatically extracts <code>X-Plex-Token</code>, saves it locally, and removes it from the visible URL. You may also enter the token manually.</p></details>
     </section>
@@ -75,8 +85,8 @@
   <dialog id="channel-dialog"><form id="channel-form" method="dialog">
     <div class="section-title"><h2 id="dialog-title">Create channel</h2><button type="button" class="icon" id="close-dialog">×</button></div>
     <input id="channel-id" type="hidden">
-    <div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label>Channel logo<select id="channel-logo"><option value="">No logo</option></select></label><label>Guide/player background<select id="channel-background"><option value="">Default background</option></select></label><label>Corner bug<select id="channel-corner-bug"><option value="">No corner bug</option></select></label><label>Plex library<select id="library" required><option value="">Choose a library</option></select></label></div>
-    <div id="media-status" class="muted">Choose a Plex library to load titles.</div><div id="media-list" class="media-list"></div>
+    <div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100" placeholder="Movie Night"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label>Plex library<select id="library" required><option value="">Choose a library</option></select></label><label>Playback order<select id="playback-mode"><option value="ordered">Play in order</option><option value="shuffle">Shuffle lineup</option><option value="marathon">Series marathon (episodes in order)</option></select></label><label>Channel logo<select id="channel-logo"><option value="">No logo</option></select></label><label>Guide/player background<select id="channel-background"><option value="">Default background</option></select></label><label>Corner bug<select id="channel-corner-bug"><option value="">No corner bug</option></select></label></div>
+    <div class="media-toolbar"><div id="media-status" class="muted">Choose a Plex library to load titles.</div><input id="media-filter" type="search" placeholder="Filter titles…"><button type="button" id="select-all-media">Select all</button><button type="button" id="clear-media">Clear</button></div><div id="media-list" class="media-list"></div>
     <footer><button type="button" id="cancel-dialog">Cancel</button><button class="primary" value="default">Save channel</button></footer>
   </form></dialog>
   <div id="toast"></div>

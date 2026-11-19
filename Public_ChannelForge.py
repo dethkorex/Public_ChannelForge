@@ -26,7 +26,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -478,7 +478,12 @@ def plex_libraries() -> list[dict]:
 def plex_items(section: str) -> list[dict]:
     if not section.isdigit():
         raise ValueError("Invalid Plex library section.")
-    root = plex_request(f"/library/sections/{section}/all")
+    library = next((item for item in plex_libraries() if item["key"] == section), None)
+    if not library:
+        raise ValueError("Plex library was not found.")
+    # TV libraries must expose playable episodes, not non-playable show folders.
+    path = f"/library/sections/{section}/all?type=4" if library["type"] == "show" else f"/library/sections/{section}/all"
+    root = plex_request(path)
     result = []
     for node in list(root):
         rating_key = node.get("ratingKey")
@@ -486,7 +491,7 @@ def plex_items(section: str) -> list[dict]:
             continue
         result.append({
             "id": rating_key,
-            "title": node.get("title", "Untitled"),
+            "title": (f'{node.get("grandparentTitle", "")} · S{int(node.get("parentIndex", "0") or 0):02d}E{int(node.get("index", "0") or 0):02d} · {node.get("title", "Untitled")}' if node.get("type") == "episode" else node.get("title", "Untitled")),
             "year": node.get("year", ""),
             "type": node.get("type", "video"),
             "duration_ms": int(node.get("duration", "1800000") or 1800000),
@@ -495,6 +500,9 @@ def plex_items(section: str) -> list[dict]:
             "summary": node.get("summary", "")[:600],
             "content_rating": node.get("contentRating", ""),
             "rating": node.get("rating", ""),
+            "series": node.get("grandparentTitle", ""),
+            "season": int(node.get("parentIndex", "0") or 0),
+            "episode": int(node.get("index", "0") or 0),
         })
     return result
 
@@ -520,6 +528,8 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "key": str(item.get("key", f"/library/metadata/{item['id']}"))[:500],
             "thumb": str(item.get("thumb", ""))[:500], "summary": str(item.get("summary", ""))[:600],
             "content_rating": str(item.get("content_rating", ""))[:40], "rating": str(item.get("rating", ""))[:20],
+            "series": str(item.get("series", ""))[:200],
+            "season": max(0, int(item.get("season", 0) or 0)), "episode": max(0, int(item.get("episode", 0) or 0)),
         })
     if not normalized:
         raise ValueError("The selected titles were invalid.")
@@ -529,6 +539,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         "logo_asset_id": str(payload.get("logo_asset_id", ""))[:80],
         "background_asset_id": str(payload.get("background_asset_id", ""))[:80],
         "corner_bug_asset_id": str(payload.get("corner_bug_asset_id", ""))[:80],
+        "playback_mode": str(payload.get("playback_mode", "ordered")) if str(payload.get("playback_mode", "ordered")) in {"ordered", "shuffle", "marathon"} else "ordered",
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "schedule_anchor": str(payload.get("schedule_anchor") or datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()),
     }
@@ -579,7 +590,7 @@ def parse_timestamp(value: str) -> datetime:
 def schedule_position(channel: dict, moment: datetime | None = None) -> dict:
     """Resolve a deterministic 24/7 channel position for any UTC moment."""
     moment = (moment or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    items = channel.get("items", [])
+    items = scheduled_items(channel)
     if not items:
         raise ValueError("This channel has no scheduled titles.")
     durations = [max(60_000, int(item.get("duration_ms", 1_800_000))) for item in items]
@@ -602,7 +613,7 @@ def schedule_window(channel: dict, start: datetime, end: datetime) -> list[dict]
     position = schedule_position(channel, start)
     cursor = position["start"]
     index = position["index"]
-    items = channel["items"]
+    items = scheduled_items(channel)
     result = []
     while cursor < end:
         item = items[index]
@@ -610,6 +621,24 @@ def schedule_window(channel: dict, start: datetime, end: datetime) -> list[dict]
         result.append({"item": item, "start": cursor, "stop": stop})
         cursor, index = stop, (index + 1) % len(items)
     return result
+
+
+def scheduled_items(channel: dict) -> list[dict]:
+    """Return a stable lineup for ordered, shuffled, or series-marathon playback."""
+    items = list(channel.get("items", []))
+    mode = channel.get("playback_mode", "ordered")
+    seed = str(channel.get("id", "channel"))
+    stable_key = lambda item: hashlib.sha256(f'{seed}:{item.get("id", "")}'.encode()).hexdigest()
+    if mode == "shuffle":
+        return sorted(items, key=stable_key)
+    if mode == "marathon":
+        groups: dict[str, list[dict]] = {}
+        for item in items:
+            group = str(item.get("series") or item.get("title") or item.get("id"))
+            groups.setdefault(group, []).append(item)
+        group_names = sorted(groups, key=lambda name: hashlib.sha256(f"{seed}:{name}".encode()).hexdigest())
+        return [item for name in group_names for item in sorted(groups[name], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", ""))))]
+    return items
 
 
 def server_base(settings: dict | None = None) -> str:
@@ -775,7 +804,8 @@ class Handler(BaseHTTPRequestHandler):
                 data, content_type = plex_binary(image_path)
                 self.send_bytes(200, data, content_type)
             elif parsed.path == "/api/guide":
-                moment = datetime.now(timezone.utc)
+                offset = max(-24, min(168, int(urllib.parse.parse_qs(parsed.query).get("offset", ["0"])[0])))
+                moment = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(hours=offset)
                 guide = []
                 for channel in channels():
                     slots = schedule_window(channel, moment, moment + timedelta(hours=6))
@@ -810,7 +840,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
@@ -836,12 +866,20 @@ class Handler(BaseHTTPRequestHandler):
                     "port": old["port"],
                     "bind_host": str(payload.get("bind_host", old["bind_host"])).strip() or HOST,
                     "public_url": str(payload.get("public_url", old["public_url"])).strip().rstrip("/"),
+                    "client_identifier": old["client_identifier"],
                 }
                 root = plex_request("/", updated)
                 updated["plex_profile"] = plex_profile(root)
                 atomic_json(CONFIG_FILE, updated)
                 generate_exports()
                 self.send_json(200, {"ok": True, "config": config(True)})
+            elif parsed.path == "/api/plex/test":
+                old = config()
+                plex_url, pasted_token = normalize_plex_connection(str(payload.get("plex_url", old["plex_url"])), str(payload.get("plex_token", "")))
+                candidate = {**old, "plex_url": plex_url, "plex_token": pasted_token or old["plex_token"]}
+                root = plex_request("/", candidate)
+                libraries_root = plex_request("/library/sections", candidate)
+                self.send_json(200, {"ok": True, "profile": plex_profile(root), "libraries": len(libraries_root.findall("Directory"))})
             elif parsed.path == "/api/plex/signin/start":
                 self.send_json(200, start_plex_signin())
             elif parsed.path == "/api/channels":

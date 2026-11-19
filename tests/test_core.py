@@ -42,6 +42,38 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(position["item"]["title"], "Second")
         self.assertEqual(position["offset_ms"], 150000)
 
+    def test_shuffle_lineup_is_stable(self):
+        channel = app.clean_channel({"name": "Mix", "number": "4", "playback_mode": "shuffle", "items": [
+            {"id": str(index), "title": f"Title {index}", "duration_ms": 60000} for index in range(8)
+        ]})
+        first = [item["id"] for item in app.scheduled_items(channel)]
+        second = [item["id"] for item in app.scheduled_items(channel)]
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, [str(index) for index in range(8)])
+
+    def test_marathon_shuffles_series_but_keeps_episodes_in_order(self):
+        items = [
+            {"id": "b2", "title": "B 2", "series": "Show B", "season": 1, "episode": 2},
+            {"id": "a2", "title": "A 2", "series": "Show A", "season": 1, "episode": 2},
+            {"id": "b1", "title": "B 1", "series": "Show B", "season": 1, "episode": 1},
+            {"id": "a1", "title": "A 1", "series": "Show A", "season": 1, "episode": 1},
+        ]
+        channel = app.clean_channel({"name": "Marathon", "number": "5", "playback_mode": "marathon", "items": items})
+        lineup = app.scheduled_items(channel)
+        for series in {item["series"] for item in lineup}:
+            episodes = [item["episode"] for item in lineup if item["series"] == series]
+            self.assertEqual(episodes, sorted(episodes))
+
+    def test_tv_library_returns_playable_episodes(self):
+        libraries = [{"key": "2", "title": "TV", "type": "show"}]
+        root = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentTitle="Example Show" parentIndex="1" index="1" duration="1800000" key="/library/metadata/99"/></MediaContainer>')
+        with mock.patch.object(app, "plex_libraries", return_value=libraries), mock.patch.object(app, "plex_request", return_value=root) as request:
+            items = app.plex_items("2")
+        request.assert_called_once_with("/library/sections/2/all?type=4")
+        self.assertEqual(items[0]["key"], "/library/metadata/99")
+        self.assertEqual(items[0]["series"], "Example Show")
+        self.assertIn("S01E01", items[0]["title"])
+
     def test_live_url_uses_plex_hls_at_current_offset(self):
         channel = app.clean_channel({"name": "Live", "number": "3", "schedule_anchor": "2026-01-01T00:00:00+00:00", "items": [
             {"id": "44", "title": "Show", "duration_ms": 3600000, "key": "/library/metadata/44"},

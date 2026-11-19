@@ -4,6 +4,8 @@ Public ChannelForge is a standalone, local-first live TV server for Plex users. 
 
 The built-in **Watch TV** screen includes an embedded HLS player, channel rail, now-playing progress, and six-hour visual guide. Viewers click a channel and watch immediately in ChannelForge without adding it to Plex DVR.
 
+The **Get Started** screen walks new users through connecting Plex, creating a channel, testing it in the player, and copying the hosted stream URLs. Setup includes a separate connection test with a clear success or failure result.
+
 After connection, ChannelForge displays the Plex username, server name, and server version supplied by that server. Library browsing includes Plex posters, summaries, ratings, years, and media types. Poster bytes are proxied through ChannelForge so the Plex token is never placed in browser image URLs.
 
 The built-in **Asset Studio** creates original channel logos, guide backgrounds, and corner bugs from a channel name and user-selected colors. Users can also upload artwork they own and assign a logo to an XMLTV channel. Artwork remains in the user's local application-data folder.
@@ -103,6 +105,14 @@ Wayland compositors used by Omarchy do not need special configuration because th
 ChannelForge owns the channel clock and guide. Every channel has a stable schedule anchor; restarting the application does not reset the lineup to its first title. The XMLTV includes current and upcoming programs based on Plex duration metadata. The M3U points to ChannelForge's `/live/<channel>.m3u8` URLs. When a player opens one, ChannelForge resolves the current program and offset, then creates a Plex HLS session for that exact live position.
 
 Plex remains the media source and transcoder, but ErsatzTV and its database/server are no longer involved. ChannelForge hosts the guide, playlist, channel clock, web manager, artwork, and live entry points.
+
+## Channel playback modes
+
+- **Play in order** repeats selected movies or episodes in their selected order.
+- **Shuffle lineup** creates a deterministic mixed order that remains stable across application restarts.
+- **Series marathon** shuffles the selected series order while preserving season and episode order inside each series.
+
+For Plex TV libraries, ChannelForge loads playable episode records rather than show folders. The channel editor includes title filtering, Select all, and Clear controls for large libraries.
 
 For clients on another device, choose **Local network** in Setup, enter a base URL such as `http://192.168.1.50:8787`, save, and restart ChannelForge. Only expose this server on a trusted home network; it has no internet-facing authentication.
 
