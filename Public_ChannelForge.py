@@ -27,7 +27,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.5.1"
+VERSION = "2.6.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -52,6 +52,7 @@ ASSETS_DIR = DATA_DIR / "assets"
 WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
 LOCK = threading.RLock()
 HLS_PROXY: dict[str, tuple[str, float]] = {}
+UPDATE_JOBS: dict[str, dict] = {}
 DEFAULT_ASSET_THEMES = {
     "classic": ("Classic TV", "#f4c95d", "#d66b4d"),
     "neon": ("Neon Night", "#42f5e9", "#9b5cff"),
@@ -104,6 +105,27 @@ def github_bytes(url: str, limit: int = 100_000_000) -> bytes:
         return data
 
 
+def github_file(url: str, destination: Path, limit: int, progress) -> None:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in {"api.github.com", "github.com", "objects.githubusercontent.com"}:
+        raise ValueError("The update URL was not an approved GitHub address.")
+    request = urllib.request.Request(url, headers={"Accept": "application/octet-stream", "User-Agent": f"{APP_NAME}/{VERSION}"})
+    with urllib.request.urlopen(request, timeout=45) as response, destination.open("wb") as output:
+        total = int(response.headers.get("Content-Length", "0") or 0)
+        if total > limit:
+            raise ValueError("The update file was unexpectedly large.")
+        downloaded = 0
+        while True:
+            chunk = response.read(256 * 1024)
+            if not chunk:
+                break
+            downloaded += len(chunk)
+            if downloaded > limit:
+                raise ValueError("The update file exceeded the safety limit.")
+            output.write(chunk)
+            progress("downloading", downloaded, total)
+
+
 def latest_release() -> dict:
     try:
         payload = json.loads(github_bytes(GITHUB_API_RELEASE, 2_000_000))
@@ -130,7 +152,10 @@ def update_asset_name(release: dict) -> tuple[str, str]:
     return candidate, "SHA256SUMS-Linux.txt"
 
 
-def download_verified_update() -> dict:
+def download_verified_update(progress=None) -> dict:
+    report_progress = progress is not None
+    progress = progress or (lambda _stage, _downloaded=0, _total=0: None)
+    progress("checking", 0, 0)
     release = latest_release()
     if not release["update_available"]:
         raise ValueError("Public ChannelForge is already up to date.")
@@ -138,18 +163,26 @@ def download_verified_update() -> dict:
     by_name = {item["name"]: item for item in release["assets"]}
     if asset_name not in by_name or checksum_name not in by_name:
         raise ValueError("The release is missing its installer or checksum file.")
+    progress("checksum", 0, 0)
     checksum_text = github_bytes(by_name[checksum_name]["url"], 1_000_000).decode("utf-8", "replace")
     expected = next((line.split()[0].lower() for line in checksum_text.splitlines() if line.strip().endswith(asset_name)), "")
     if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
         raise ValueError("The release checksum could not be verified.")
-    data = github_bytes(by_name[asset_name]["url"], 150_000_000)
-    actual = hashlib.sha256(data).hexdigest()
-    if actual != expected:
-        raise ValueError("The downloaded installer failed SHA-256 verification.")
     update_dir = DATA_DIR / "updates"
     update_dir.mkdir(parents=True, exist_ok=True)
     destination = update_dir / asset_name
-    destination.write_bytes(data)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    if report_progress:
+        github_file(by_name[asset_name]["url"], temporary, 150_000_000, progress)
+        progress("verifying", temporary.stat().st_size, temporary.stat().st_size)
+        actual = hashlib.sha256(temporary.read_bytes()).hexdigest()
+    else:
+        data = github_bytes(by_name[asset_name]["url"], 150_000_000)
+        temporary.write_bytes(data)
+        actual = hashlib.sha256(data).hexdigest()
+    if actual != expected:
+        raise ValueError("The downloaded installer failed SHA-256 verification.")
+    temporary.replace(destination)
     if sys.platform == "win32":
         command = f'Run the verified installer: "{destination}"'
     elif asset_name.endswith(".deb"):
@@ -158,7 +191,33 @@ def download_verified_update() -> dict:
         command = f'sudo pacman -U "{destination}"'
     else:
         command = f'Extract "{destination}" and run install.sh'
+    progress("complete", destination.stat().st_size, destination.stat().st_size)
     return {"version": release["latest_version"], "asset": asset_name, "path": str(destination), "sha256": actual, "command": command, "can_launch": sys.platform == "win32"}
+
+
+def start_update_job(launch: bool, shutdown) -> str:
+    job_id = secrets.token_urlsafe(18)
+    with LOCK:
+        UPDATE_JOBS[job_id] = {"status": "running", "stage": "starting", "downloaded": 0, "total": 0, "percent": 0}
+
+    def worker() -> None:
+        def report(stage: str, downloaded: int = 0, total: int = 0) -> None:
+            percent = round(downloaded * 100 / total, 1) if total else (100 if stage == "complete" else 0)
+            with LOCK:
+                UPDATE_JOBS[job_id].update({"stage": stage, "downloaded": downloaded, "total": total, "percent": percent})
+        try:
+            result = download_verified_update(report)
+            with LOCK:
+                UPDATE_JOBS[job_id].update({"status": "complete", "result": result, "stage": "complete", "percent": 100})
+            if launch and result["can_launch"]:
+                threading.Timer(1.5, lambda: subprocess.Popen([result["path"]], cwd=str(Path(result["path"]).parent))).start()
+                threading.Timer(4.0, shutdown).start()
+        except Exception as exc:
+            with LOCK:
+                UPDATE_JOBS[job_id].update({"status": "error", "stage": "error", "error": str(exc)})
+
+    threading.Thread(target=worker, daemon=True, name=f"channel-forge-update-{job_id[:6]}").start()
+    return job_id
 
 
 def config(public: bool = False) -> dict:
@@ -872,6 +931,13 @@ class Handler(BaseHTTPRequestHandler):
                 release = latest_release()
                 release.pop("assets", None)
                 self.send_json(200, release)
+            elif parsed.path == "/api/update/progress":
+                job_id = urllib.parse.parse_qs(parsed.query).get("id", [""])[0]
+                with LOCK:
+                    job = dict(UPDATE_JOBS.get(job_id, {}))
+                if not job:
+                    raise FileNotFoundError
+                self.send_json(200, job)
             elif parsed.path == "/api/plex/signin/status":
                 pin_id = int(urllib.parse.parse_qs(parsed.query).get("pin_id", ["0"])[0])
                 self.send_json(200, poll_plex_signin(pin_id))
@@ -906,7 +972,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
@@ -963,6 +1029,8 @@ class Handler(BaseHTTPRequestHandler):
                     installer = result["path"]
                     threading.Timer(0.8, lambda: subprocess.Popen([installer], cwd=str(Path(installer).parent))).start()
                     threading.Timer(2.0, self.server.shutdown).start()
+            elif parsed.path == "/api/update/start":
+                self.send_json(202, {"job_id": start_update_job(bool(payload.get("launch")), self.server.shutdown)})
             elif parsed.path.startswith("/api/tools/"):
                 self.send_json(200, {"result": run_plugin(parsed.path.rsplit("/", 1)[-1], payload)})
             else:
