@@ -140,6 +140,25 @@ class CoreTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_updater_compares_semantic_versions(self):
+        self.assertGreater(app.version_tuple("v2.10.0"), app.version_tuple("2.9.9"))
+        self.assertEqual(app.version_tuple("v2.3"), (2, 3, 0))
+
+    def test_updater_verifies_windows_installer_checksum(self):
+        installer = b"verified-installer"
+        digest = app.hashlib.sha256(installer).hexdigest()
+        release = {"latest_version": "9.0.0", "update_available": True, "assets": [
+            {"name": "Public_ChannelForge_Setup.exe", "url": "https://github.com/example/setup", "size": len(installer)},
+            {"name": "SHA256SUMS.txt", "url": "https://github.com/example/sums", "size": 100},
+        ]}
+        def download(url, _limit):
+            return f"{digest}  Public_ChannelForge_Setup.exe\n".encode() if url.endswith("sums") else installer
+        with mock.patch.object(app, "latest_release", return_value=release), mock.patch.object(app, "github_bytes", side_effect=download), mock.patch.object(app.sys, "platform", "win32"):
+            result = app.download_verified_update()
+        self.assertEqual(result["sha256"], digest)
+        self.assertTrue(result["can_launch"])
+        self.assertEqual(Path(result["path"]).read_bytes(), installer)
+
 
 if __name__ == "__main__":
     unittest.main()

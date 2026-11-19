@@ -8,7 +8,7 @@
 </head>
 <body>
   <header><div class="mark">CF</div><div><h1>Public ChannelForge</h1><p>Standalone live TV server for your Plex library.</p></div><span id="version"></span></header>
-  <nav><button data-view="watch" class="active">Watch TV</button><button data-view="channels">Channels</button><button data-view="assets">Asset Studio</button><button data-view="setup">Setup</button><button data-view="exports">Guide exports</button><button data-view="tools">Tools</button></nav>
+  <nav><button data-view="watch" class="active">Watch TV</button><button data-view="channels">Channels</button><button data-view="assets">Asset Studio</button><button data-view="setup">Setup</button><button data-view="exports">Guide exports</button><button data-view="tools">Tools</button><button data-view="updates">Updates</button></nav>
   <main>
     <section id="watch" class="view active">
       <div class="section-title"><div><h2>Live TV</h2><p>Choose a channel to watch directly in ChannelForge. No Plex DVR setup is needed.</p></div><button id="refresh-guide">Refresh guide</button></div>
@@ -64,6 +64,11 @@
       <h2>Community tools</h2><p>Drop a Python tool into the application’s <code>plugins</code> folder, restart, and it appears here. Only install tools you trust: they run locally with your account permissions.</p>
       <div id="tool-list" class="cards"></div>
       <p class="muted" id="data-dir"></p>
+    </section>
+    <section id="updates" class="view">
+      <h2>ChannelForge updates</h2><p>Securely check the official GitHub repository for a newer public release.</p>
+      <div class="panel update-panel"><div><span class="channel-number">INSTALLED VERSION</span><h3 id="installed-version">—</h3><p id="update-status" class="muted">Press Check for updates to contact GitHub.</p></div><div class="actions"><button id="check-update">Check for updates</button><button id="install-update" class="primary" hidden>Download and install</button></div><pre id="update-notes" hidden></pre></div>
+      <p class="muted">Installers are accepted only from the official <code>dethkorex/Public_ChannelForge</code> GitHub repository and must match the release’s SHA-256 checksum. Installation never begins without your confirmation.</p>
     </section>
   </main>
   <dialog id="channel-dialog"><form id="channel-form" method="dialog">

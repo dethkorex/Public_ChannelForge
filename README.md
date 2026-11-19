@@ -10,6 +10,8 @@ The built-in **Asset Studio** creates original channel logos, guide backgrounds,
 
 Every installation also includes 24 coordinated starter assets: logos, guide/player backgrounds, and corner bugs across Classic TV, Neon Night, Cinema, Kids Pop, Sports Arena, News Desk, Spooky, and Minimal themes. These are original neutral assets created for the public edition. Users can assign all three asset types while creating a channel, then replace them with generated or uploaded artwork later.
 
+The **Updates** screen checks the official GitHub Releases feed, compares versions, downloads the correct platform installer, and verifies its published SHA-256 checksum. Windows can open the verified setup wizard directly; Linux users receive the verified Debian, Arch/Omarchy, or portable package plus the appropriate install command. ChannelForge never silently installs an update without confirmation.
+
 This repository is the sanitized public edition. It contains **no private API credentials, Plex tokens, personal channel presets, media databases, logs, backups, or custom artwork** from the original ChannelForge installation.
 
 The interface and asset workflow remain part of ChannelForge. Only the original owner's private Fish Audio integration and personal channel assets/presets are excluded. This public edition does not contact Fish Audio or ship any Fish API code.

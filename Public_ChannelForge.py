@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
 import importlib.util
 import json
@@ -25,7 +26,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -59,6 +60,8 @@ DEFAULT_ASSET_THEMES = {
     "spooky": ("Spooky", "#c875ff", "#ff7b4d"),
     "minimal": ("Minimal", "#ffffff", "#6f7f95"),
 }
+GITHUB_REPOSITORY = "dethkorex/Public_ChannelForge"
+GITHUB_API_RELEASE = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 
 
 def atomic_json(path: Path, payload: object) -> None:
@@ -73,6 +76,87 @@ def load_json(path: Path, fallback: object) -> object:
         return json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return fallback
+
+
+def version_tuple(value: str) -> tuple[int, int, int]:
+    parts = value.strip().lower().lstrip("v").split(".")
+    numbers = []
+    for part in parts[:3]:
+        digits = "".join(char for char in part if char.isdigit())
+        numbers.append(int(digits or 0))
+    return tuple((numbers + [0, 0, 0])[:3])
+
+
+def github_bytes(url: str, limit: int = 100_000_000) -> bytes:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in {"api.github.com", "github.com", "objects.githubusercontent.com"}:
+        raise ValueError("The update URL was not an approved GitHub address.")
+    request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": f"{APP_NAME}/{VERSION}"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        size = int(response.headers.get("Content-Length", "0") or 0)
+        if size > limit:
+            raise ValueError("The update file was unexpectedly large.")
+        data = response.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("The update file exceeded the safety limit.")
+        return data
+
+
+def latest_release() -> dict:
+    try:
+        payload = json.loads(github_bytes(GITHUB_API_RELEASE, 2_000_000))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValueError("Could not check GitHub for updates.") from exc
+    tag = str(payload.get("tag_name", ""))
+    assets = [{"name": str(item.get("name", "")), "url": str(item.get("browser_download_url", "")), "size": int(item.get("size", 0) or 0)} for item in payload.get("assets", [])]
+    return {"current_version": VERSION, "latest_version": tag.lstrip("v"), "update_available": version_tuple(tag) > version_tuple(VERSION), "release_url": str(payload.get("html_url", "")), "published_at": str(payload.get("published_at", "")), "notes": str(payload.get("body", ""))[:4000], "assets": assets}
+
+
+def update_asset_name(release: dict) -> tuple[str, str]:
+    names = {item["name"] for item in release["assets"]}
+    version = release["latest_version"]
+    if sys.platform == "win32":
+        return "Public_ChannelForge_Setup.exe", "SHA256SUMS.txt"
+    if Path("/etc/arch-release").exists():
+        candidate = f"public-channelforge-{version}-1-any.pkg.tar.zst"
+    elif Path("/etc/debian_version").exists():
+        candidate = f"Public_ChannelForge-{version}-linux-all.deb"
+    else:
+        candidate = f"Public_ChannelForge-{version}-linux-x64.tar.gz"
+    if candidate not in names:
+        raise ValueError("The latest release does not contain an installer for this platform.")
+    return candidate, "SHA256SUMS-Linux.txt"
+
+
+def download_verified_update() -> dict:
+    release = latest_release()
+    if not release["update_available"]:
+        raise ValueError("Public ChannelForge is already up to date.")
+    asset_name, checksum_name = update_asset_name(release)
+    by_name = {item["name"]: item for item in release["assets"]}
+    if asset_name not in by_name or checksum_name not in by_name:
+        raise ValueError("The release is missing its installer or checksum file.")
+    checksum_text = github_bytes(by_name[checksum_name]["url"], 1_000_000).decode("utf-8", "replace")
+    expected = next((line.split()[0].lower() for line in checksum_text.splitlines() if line.strip().endswith(asset_name)), "")
+    if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+        raise ValueError("The release checksum could not be verified.")
+    data = github_bytes(by_name[asset_name]["url"], 150_000_000)
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected:
+        raise ValueError("The downloaded installer failed SHA-256 verification.")
+    update_dir = DATA_DIR / "updates"
+    update_dir.mkdir(parents=True, exist_ok=True)
+    destination = update_dir / asset_name
+    destination.write_bytes(data)
+    if sys.platform == "win32":
+        command = f'Run the verified installer: "{destination}"'
+    elif asset_name.endswith(".deb"):
+        command = f'sudo apt install "{destination}"'
+    elif asset_name.endswith(".pkg.tar.zst"):
+        command = f'sudo pacman -U "{destination}"'
+    else:
+        command = f'Extract "{destination}" and run install.sh'
+    return {"version": release["latest_version"], "asset": asset_name, "path": str(destination), "sha256": actual, "command": command, "can_launch": sys.platform == "win32"}
 
 
 def config(public: bool = False) -> dict:
@@ -622,6 +706,10 @@ class Handler(BaseHTTPRequestHandler):
                     slots = schedule_window(channel, moment, moment + timedelta(hours=6))
                     guide.append({"channel_id": channel["id"], "name": channel["name"], "number": channel["number"], "logo_asset_id": channel.get("logo_asset_id", ""), "programs": [{"title": slot["item"].get("title", "Untitled"), "year": slot["item"].get("year", ""), "type": slot["item"].get("type", "video"), "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat()} for slot in slots]})
                 self.send_json(200, {"generated_at": moment.isoformat(), "channels": guide})
+            elif parsed.path == "/api/update":
+                release = latest_release()
+                release.pop("assets", None)
+                self.send_json(200, release)
             elif parsed.path.startswith("/exports/"):
                 requested = Path(parsed.path).name
                 if requested not in {"guide.xml", "channels.m3u"}:
@@ -684,6 +772,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"asset": generate_asset(payload)})
             elif parsed.path == "/api/assets/upload":
                 self.send_json(200, {"asset": upload_asset(payload)})
+            elif parsed.path == "/api/update/download":
+                result = download_verified_update()
+                self.send_json(200, result)
+                if payload.get("launch") and result["can_launch"]:
+                    installer = result["path"]
+                    threading.Timer(0.8, lambda: subprocess.Popen([installer], cwd=str(Path(installer).parent))).start()
+                    threading.Timer(2.0, self.server.shutdown).start()
             elif parsed.path.startswith("/api/tools/"):
                 self.send_json(200, {"result": run_plugin(parsed.path.rsplit("/", 1)[-1], payload)})
             else:
