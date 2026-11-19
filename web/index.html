@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Public ChannelForge</title>
-  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css">
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css"><link rel="stylesheet" href="/plex.css">
 </head>
 <body>
   <header><div class="mark">CF</div><div><h1>Public ChannelForge</h1><p>Standalone live TV server for your Plex library.</p></div><span id="version"></span></header>
@@ -44,6 +44,7 @@
     <section id="setup" class="view">
       <h2>Connect Plex</h2><p>Your Plex URL and token stay on this computer. They are never bundled into exports.</p>
       <form id="setup-form" class="panel form-grid">
+        <div id="plex-profile" class="plex-profile wide"></div>
         <label>Plex server URL<input id="plex-url" required placeholder="http://192.168.1.20:32400?X-Plex-Token=..."></label>
         <label>Plex token<input id="plex-token" type="password" placeholder="Leave blank to keep the saved token"></label>
         <label>Guide length (hours)<input id="guide-hours" type="number" min="1" max="168" value="24"></label>

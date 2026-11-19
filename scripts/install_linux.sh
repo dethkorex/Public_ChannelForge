@@ -37,8 +37,11 @@ WantedBy=default.target
 EOF
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   systemctl --user daemon-reload
-  systemctl --user enable --now public-channelforge.service
-  echo "Background service enabled and started."
+  if systemctl --user enable --now public-channelforge.service; then
+    echo "Background service enabled and started."
+  else
+    echo "User service installed but could not start in this session. Start it with: systemctl --user enable --now public-channelforge"
+  fi
 else
   echo "User service installed. Start it with: systemctl --user enable --now public-channelforge"
 fi

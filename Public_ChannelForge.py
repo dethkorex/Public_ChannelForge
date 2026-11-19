@@ -25,7 +25,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -76,6 +76,7 @@ def config(public: bool = False) -> dict:
         "port": max(1024, min(65535, int(value.get("port", DEFAULT_PORT)))),
         "bind_host": str(value.get("bind_host", HOST)).strip() or HOST,
         "public_url": str(value.get("public_url", "")).strip().rstrip("/"),
+        "plex_profile": value.get("plex_profile", {}) if isinstance(value.get("plex_profile", {}), dict) else {},
     }
     if public:
         result["plex_token"] = ""
@@ -209,6 +210,35 @@ def plex_request(path: str, settings: dict | None = None) -> ET.Element:
         raise ValueError("Plex returned an unexpected response.") from exc
 
 
+def plex_binary(path: str) -> tuple[bytes, str]:
+    if not path.startswith("/") or path.startswith("//"):
+        raise ValueError("Invalid Plex image path.")
+    settings = config()
+    if not settings["plex_token"]:
+        raise ValueError("Enter a Plex token in Setup first.")
+    separator = "&" if "?" in path else "?"
+    url = settings["plex_url"] + path + separator + urllib.parse.urlencode({"X-Plex-Token": settings["plex_token"]})
+    request = urllib.request.Request(url, headers={"Accept": "image/*", "X-Plex-Product": APP_NAME})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = response.read(12_000_000)
+            content_type = response.headers.get_content_type()
+            if not content_type.startswith("image/"):
+                raise ValueError("Plex did not return an image.")
+            return data, content_type
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise ValueError("Could not load that Plex image.") from exc
+
+
+def plex_profile(root: ET.Element) -> dict:
+    return {
+        "server_name": root.get("friendlyName", "Plex Media Server"),
+        "username": root.get("myPlexUsername", ""),
+        "version": root.get("version", ""),
+        "signed_in": root.get("myPlexSigninState", "") == "ok" or bool(root.get("myPlexUsername")),
+    }
+
+
 def normalize_plex_connection(raw_url: str, supplied_token: str = "") -> tuple[str, str]:
     """Extract X-Plex-Token from a pasted Plex URL without retaining it in the URL."""
     raw_url = raw_url.strip()
@@ -233,7 +263,7 @@ def normalize_plex_connection(raw_url: str, supplied_token: str = "") -> tuple[s
 def plex_libraries() -> list[dict]:
     root = plex_request("/library/sections")
     return [
-        {"key": node.get("key", ""), "title": node.get("title", "Untitled"), "type": node.get("type", "unknown")}
+        {"key": node.get("key", ""), "title": node.get("title", "Untitled"), "type": node.get("type", "unknown"), "uuid": node.get("uuid", ""), "thumb": node.get("thumb", "")}
         for node in root.findall("Directory") if node.get("key")
     ]
 
@@ -254,6 +284,10 @@ def plex_items(section: str) -> list[dict]:
             "type": node.get("type", "video"),
             "duration_ms": int(node.get("duration", "1800000") or 1800000),
             "key": node.get("key", f"/library/metadata/{rating_key}"),
+            "thumb": node.get("thumb", ""),
+            "summary": node.get("summary", "")[:600],
+            "content_rating": node.get("contentRating", ""),
+            "rating": node.get("rating", ""),
         })
     return result
 
@@ -277,6 +311,8 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "year": str(item.get("year", ""))[:10], "type": str(item.get("type", "video"))[:30],
             "duration_ms": max(60000, min(86400000, int(item.get("duration_ms", 1800000)))),
             "key": str(item.get("key", f"/library/metadata/{item['id']}"))[:500],
+            "thumb": str(item.get("thumb", ""))[:500], "summary": str(item.get("summary", ""))[:600],
+            "content_rating": str(item.get("content_rating", ""))[:40], "rating": str(item.get("rating", ""))[:20],
         })
     if not normalized:
         raise ValueError("The selected titles were invalid.")
@@ -525,6 +561,10 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/plex/items":
                 section = urllib.parse.parse_qs(parsed.query).get("section", [""])[0]
                 self.send_json(200, {"items": plex_items(section)})
+            elif parsed.path == "/api/plex/image":
+                image_path = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
+                data, content_type = plex_binary(image_path)
+                self.send_bytes(200, data, content_type)
             elif parsed.path == "/api/guide":
                 moment = datetime.now(timezone.utc)
                 guide = []
@@ -554,7 +594,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
@@ -581,7 +621,8 @@ class Handler(BaseHTTPRequestHandler):
                     "bind_host": str(payload.get("bind_host", old["bind_host"])).strip() or HOST,
                     "public_url": str(payload.get("public_url", old["public_url"])).strip().rstrip("/"),
                 }
-                plex_request("/", updated)
+                root = plex_request("/", updated)
+                updated["plex_profile"] = plex_profile(root)
                 atomic_json(CONFIG_FILE, updated)
                 generate_exports()
                 self.send_json(200, {"ok": True, "config": config(True)})

@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 import http.client
+from unittest import mock
 from pathlib import Path
 
 os.environ["PUBLIC_CHANNELFORGE_HOME"] = tempfile.mkdtemp(prefix="public-channelforge-test-")
@@ -55,6 +56,32 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(url, "http://plex.local:32400?foo=bar")
         self.assertEqual(token, "secret-token")
         self.assertNotIn("secret-token", url)
+
+    def test_reads_safe_plex_profile_information(self):
+        root = app.ET.fromstring('<MediaContainer friendlyName="Living Room Plex" myPlexUsername="viewer" version="1.42.2" machineIdentifier="private-id" myPlexSigninState="ok"/>')
+        profile = app.plex_profile(root)
+        self.assertEqual(profile["server_name"], "Living Room Plex")
+        self.assertEqual(profile["username"], "viewer")
+        self.assertTrue(profile["signed_in"])
+        self.assertNotIn("machine_id", profile)
+
+    def test_plex_poster_proxy_keeps_token_server_side(self):
+        class Headers:
+            @staticmethod
+            def get_content_type(): return "image/jpeg"
+        class Response:
+            headers = Headers()
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            @staticmethod
+            def read(_limit): return b"poster-bytes"
+        with mock.patch.object(app.urllib.request, "urlopen", return_value=Response()) as request:
+            data, content_type = app.plex_binary("/library/metadata/9/thumb/123")
+        self.assertEqual(data, b"poster-bytes")
+        self.assertEqual(content_type, "image/jpeg")
+        requested_url = request.call_args.args[0].full_url
+        self.assertIn("X-Plex-Token=test", requested_url)
+        self.assertNotIn("X-Plex-Token", "/api/plex/image?path=%2Flibrary%2Fmetadata%2F9%2Fthumb%2F123")
 
     def test_channel_requires_media(self):
         with self.assertRaisesRegex(ValueError, "at least one"):
