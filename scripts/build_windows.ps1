@@ -3,9 +3,16 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 python -m pip install -r requirements.txt
-$ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
-if (-not $ffmpeg) { throw "FFmpeg is required to build ChannelForge. Install ffmpeg and run this script again." }
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_ChannelForge --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.Source);." Public_ChannelForge.py
+$ffmpegCandidates = @()
+if ($env:ChocolateyInstall) {
+    $ffmpegCandidates += Get-ChildItem (Join-Path $env:ChocolateyInstall "lib") -Recurse -Filter ffmpeg.exe -File -ErrorAction SilentlyContinue
+}
+$pathFfmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
+if ($pathFfmpeg) { $ffmpegCandidates += Get-Item $pathFfmpeg.Source }
+$ffmpeg = $ffmpegCandidates | Where-Object Length -gt 10000000 | Sort-Object Length -Descending | Select-Object -First 1
+if (-not $ffmpeg) { throw "The real FFmpeg binary was not found (a Chocolatey shim is not sufficient). Install ffmpeg and run this script again." }
+Write-Host "Bundling FFmpeg from $($ffmpeg.FullName) ($([math]::Round($ffmpeg.Length / 1MB, 1)) MB)"
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_ChannelForge --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.FullName);." Public_ChannelForge.py
 
 $payload = Join-Path $root "installer\payload"
 New-Item -ItemType Directory -Force -Path $payload | Out-Null
