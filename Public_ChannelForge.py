@@ -10,6 +10,7 @@ import importlib.util
 import json
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -26,7 +27,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -50,6 +51,7 @@ PLUGINS_DIR = DATA_DIR / "plugins"
 ASSETS_DIR = DATA_DIR / "assets"
 WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
 LOCK = threading.RLock()
+HLS_PROXY: dict[str, tuple[str, float]] = {}
 DEFAULT_ASSET_THEMES = {
     "classic": ("Classic TV", "#f4c95d", "#d66b4d"),
     "neon": ("Neon Night", "#42f5e9", "#9b5cff"),
@@ -663,12 +665,64 @@ def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
         "path": metadata_path,
         "mediaIndex": "0", "partIndex": "0", "protocol": "hls",
         "offset": f"{position['offset_ms'] / 1000:.3f}", "fastSeek": "1",
-        "directPlay": "1", "directStream": "1", "subtitleSize": "100",
+        # Force a browser-safe H.264/AAC rendition instead of exposing Linux Chrome
+        # to an original codec/container it may not support.
+        "directPlay": "0", "directStream": "0", "videoCodec": "h264", "audioCodec": "aac",
+        "videoQuality": "100", "videoResolution": "1920x1080", "maxVideoBitrate": "20000", "subtitleSize": "100",
         "audioBoost": "100", "location": "lan", "session": secrets.token_hex(12),
         "X-Plex-Token": settings["plex_token"], "X-Plex-Product": APP_NAME,
         "X-Plex-Version": VERSION, "X-Plex-Client-Identifier": "public-channelforge",
     }
     return settings["plex_url"] + "/video/:/transcode/universal/start.m3u8?" + urllib.parse.urlencode(parameters)
+
+
+def register_hls_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Plex returned an invalid stream URL.")
+    key = secrets.token_urlsafe(18)
+    with LOCK:
+        now = time.time()
+        for stale in [item for item, (_url, expires) in HLS_PROXY.items() if expires < now]:
+            HLS_PROXY.pop(stale, None)
+        HLS_PROXY[key] = (url, now + 7200)
+    return f"/hls-proxy/{key}"
+
+
+def rewrite_hls_manifest(data: bytes, base_url: str) -> bytes:
+    """Keep every HLS request same-origin so Linux browsers avoid Plex CORS failures."""
+    text = data.decode("utf-8-sig")
+    output = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            line = register_hls_url(urllib.parse.urljoin(base_url, stripped))
+        elif "URI=\"" in line:
+            line = re.sub(r'URI="([^"]+)"', lambda match: f'URI="{register_hls_url(urllib.parse.urljoin(base_url, match.group(1)))}"', line)
+        output.append(line)
+    return ("\n".join(output) + "\n").encode("utf-8")
+
+
+def fetch_plex_stream(url: str, range_header: str = "") -> tuple[bytes, str, str, int, str]:
+    headers = {"Accept": "*/*", "User-Agent": f"{APP_NAME}/{VERSION}"}
+    if range_header:
+        headers["Range"] = range_header
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            data = response.read(64 * 1024 * 1024 + 1)
+            if len(data) > 64 * 1024 * 1024:
+                raise ValueError("A Plex stream segment exceeded the safety limit.")
+            content_type = response.headers.get_content_type()
+            final_url = response.geturl()
+            status = getattr(response, "status", 200)
+            content_range = response.headers.get("Content-Range", "")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise ValueError("Plex could not produce a playable stream. Check that transcoding is enabled on the Plex server.") from exc
+    if data.lstrip().startswith(b"#EXTM3U") or "mpegurl" in content_type:
+        data = rewrite_hls_manifest(data, final_url)
+        content_type = "application/vnd.apple.mpegurl"
+    return data, content_type or "application/octet-stream", final_url, status, content_range
 
 
 def generate_exports(values: list[dict] | None = None) -> dict:
@@ -749,13 +803,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
 
-    def send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+    def send_bytes(self, status: int, body: bytes, content_type: str, extra_headers: dict[str, str] | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self' http: https:; media-src 'self' blob: http: https:")
+        for name, value in (extra_headers or {}).items():
+            if value:
+                self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -833,7 +890,16 @@ class Handler(BaseHTTPRequestHandler):
                     raise FileNotFoundError
                 if not config()["plex_token"]:
                     raise ValueError("Plex is not connected.")
-                self.redirect(plex_live_url(channel))
+                data, content_type, _url, status, content_range = fetch_plex_stream(plex_live_url(channel))
+                self.send_bytes(status, data, content_type, {"Content-Range": content_range, "Accept-Ranges": "bytes"})
+            elif parsed.path.startswith("/hls-proxy/"):
+                proxy_id = parsed.path.rsplit("/", 1)[-1]
+                with LOCK:
+                    target = HLS_PROXY.get(proxy_id)
+                if not target or target[1] < time.time():
+                    raise FileNotFoundError
+                data, content_type, _url, status, content_range = fetch_plex_stream(target[0], self.headers.get("Range", ""))
+                self.send_bytes(status, data, content_type, {"Content-Range": content_range, "Accept-Ranges": "bytes"})
             elif parsed.path.startswith("/user-assets/"):
                 filename = Path(parsed.path).name
                 match = next((item for item in asset_manifest() if item.get("filename") == filename), None)

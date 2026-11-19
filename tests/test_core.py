@@ -82,6 +82,19 @@ class CoreTests(unittest.TestCase):
         self.assertIn("/video/:/transcode/universal/start.m3u8?", url)
         self.assertIn("offset=300.000", url)
         self.assertIn("path=%2Flibrary%2Fmetadata%2F44", url)
+        self.assertIn("directPlay=0", url)
+        self.assertIn("videoCodec=h264", url)
+        self.assertIn("audioCodec=aac", url)
+
+    def test_hls_manifest_urls_are_rewritten_to_same_origin_proxy(self):
+        app.HLS_PROXY.clear()
+        manifest = b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\nsegment000.ts?token=private\n'
+        rewritten = app.rewrite_hls_manifest(manifest, "http://plex.local:32400/session/master.m3u8").decode()
+        self.assertNotIn("plex.local", rewritten)
+        self.assertNotIn("token=private", rewritten)
+        self.assertEqual(rewritten.count("/hls-proxy/"), 2)
+        registered = [url for url, _expires in app.HLS_PROXY.values()]
+        self.assertIn("http://plex.local:32400/session/segment000.ts?token=private", registered)
 
     def test_extracts_token_from_pasted_plex_url(self):
         url, token = app.normalize_plex_connection("http://plex.local:32400/web/index.html?foo=bar&X-Plex-Token=secret-token")
@@ -181,11 +194,12 @@ class CoreTests(unittest.TestCase):
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
             self.assertIn(f"/live/{channel['id']}.m3u8".encode(), response.read())
-            connection.request("GET", f"/live/{channel['id']}.m3u8")
-            response = connection.getresponse()
-            self.assertEqual(response.status, 302)
-            self.assertIn("/video/:/transcode/universal/start.m3u8", response.getheader("Location"))
-            response.read()
+            with mock.patch.object(app, "fetch_plex_stream", return_value=(b"#EXTM3U\n", "application/vnd.apple.mpegurl", "http://plex/master.m3u8", 200, "")):
+                connection.request("GET", f"/live/{channel['id']}.m3u8")
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Content-Type"), "application/vnd.apple.mpegurl")
+                self.assertEqual(response.read(), b"#EXTM3U\n")
         finally:
             connection.close()
             server.shutdown()

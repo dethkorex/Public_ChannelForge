@@ -4,6 +4,8 @@ Public ChannelForge is a standalone, local-first live TV server for Plex users. 
 
 The built-in **Watch TV** screen includes an embedded HLS player, channel rail, now-playing progress, and six-hour visual guide. Viewers click a channel and watch immediately in ChannelForge without adding it to Plex DVR.
 
+Playback is proxied through ChannelForge as same-origin HLS and requested from Plex as browser-compatible H.264/AAC. This avoids the cross-origin redirects and unsupported source codecs that can otherwise produce a black 0:00 player in Linux browsers.
+
 The **Get Started** screen walks new users through connecting Plex, creating a channel, testing it in the player, and copying the hosted stream URLs. Setup includes a separate connection test with a clear success or failure result.
 
 After connection, ChannelForge displays the Plex username, server name, and server version supplied by that server. Library browsing includes Plex posters, summaries, ratings, years, and media types. Poster bytes are proxied through ChannelForge so the Plex token is never placed in browser image URLs.

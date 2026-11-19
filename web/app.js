@@ -52,6 +52,10 @@ $("#test-plex").onclick=async()=>{const result=$("#setup-result");result.classNa
 $("#media-filter").addEventListener("input",event=>{const query=event.target.value.trim().toLowerCase();document.querySelectorAll("#media-list .media-item").forEach(item=>item.hidden=!item.dataset.title.includes(query))});
 $("#select-all-media").onclick=()=>document.querySelectorAll("#media-list .media-item:not([hidden]) input").forEach(input=>input.checked=true);
 $("#clear-media").onclick=()=>document.querySelectorAll("#media-list input").forEach(input=>input.checked=false);
+$("#tv-player").addEventListener("loadstart",()=>{$("#playback-status").className="muted";$("#playback-status").textContent="Connecting through ChannelForge…"});
+$("#tv-player").addEventListener("canplay",()=>{$("#playback-status").className="muted";$("#playback-status").textContent="Stream ready."});
+$("#tv-player").addEventListener("playing",()=>{$("#playback-status").className="muted";$("#playback-status").textContent="Playing live."});
+$("#tv-player").addEventListener("error",()=>{$("#playback-status").className="danger";$("#playback-status").textContent="Playback failed. Confirm Plex allows transcoding, then select the channel again."});
 $("#manual-plex-setup").onclick=()=>{clearInterval(plexSigninTimer);plexSigninTimer=0;$("#plex-onboarding").close();showView("setup");$("#plex-url").focus()};
 refresh().then(()=>{$("#installed-version").textContent=`v${state.version}`}).catch(e=>toast(e.message,true));
 
