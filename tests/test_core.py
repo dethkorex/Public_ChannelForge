@@ -57,6 +57,25 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(token, "secret-token")
         self.assertNotIn("secret-token", url)
 
+    def test_plex_signin_creates_official_pin_auth_url(self):
+        with mock.patch.object(app, "plex_tv_json", return_value={"id": 42, "code": "ABCD1234", "expiresIn": 600}), mock.patch.object(app, "persistent_client_identifier", return_value="stable-client"):
+            result = app.start_plex_signin()
+        self.assertEqual(result["pin_id"], 42)
+        self.assertEqual(result["expires_in"], 600)
+        self.assertTrue(result["auth_url"].startswith("https://app.plex.tv/auth#?"))
+        self.assertIn("clientID=stable-client", result["auth_url"])
+        self.assertIn("code=ABCD1234", result["auth_url"])
+
+    def test_completed_plex_signin_saves_discovered_server(self):
+        root = app.ET.fromstring('<MediaContainer friendlyName="Signed In Plex" myPlexUsername="viewer" version="1.2.3"/>')
+        with mock.patch.object(app, "plex_tv_json", return_value={"authToken": "new-token"}), mock.patch.object(app, "discover_plex_server", return_value="https://plex.example:32400"), mock.patch.object(app, "plex_request", return_value=root), mock.patch.object(app, "generate_exports"):
+            result = app.poll_plex_signin(42)
+        saved = app.config()
+        self.assertTrue(result["complete"])
+        self.assertEqual(saved["plex_token"], "new-token")
+        self.assertEqual(saved["plex_url"], "https://plex.example:32400")
+        self.assertEqual(saved["plex_profile"]["username"], "viewer")
+
     def test_reads_safe_plex_profile_information(self):
         root = app.ET.fromstring('<MediaContainer friendlyName="Living Room Plex" myPlexUsername="viewer" version="1.42.2" machineIdentifier="private-id" myPlexSigninState="ok"/>')
         profile = app.plex_profile(root)

@@ -26,7 +26,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -171,10 +171,12 @@ def config(public: bool = False) -> dict:
         "bind_host": str(value.get("bind_host", HOST)).strip() or HOST,
         "public_url": str(value.get("public_url", "")).strip().rstrip("/"),
         "plex_profile": value.get("plex_profile", {}) if isinstance(value.get("plex_profile", {}), dict) else {},
+        "client_identifier": str(value.get("client_identifier", "")) or secrets.token_hex(16),
     }
     if public:
         result["plex_token"] = ""
         result["token_saved"] = bool(value.get("plex_token"))
+        result.pop("client_identifier", None)
     return result
 
 
@@ -390,6 +392,79 @@ def normalize_plex_connection(raw_url: str, supplied_token: str = "") -> tuple[s
     if not parsed.netloc:
         raise ValueError("Enter a complete Plex URL such as http://127.0.0.1:32400.")
     return clean_url, token
+
+
+def persistent_client_identifier() -> str:
+    raw = load_json(CONFIG_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    identifier = str(raw.get("client_identifier", "")).strip()
+    if not identifier:
+        identifier = secrets.token_hex(16)
+        raw["client_identifier"] = identifier
+        atomic_json(CONFIG_FILE, raw)
+    return identifier
+
+
+def plex_tv_json(url: str, method: str = "GET") -> dict:
+    if not url.startswith("https://plex.tv/api/"):
+        raise ValueError("Invalid Plex authentication URL.")
+    identifier = persistent_client_identifier()
+    request = urllib.request.Request(url, data=b"" if method == "POST" else None, method=method, headers={"Accept": "application/json", "X-Plex-Product": APP_NAME, "X-Plex-Version": VERSION, "X-Plex-Client-Identifier": identifier})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValueError("Could not communicate with Plex sign-in.") from exc
+
+
+def start_plex_signin() -> dict:
+    pin = plex_tv_json("https://plex.tv/api/v2/pins?strong=true", "POST")
+    pin_id, code = int(pin.get("id", 0)), str(pin.get("code", ""))
+    if not pin_id or not code:
+        raise ValueError("Plex did not create a valid sign-in request.")
+    identifier = persistent_client_identifier()
+    fragment = urllib.parse.urlencode({"clientID": identifier, "code": code, "context[device][product]": APP_NAME})
+    return {"pin_id": pin_id, "auth_url": "https://app.plex.tv/auth#?" + fragment, "expires_in": int(pin.get("expiresIn", 900) or 900)}
+
+
+def discover_plex_server(token: str) -> str:
+    identifier = persistent_client_identifier()
+    url = "https://plex.tv/api/resources?" + urllib.parse.urlencode({"includeHttps": "1", "includeRelay": "1", "X-Plex-Token": token, "X-Plex-Client-Identifier": identifier})
+    request = urllib.request.Request(url, headers={"Accept": "application/xml", "X-Plex-Product": APP_NAME})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            root = ET.fromstring(response.read())
+    except (urllib.error.URLError, TimeoutError, ET.ParseError) as exc:
+        raise ValueError("Plex sign-in succeeded, but no server list could be loaded.") from exc
+    candidates = []
+    for device in root.findall("Device"):
+        provides = set(str(device.get("provides", "")).split(","))
+        if "server" not in provides:
+            continue
+        for connection in device.findall("Connection"):
+            uri = str(connection.get("uri", "")).rstrip("/")
+            if uri:
+                score = (connection.get("local") == "1") * 4 + (connection.get("relay") != "1") * 2 + uri.startswith("https://")
+                candidates.append((score, uri))
+    if not candidates:
+        raise ValueError("No accessible Plex Media Server was found for this account.")
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def poll_plex_signin(pin_id: int) -> dict:
+    pin = plex_tv_json(f"https://plex.tv/api/v2/pins/{int(pin_id)}")
+    token = str(pin.get("authToken", "") or "")
+    if not token:
+        return {"complete": False}
+    plex_url = discover_plex_server(token)
+    old = config()
+    updated = {**old, "plex_url": plex_url, "plex_token": token, "client_identifier": persistent_client_identifier()}
+    root = plex_request("/", updated)
+    updated["plex_profile"] = plex_profile(root)
+    atomic_json(CONFIG_FILE, updated)
+    generate_exports()
+    return {"complete": True, "config": config(True)}
 
 
 def plex_libraries() -> list[dict]:
@@ -710,6 +785,9 @@ class Handler(BaseHTTPRequestHandler):
                 release = latest_release()
                 release.pop("assets", None)
                 self.send_json(200, release)
+            elif parsed.path == "/api/plex/signin/status":
+                pin_id = int(urllib.parse.parse_qs(parsed.query).get("pin_id", ["0"])[0])
+                self.send_json(200, poll_plex_signin(pin_id))
             elif parsed.path.startswith("/exports/"):
                 requested = Path(parsed.path).name
                 if requested not in {"guide.xml", "channels.m3u"}:
@@ -732,7 +810,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
@@ -764,6 +842,8 @@ class Handler(BaseHTTPRequestHandler):
                 atomic_json(CONFIG_FILE, updated)
                 generate_exports()
                 self.send_json(200, {"ok": True, "config": config(True)})
+            elif parsed.path == "/api/plex/signin/start":
+                self.send_json(200, start_plex_signin())
             elif parsed.path == "/api/channels":
                 self.send_json(200, {"channel": save_channel(payload)})
             elif parsed.path == "/api/exports":
@@ -820,6 +900,8 @@ def ensure_files() -> None:
         shutil.copy2(bundled, example)
     if not CONFIG_FILE.exists():
         atomic_json(CONFIG_FILE, config())
+    else:
+        persistent_client_identifier()
     if not CHANNELS_FILE.exists():
         atomic_json(CHANNELS_FILE, [])
     else:

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Public ChannelForge</title>
-  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css"><link rel="stylesheet" href="/plex.css"><link rel="stylesheet" href="/overlays.css">
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css"><link rel="stylesheet" href="/plex.css"><link rel="stylesheet" href="/overlays.css"><link rel="stylesheet" href="/onboarding.css">
 </head>
 <body>
   <header><div class="mark">CF</div><div><h1>Public ChannelForge</h1><p>Standalone live TV server for your Plex library.</p></div><span id="version"></span></header>
@@ -71,6 +71,7 @@
       <p class="muted">Installers are accepted only from the official <code>dethkorex/Public_ChannelForge</code> GitHub repository and must match the release’s SHA-256 checksum. Installation never begins without your confirmation.</p>
     </section>
   </main>
+  <dialog id="plex-onboarding" class="onboarding-dialog"><div class="onboarding-brand"><div class="mark">CF</div><div><h2>Connect Plex to continue</h2><p>ChannelForge needs access to your Plex libraries before channels can be created or watched.</p></div></div><button id="plex-signin" class="primary plex-signin">Sign in with Plex</button><p id="plex-signin-status" class="muted">Authentication opens securely on plex.tv. ChannelForge never receives your password.</p><button id="manual-plex-setup">Use a Plex URL and token instead</button></dialog>
   <dialog id="channel-dialog"><form id="channel-form" method="dialog">
     <div class="section-title"><h2 id="dialog-title">Create channel</h2><button type="button" class="icon" id="close-dialog">×</button></div>
     <input id="channel-id" type="hidden">

@@ -21,7 +21,7 @@ The interface and asset workflow remain part of ChannelForge. Only the original 
 1. Download `Public_ChannelForge_Setup.exe` from the latest GitHub Release.
 2. Run it and choose the install folder, Desktop shortcut, and optional startup shortcut.
 3. Public ChannelForge starts its background TV server and opens at `http://127.0.0.1:8787`.
-4. Open **Setup**, enter your Plex server URL and token, and select **Test and save**.
+4. On first launch, select **Sign in with Plex** and approve ChannelForge in the official Plex window. ChannelForge discovers and configures your server automatically.
 5. Return to **Channels**, create a channel, choose a Plex library, and select titles.
 6. Open **Guide exports** to copy the hosted XMLTV and M3U URLs into your DVR, tuner client, or IPTV player.
 
@@ -91,6 +91,8 @@ Wayland compositors used by Omarchy do not need special configuration because th
 
 ## Plex setup details
 
+- First launch requires a Plex connection before channels can be created. **Sign in with Plex** uses Plex's official PIN authorization page, never asks ChannelForge for your password, automatically receives the account token after approval, and discovers the best available Plex Media Server connection.
+- Manual setup remains available from the onboarding screen for unusual network layouts or servers that Plex discovery cannot reach.
 - Use the URL that is reachable from the same computer, such as `http://127.0.0.1:32400` or `http://192.168.1.20:32400`.
 - To configure Plex automatically: in Plex Web, open a media item, select **Get Info** → **View XML**, copy the complete URL, and paste it into ChannelForge. The app extracts `X-Plex-Token`, securely stores it locally, and removes it from the visible server URL. Manual token entry remains available.
 - The token is written only to the current user's configuration directory. It is never sent anywhere except the configured Plex server.
