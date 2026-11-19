@@ -4,7 +4,7 @@ Public ChannelForge is a standalone, local-first live TV server for Plex users. 
 
 The built-in **Watch TV** screen includes an embedded HLS player, channel rail, now-playing progress, and six-hour visual guide. Viewers click a channel and watch immediately in ChannelForge without adding it to Plex DVR.
 
-Playback is proxied through ChannelForge as same-origin HLS and requested from Plex as browser-compatible H.264/AAC. This avoids the cross-origin redirects and unsupported source codecs that can otherwise produce a black 0:00 player in Linux browsers.
+Playback uses an Ersatz-style local FFmpeg pipeline: ChannelForge reads the authenticated Plex media part, converts it to browser-compatible H.264/AAC HLS, and serves the playlist and segments from its own origin. Playback therefore does not depend on Plex accepting ChannelForge as a transcoder client, and avoids the cross-origin redirects and unsupported source codecs that can otherwise produce a black 0:00 player in Linux browsers.
 
 The **Get Started** screen walks new users through connecting Plex, creating a channel, testing it in the player, and copying the hosted stream URLs. Setup includes a separate connection test with a clear success or failure result.
 
@@ -35,7 +35,7 @@ Windows may show a SmartScreen warning because community builds are not code-sig
 
 ## Linux, Arch Linux, and Omarchy
 
-Requirements: Python 3.10 or newer. No pip packages are required at runtime.
+Requirements: Python 3.10 or newer and FFmpeg. Debian and Arch packages install FFmpeg as a package dependency; the Windows installer bundles it. Portable Linux installs show the exact FFmpeg package command when it is missing.
 
 ### Debian, Ubuntu, Mint, and similar distributions
 
@@ -108,7 +108,7 @@ Wayland compositors used by Omarchy do not need special configuration because th
 
 ChannelForge owns the channel clock and guide. Every channel has a stable schedule anchor; restarting the application does not reset the lineup to its first title. The XMLTV includes current and upcoming programs based on Plex duration metadata. The M3U points to ChannelForge's `/live/<channel>.m3u8` URLs. When a player opens one, ChannelForge resolves the current program and offset, then creates a Plex HLS session for that exact live position.
 
-Plex remains the media source and transcoder, but ErsatzTV and its database/server are no longer involved. ChannelForge hosts the guide, playlist, channel clock, web manager, artwork, and live entry points.
+Plex remains the authenticated media source, but ChannelForge performs browser-compatible live transcoding locally with FFmpeg. ErsatzTV and its database/server are not involved. ChannelForge hosts the guide, playlist, channel clock, web manager, artwork, local encoder, and live entry points.
 
 ## Channel playback modes
 

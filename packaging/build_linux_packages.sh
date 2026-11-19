@@ -26,7 +26,7 @@ Version: $VERSION
 Section: video
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.10)
+Depends: python3 (>= 3.10), ffmpeg
 Maintainer: Public ChannelForge contributors
 Description: Local-first Plex channel guide builder
  Build personal channel rotations and export XMLTV and M3U guides.
@@ -77,6 +77,7 @@ size = $(du -sb "$ARCH" | cut -f1)
 arch = any
 license = MIT
 depend = python>=3.10
+depend = ffmpeg
 EOF
 tar --zstd -C "$ARCH" -cf "$OUT/public-channelforge-${VERSION}-1-any.pkg.tar.zst" .PKGINFO opt usr
 

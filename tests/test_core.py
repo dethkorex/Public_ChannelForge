@@ -66,13 +66,14 @@ class CoreTests(unittest.TestCase):
 
     def test_tv_library_returns_playable_episodes(self):
         libraries = [{"key": "2", "title": "TV", "type": "show"}]
-        root = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentTitle="Example Show" parentIndex="1" index="1" duration="1800000" key="/library/metadata/99"/></MediaContainer>')
+        root = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentTitle="Example Show" parentIndex="1" index="1" duration="1800000" key="/library/metadata/99"><Media container="mkv" videoCodec="hevc" audioCodec="aac"><Part key="/library/parts/99/file.mkv"/></Media></Video></MediaContainer>')
         with mock.patch.object(app, "plex_libraries", return_value=libraries), mock.patch.object(app, "plex_request", return_value=root) as request:
             items = app.plex_items("2")
         request.assert_called_once_with("/library/sections/2/all?type=4")
         self.assertEqual(items[0]["key"], "/library/metadata/99")
         self.assertEqual(items[0]["series"], "Example Show")
         self.assertIn("S01E01", items[0]["title"])
+        self.assertEqual(items[0]["part_key"], "/library/parts/99/file.mkv")
 
     def test_live_url_uses_plex_hls_at_current_offset(self):
         channel = app.clean_channel({"name": "Live", "number": "3", "schedule_anchor": "2026-01-01T00:00:00+00:00", "items": [
@@ -200,12 +201,12 @@ class CoreTests(unittest.TestCase):
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
             self.assertIn(f"/live/{channel['id']}.m3u8".encode(), response.read())
-            with mock.patch.object(app, "fetch_plex_stream", return_value=(b"#EXTM3U\n", "application/vnd.apple.mpegurl", "http://plex/master.m3u8", 200, "")):
+            with mock.patch.object(app, "start_ffmpeg_session", return_value="local-session"):
                 connection.request("GET", f"/live/{channel['id']}.m3u8")
                 response = connection.getresponse()
-                self.assertEqual(response.status, 200)
-                self.assertEqual(response.getheader("Content-Type"), "application/vnd.apple.mpegurl")
-                self.assertEqual(response.read(), b"#EXTM3U\n")
+                self.assertEqual(response.status, 302)
+                self.assertEqual(response.getheader("Location"), "/ffmpeg-stream/local-session/index.m3u8")
+                response.read()
         finally:
             connection.close()
             server.shutdown()

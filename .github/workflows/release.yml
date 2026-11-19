@@ -30,6 +30,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install FFmpeg
+        run: choco install ffmpeg -y --no-progress
       - shell: powershell
         run: ./scripts/build_windows.ps1
       - shell: powershell
@@ -50,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install packaging tools
-        run: sudo apt-get update && sudo apt-get install -y zstd
+        run: sudo apt-get update && sudo apt-get install -y zstd ffmpeg
       - name: Build Linux, Debian, Arch and Omarchy packages
         run: |
           chmod +x packaging/build_linux_packages.sh scripts/install_linux.sh scripts/uninstall_linux.sh

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import base64
 import hashlib
 import html
@@ -27,7 +28,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.6.2"
+VERSION = "2.7.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -54,6 +55,8 @@ LOCK = threading.RLock()
 HLS_PROXY: dict[str, tuple[str, float]] = {}
 UPDATE_JOBS: dict[str, dict] = {}
 PLAYBACK_ERRORS: dict[str, str] = {}
+FFMPEG_SESSIONS: dict[str, dict] = {}
+STREAM_DIR = DATA_DIR / "streams"
 DEFAULT_ASSET_THEMES = {
     "classic": ("Classic TV", "#f4c95d", "#d66b4d"),
     "neon": ("Neon Night", "#42f5e9", "#9b5cff"),
@@ -551,6 +554,8 @@ def plex_items(section: str) -> list[dict]:
         rating_key = node.get("ratingKey")
         if not rating_key:
             continue
+        media_node = node.find("Media")
+        part_node = node.find("./Media/Part")
         result.append({
             "id": rating_key,
             "title": (f'{node.get("grandparentTitle", "")} · S{int(node.get("parentIndex", "0") or 0):02d}E{int(node.get("index", "0") or 0):02d} · {node.get("title", "Untitled")}' if node.get("type") == "episode" else node.get("title", "Untitled")),
@@ -565,6 +570,10 @@ def plex_items(section: str) -> list[dict]:
             "series": node.get("grandparentTitle", ""),
             "season": int(node.get("parentIndex", "0") or 0),
             "episode": int(node.get("index", "0") or 0),
+            "part_key": part_node.get("key", "") if part_node is not None else "",
+            "container": media_node.get("container", "") if media_node is not None else "",
+            "video_codec": media_node.get("videoCodec", "") if media_node is not None else "",
+            "audio_codec": media_node.get("audioCodec", "") if media_node is not None else "",
         })
     return result
 
@@ -592,6 +601,8 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "content_rating": str(item.get("content_rating", ""))[:40], "rating": str(item.get("rating", ""))[:20],
             "series": str(item.get("series", ""))[:200],
             "season": max(0, int(item.get("season", 0) or 0)), "episode": max(0, int(item.get("episode", 0) or 0)),
+            "part_key": str(item.get("part_key", ""))[:500], "container": str(item.get("container", ""))[:30],
+            "video_codec": str(item.get("video_codec", ""))[:30], "audio_codec": str(item.get("audio_codec", ""))[:30],
         })
     if not normalized:
         raise ValueError("The selected titles were invalid.")
@@ -737,6 +748,86 @@ def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
         "X-Plex-Client-Profile-Extra": "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
     }
     return settings["plex_url"] + "/video/:/transcode/universal/start.m3u8?" + urllib.parse.urlencode(parameters)
+
+
+def ffmpeg_path() -> str:
+    bundled = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
+    found = str(bundled) if bundled.is_file() else shutil.which("ffmpeg")
+    if not found:
+        raise ValueError("FFmpeg is required for standalone playback but was not found. Reinstall ChannelForge using the latest package.")
+    return found
+
+
+def plex_part_key(item: dict) -> str:
+    key = str(item.get("part_key", ""))
+    if key.startswith("/library/parts/"):
+        return key
+    root = plex_request(str(item.get("key") or f'/library/metadata/{item["id"]}'))
+    part = root.find(".//Part")
+    key = part.get("key", "") if part is not None else ""
+    if not key.startswith("/library/parts/"):
+        raise ValueError("Plex did not provide a playable media part for this title.")
+    return key
+
+
+def start_ffmpeg_session(channel: dict) -> str:
+    """Create an Ersatz-style local HLS encoder fed by Plex's authenticated media file."""
+    position = schedule_position(channel)
+    item = position["item"]
+    identity = hashlib.sha256(f'{channel["id"]}:{item["id"]}:{position["start"].isoformat()}'.encode()).hexdigest()[:20]
+    with LOCK:
+        existing = FFMPEG_SESSIONS.get(identity)
+        if existing and existing["process"].poll() is None and (existing["directory"] / "index.m3u8").exists():
+            return identity
+        for session_id, session in list(FFMPEG_SESSIONS.items()):
+            if session.get("channel_id") == channel["id"]:
+                if session["process"].poll() is None:
+                    session["process"].terminate()
+                FFMPEG_SESSIONS.pop(session_id, None)
+    settings = config()
+    part_url = settings["plex_url"] + plex_part_key(item)
+    separator = "&" if "?" in part_url else "?"
+    part_url += separator + urllib.parse.urlencode({"X-Plex-Token": settings["plex_token"]})
+    directory = STREAM_DIR / identity
+    directory.mkdir(parents=True, exist_ok=True)
+    for old in directory.glob("*"):
+        old.unlink(missing_ok=True)
+    remaining = max(30, int((position["stop"] - datetime.now(timezone.utc)).total_seconds()))
+    command = [
+        ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin", "-re",
+        "-ss", f'{position["offset_ms"] / 1000:.3f}', "-i", part_url, "-t", str(remaining),
+        "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast",
+        "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-ar", "48000",
+        "-f", "hls", "-hls_time", "4", "-hls_list_size", "8",
+        "-hls_flags", "delete_segments+append_list+omit_endlist+independent_segments",
+        "-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8"),
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=0x08000000 if sys.platform == "win32" else 0)
+    with LOCK:
+        FFMPEG_SESSIONS[identity] = {"process": process, "directory": directory, "channel_id": channel["id"], "created": time.time()}
+    deadline = time.time() + 25
+    playlist = directory / "index.m3u8"
+    while time.time() < deadline:
+        if playlist.exists() and playlist.stat().st_size:
+            return identity
+        if process.poll() is not None:
+            error = (process.stderr.read(4096) if process.stderr else b"").decode("utf-8", "replace").strip()
+            raise ValueError(f"Local FFmpeg playback failed: {error or 'the media could not be decoded.'}")
+        time.sleep(0.2)
+    process.terminate()
+    raise ValueError("Local FFmpeg playback did not start within 25 seconds.")
+
+
+def stop_ffmpeg_sessions() -> None:
+    with LOCK:
+        sessions = list(FFMPEG_SESSIONS.values())
+        FFMPEG_SESSIONS.clear()
+    for session in sessions:
+        if session["process"].poll() is None:
+            session["process"].terminate()
+
+
+atexit.register(stop_ffmpeg_sessions)
 
 
 def register_hls_url(url: str) -> str:
@@ -971,14 +1062,26 @@ class Handler(BaseHTTPRequestHandler):
                 if not config()["plex_token"]:
                     raise ValueError("Plex is not connected.")
                 try:
-                    data, content_type, _url, status, content_range = fetch_plex_stream(plex_live_url(channel))
+                    session_id = start_ffmpeg_session(channel)
                     with LOCK:
                         PLAYBACK_ERRORS.pop(channel_id, None)
                 except Exception as exc:
                     with LOCK:
                         PLAYBACK_ERRORS[channel_id] = str(exc)
                     raise
-                self.send_bytes(status, data, content_type, {"Content-Range": content_range, "Accept-Ranges": "bytes"})
+                self.redirect(f"/ffmpeg-stream/{session_id}/index.m3u8")
+            elif parsed.path.startswith("/ffmpeg-stream/"):
+                parts = parsed.path.strip("/").split("/")
+                if len(parts) != 3 or not re.fullmatch(r"(?:index\.m3u8|segment\d+\.ts)", parts[2]):
+                    raise FileNotFoundError
+                with LOCK:
+                    session = FFMPEG_SESSIONS.get(parts[1])
+                if not session:
+                    raise FileNotFoundError
+                path = session["directory"] / parts[2]
+                if not path.is_file():
+                    raise FileNotFoundError
+                self.send_bytes(200, path.read_bytes(), "application/vnd.apple.mpegurl" if path.suffix == ".m3u8" else "video/mp2t")
             elif parsed.path.startswith("/hls-proxy/"):
                 proxy_id = parsed.path.rsplit("/", 1)[-1]
                 with LOCK:

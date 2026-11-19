@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "FFmpeg is required for standalone playback."
+  echo "Arch/Omarchy: sudo pacman -S --needed ffmpeg"
+  echo "Debian/Ubuntu: sudo apt install ffmpeg"
+  exit 1
+fi
+
 APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/public-channelforge/app"
 BIN_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"

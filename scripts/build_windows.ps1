@@ -3,7 +3,9 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 python -m pip install -r requirements.txt
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_ChannelForge --add-data "web;web" --add-data "plugins;plugins" Public_ChannelForge.py
+$ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
+if (-not $ffmpeg) { throw "FFmpeg is required to build ChannelForge. Install ffmpeg and run this script again." }
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_ChannelForge --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.Source);." Public_ChannelForge.py
 
 $payload = Join-Path $root "installer\payload"
 New-Item -ItemType Directory -Force -Path $payload | Out-Null
