@@ -1,0 +1,421 @@
+"""Public_ChannelForge: local-first Plex channel guide builder."""
+
+from __future__ import annotations
+
+import argparse
+import html
+import importlib.util
+import json
+import mimetypes
+import os
+import secrets
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+APP_NAME = "Public_ChannelForge"
+VERSION = "1.0.0"
+HOST = "127.0.0.1"
+DEFAULT_PORT = 8787
+
+
+def app_dir() -> Path:
+    override = os.environ.get("PUBLIC_CHANNELFORGE_HOME", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    if sys.platform == "win32":
+        root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        return root / APP_NAME
+    root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return root / "public-channelforge"
+
+
+DATA_DIR = app_dir()
+CONFIG_FILE = DATA_DIR / "config.json"
+CHANNELS_FILE = DATA_DIR / "channels.json"
+EXPORT_DIR = DATA_DIR / "exports"
+PLUGINS_DIR = DATA_DIR / "plugins"
+WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
+LOCK = threading.RLock()
+
+
+def atomic_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def load_json(path: Path, fallback: object) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return fallback
+
+
+def config(public: bool = False) -> dict:
+    value = load_json(CONFIG_FILE, {})
+    if not isinstance(value, dict):
+        value = {}
+    result = {
+        "plex_url": str(value.get("plex_url", "http://127.0.0.1:32400")).rstrip("/"),
+        "plex_token": str(value.get("plex_token", "")),
+        "guide_hours": max(1, min(168, int(value.get("guide_hours", 24)))),
+        "port": max(1024, min(65535, int(value.get("port", DEFAULT_PORT)))),
+    }
+    if public:
+        result["plex_token"] = ""
+        result["token_saved"] = bool(value.get("plex_token"))
+    return result
+
+
+def channels() -> list[dict]:
+    value = load_json(CHANNELS_FILE, [])
+    return value if isinstance(value, list) else []
+
+
+def plex_request(path: str, settings: dict | None = None) -> ET.Element:
+    settings = settings or config()
+    if not settings["plex_token"]:
+        raise ValueError("Enter a Plex token in Setup first.")
+    url = settings["plex_url"] + path
+    separator = "&" if "?" in url else "?"
+    url += separator + urllib.parse.urlencode({"X-Plex-Token": settings["plex_token"]})
+    request = urllib.request.Request(url, headers={"Accept": "application/xml", "X-Plex-Product": APP_NAME})
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            return ET.fromstring(response.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise ValueError("Plex rejected the token. Check the server URL and token.") from exc
+        raise ValueError(f"Plex returned HTTP {exc.code}.") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise ValueError(f"Could not reach Plex at {settings['plex_url']}.") from exc
+    except ET.ParseError as exc:
+        raise ValueError("Plex returned an unexpected response.") from exc
+
+
+def plex_libraries() -> list[dict]:
+    root = plex_request("/library/sections")
+    return [
+        {"key": node.get("key", ""), "title": node.get("title", "Untitled"), "type": node.get("type", "unknown")}
+        for node in root.findall("Directory") if node.get("key")
+    ]
+
+
+def plex_items(section: str) -> list[dict]:
+    if not section.isdigit():
+        raise ValueError("Invalid Plex library section.")
+    root = plex_request(f"/library/sections/{section}/all")
+    result = []
+    for node in list(root):
+        rating_key = node.get("ratingKey")
+        if not rating_key:
+            continue
+        result.append({
+            "id": rating_key,
+            "title": node.get("title", "Untitled"),
+            "year": node.get("year", ""),
+            "type": node.get("type", "video"),
+            "duration_ms": int(node.get("duration", "1800000") or 1800000),
+        })
+    return result
+
+
+def clean_channel(payload: dict, existing_id: str = "") -> dict:
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise ValueError("Channel name is required.")
+    number = str(payload.get("number", "")).strip()
+    if not number:
+        raise ValueError("Channel number is required.")
+    items = payload.get("items", [])
+    if not isinstance(items, list) or not items:
+        raise ValueError("Select at least one Plex title.")
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict) or not str(item.get("id", "")).strip():
+            continue
+        normalized.append({
+            "id": str(item["id"]), "title": str(item.get("title", "Untitled"))[:300],
+            "year": str(item.get("year", ""))[:10], "type": str(item.get("type", "video"))[:30],
+            "duration_ms": max(60000, min(86400000, int(item.get("duration_ms", 1800000)))),
+        })
+    if not normalized:
+        raise ValueError("The selected titles were invalid.")
+    return {
+        "id": existing_id or secrets.token_hex(8), "name": name[:100], "number": number[:12],
+        "section": str(payload.get("section", ""))[:20], "items": normalized,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def save_channel(payload: dict, channel_id: str = "") -> dict:
+    with LOCK:
+        values = channels()
+        item = clean_channel(payload, channel_id)
+        if channel_id:
+            index = next((i for i, value in enumerate(values) if value.get("id") == channel_id), None)
+            if index is None:
+                raise ValueError("Channel not found.")
+            values[index] = item
+        else:
+            values.append(item)
+        atomic_json(CHANNELS_FILE, values)
+        generate_exports(values)
+        return item
+
+
+def delete_channel(channel_id: str) -> None:
+    with LOCK:
+        values = channels()
+        updated = [item for item in values if item.get("id") != channel_id]
+        if len(values) == len(updated):
+            raise ValueError("Channel not found.")
+        atomic_json(CHANNELS_FILE, updated)
+        generate_exports(updated)
+
+
+def xmltv_time(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S +0000")
+
+
+def generate_exports(values: list[dict] | None = None) -> dict:
+    values = values if values is not None else channels()
+    settings = config()
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    tv = ET.Element("tv", {"generator-info-name": APP_NAME})
+    for channel in values:
+        node = ET.SubElement(tv, "channel", {"id": f"public-channelforge.{channel['id']}"})
+        ET.SubElement(node, "display-name").text = channel["name"]
+        ET.SubElement(node, "display-name").text = channel["number"]
+    start = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    end = start + timedelta(hours=settings["guide_hours"])
+    for channel in values:
+        cursor, index = start, 0
+        items = channel.get("items", [])
+        while items and cursor < end:
+            item = items[index % len(items)]
+            duration = timedelta(milliseconds=max(60000, int(item.get("duration_ms", 1800000))))
+            stop = min(cursor + duration, end)
+            program = ET.SubElement(tv, "programme", {
+                "start": xmltv_time(cursor), "stop": xmltv_time(stop),
+                "channel": f"public-channelforge.{channel['id']}",
+            })
+            ET.SubElement(program, "title", {"lang": "en"}).text = item.get("title", "Untitled")
+            if item.get("year"):
+                ET.SubElement(program, "date").text = str(item["year"])
+            ET.SubElement(program, "category", {"lang": "en"}).text = item.get("type", "video").title()
+            cursor, index = stop, index + 1
+    ET.indent(tv)
+    guide_path = EXPORT_DIR / "guide.xml"
+    ET.ElementTree(tv).write(guide_path, encoding="utf-8", xml_declaration=True)
+    base = f"http://{HOST}:{settings['port']}"
+    lines = ["#EXTM3U url-tvg=\"" + base + "/exports/guide.xml\""]
+    for channel in values:
+        stream = settings["plex_url"] + "/web/index.html#!/server/" + urllib.parse.quote(channel["id"])
+        lines.extend([
+            f'#EXTINF:-1 tvg-id="public-channelforge.{channel["id"]}" tvg-chno="{html.escape(channel["number"])}",{channel["name"]}',
+            stream,
+        ])
+    playlist_path = EXPORT_DIR / "channels.m3u"
+    playlist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"guide": str(guide_path), "playlist": str(playlist_path), "channels": len(values)}
+
+
+def plugin_tools() -> list[dict]:
+    PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
+    tools = []
+    for path in sorted(PLUGINS_DIR.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(f"public_channelforge_plugin_{path.stem}", path)
+            module = importlib.util.module_from_spec(spec)
+            assert spec and spec.loader
+            spec.loader.exec_module(module)
+            definition = module.describe()
+            tools.append({"id": path.stem, "name": str(definition["name"]), "description": str(definition.get("description", ""))})
+        except Exception as exc:
+            tools.append({"id": path.stem, "name": path.stem, "description": f"Could not load: {exc}", "disabled": True})
+    return tools
+
+
+def run_plugin(tool_id: str, payload: dict) -> object:
+    if not tool_id.replace("_", "").replace("-", "").isalnum():
+        raise ValueError("Invalid tool name.")
+    path = PLUGINS_DIR / f"{tool_id}.py"
+    if not path.is_file():
+        raise ValueError("Tool not found.")
+    spec = importlib.util.spec_from_file_location(f"public_channelforge_plugin_{tool_id}", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module.run(payload, {"data_dir": str(DATA_DIR), "channels": channels()})
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = f"{APP_NAME}/{VERSION}"
+
+    def log_message(self, format: str, *args: object) -> None:
+        print(f"[{self.log_date_time_string()}] {format % args}")
+
+    def send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_json(self, status: int, payload: object) -> None:
+        self.send_bytes(status, json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8")
+
+    def body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length > 5_000_000:
+            raise ValueError("Request is too large.")
+        value = json.loads(self.rfile.read(length) or b"{}")
+        if not isinstance(value, dict):
+            raise ValueError("Expected a JSON object.")
+        return value
+
+    def do_GET(self) -> None:
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/api/status":
+                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": channels(), "tools": plugin_tools(), "data_dir": str(DATA_DIR)})
+            elif parsed.path == "/api/plex/libraries":
+                self.send_json(200, {"libraries": plex_libraries()})
+            elif parsed.path == "/api/plex/items":
+                section = urllib.parse.parse_qs(parsed.query).get("section", [""])[0]
+                self.send_json(200, {"items": plex_items(section)})
+            elif parsed.path.startswith("/exports/"):
+                requested = Path(parsed.path).name
+                if requested not in {"guide.xml", "channels.m3u"}:
+                    raise FileNotFoundError
+                path = EXPORT_DIR / requested
+                if not path.exists():
+                    generate_exports()
+                self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css"):
+                name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
+                path = WEB_DIR / name
+                self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
+            else:
+                self.send_json(404, {"error": "Not found"})
+        except FileNotFoundError:
+            self.send_json(404, {"error": "Not found"})
+        except Exception as exc:
+            self.send_json(400, {"error": str(exc)})
+
+    def do_POST(self) -> None:
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            payload = self.body()
+            if parsed.path == "/api/setup":
+                old = config()
+                token = str(payload.get("plex_token", "")).strip() or old["plex_token"]
+                updated = {
+                    "plex_url": str(payload.get("plex_url", old["plex_url"])).strip().rstrip("/"),
+                    "plex_token": token,
+                    "guide_hours": max(1, min(168, int(payload.get("guide_hours", old["guide_hours"])))),
+                    "port": old["port"],
+                }
+                plex_request("/", updated)
+                atomic_json(CONFIG_FILE, updated)
+                generate_exports()
+                self.send_json(200, {"ok": True, "config": config(True)})
+            elif parsed.path == "/api/channels":
+                self.send_json(200, {"channel": save_channel(payload)})
+            elif parsed.path == "/api/exports":
+                self.send_json(200, generate_exports())
+            elif parsed.path.startswith("/api/tools/"):
+                self.send_json(200, {"result": run_plugin(parsed.path.rsplit("/", 1)[-1], payload)})
+            else:
+                self.send_json(404, {"error": "Not found"})
+        except Exception as exc:
+            self.send_json(400, {"error": str(exc)})
+
+    def do_PUT(self) -> None:
+        try:
+            if not self.path.startswith("/api/channels/"):
+                return self.send_json(404, {"error": "Not found"})
+            channel_id = self.path.rsplit("/", 1)[-1]
+            self.send_json(200, {"channel": save_channel(self.body(), channel_id)})
+        except Exception as exc:
+            self.send_json(400, {"error": str(exc)})
+
+    def do_DELETE(self) -> None:
+        try:
+            if not self.path.startswith("/api/channels/"):
+                return self.send_json(404, {"error": "Not found"})
+            delete_channel(self.path.rsplit("/", 1)[-1])
+            self.send_json(200, {"ok": True})
+        except Exception as exc:
+            self.send_json(400, {"error": str(exc)})
+
+
+def ensure_files() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    EXPORT_DIR.mkdir(exist_ok=True)
+    PLUGINS_DIR.mkdir(exist_ok=True)
+    example = PLUGINS_DIR / "example_summary.py"
+    bundled = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "plugins" / "example_summary.py"
+    if not example.exists() and bundled.exists():
+        shutil.copy2(bundled, example)
+    if not CONFIG_FILE.exists():
+        atomic_json(CONFIG_FILE, config())
+    if not CHANNELS_FILE.exists():
+        atomic_json(CHANNELS_FILE, [])
+    generate_exports()
+
+
+def open_data_folder() -> None:
+    if sys.platform == "win32":
+        os.startfile(DATA_DIR)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(DATA_DIR)])
+    else:
+        subprocess.Popen(["xdg-open", str(DATA_DIR)])
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Public_ChannelForge local guide builder")
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--data-dir", action="store_true", help="Open the application data directory and exit")
+    args = parser.parse_args()
+    ensure_files()
+    if args.data_dir:
+        open_data_folder()
+        return
+    port = args.port or config()["port"]
+    server = ThreadingHTTPServer((HOST, port), Handler)
+    url = f"http://{HOST}:{port}"
+    print(f"{APP_NAME} {VERSION} is running at {url}")
+    print(f"Data directory: {DATA_DIR}")
+    if not args.no_browser:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

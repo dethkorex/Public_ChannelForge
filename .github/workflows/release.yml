@@ -1,0 +1,46 @@
+name: Build and release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python-version: ["3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m unittest discover -s tests -v
+
+  windows-installer:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - shell: powershell
+        run: ./scripts/build_windows.ps1
+      - shell: powershell
+        run: (Get-FileHash release/Public_ChannelForge_Setup.exe -Algorithm SHA256).Hash + "  Public_ChannelForge_Setup.exe" | Set-Content release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Public_ChannelForge-Windows
+          path: release/*
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release/*
+          generate_release_notes: true
+

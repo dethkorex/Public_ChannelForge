@@ -1,0 +1,4 @@
+# Public_ChannelForge uses only Python's standard library at runtime.
+# PyInstaller is required only to build the Windows executables.
+pyinstaller>=6.11,<7
+

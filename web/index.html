@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Public ChannelForge</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header><div class="mark">CF</div><div><h1>Public ChannelForge</h1><p>Build personal TV guides from your Plex library.</p></div><span id="version"></span></header>
+  <nav><button data-view="channels" class="active">Channels</button><button data-view="setup">Setup</button><button data-view="exports">Guide exports</button><button data-view="tools">Tools</button></nav>
+  <main>
+    <section id="channels" class="view active">
+      <div class="section-title"><div><h2>Your channels</h2><p>Create a lineup, arrange its titles, and export a guide.</p></div><button id="new-channel" class="primary">Create channel</button></div>
+      <div id="channel-list" class="cards"></div>
+    </section>
+    <section id="setup" class="view">
+      <h2>Connect Plex</h2><p>Your Plex URL and token stay on this computer. They are never bundled into exports.</p>
+      <form id="setup-form" class="panel form-grid">
+        <label>Plex server URL<input id="plex-url" required placeholder="http://192.168.1.20:32400"></label>
+        <label>Plex token<input id="plex-token" type="password" placeholder="Leave blank to keep the saved token"></label>
+        <label>Guide length (hours)<input id="guide-hours" type="number" min="1" max="168" value="24"></label>
+        <div class="wide"><button class="primary">Test and save</button> <span id="token-status"></span></div>
+      </form>
+      <details class="panel"><summary>Where do I find my Plex token?</summary><p>In Plex Web, open any media item, choose <b>Get Info</b> → <b>View XML</b>, then copy the value after <code>X-Plex-Token=</code> in the address bar.</p></details>
+    </section>
+    <section id="exports" class="view">
+      <h2>Guide exports</h2><p>Use these local URLs in a compatible DVR, tuner proxy, or guide tool while ChannelForge is running.</p>
+      <div class="cards"><article><h3>XMLTV guide</h3><code id="xmltv-url"></code><a class="button" href="/exports/guide.xml" download>Download XMLTV</a></article><article><h3>M3U channel list</h3><code id="m3u-url"></code><a class="button" href="/exports/channels.m3u" download>Download M3U</a></article></div>
+      <button id="regenerate" class="primary">Regenerate exports</button>
+    </section>
+    <section id="tools" class="view">
+      <h2>Community tools</h2><p>Drop a Python tool into the application’s <code>plugins</code> folder, restart, and it appears here. Only install tools you trust: they run locally with your account permissions.</p>
+      <div id="tool-list" class="cards"></div>
+      <p class="muted" id="data-dir"></p>
+    </section>
+  </main>
+  <dialog id="channel-dialog"><form id="channel-form" method="dialog">
+    <div class="section-title"><h2 id="dialog-title">Create channel</h2><button type="button" class="icon" id="close-dialog">×</button></div>
+    <input id="channel-id" type="hidden">
+    <div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label class="wide">Plex library<select id="library" required><option value="">Choose a library</option></select></label></div>
+    <div id="media-status" class="muted">Choose a Plex library to load titles.</div><div id="media-list" class="media-list"></div>
+    <footer><button type="button" id="cancel-dialog">Cancel</button><button class="primary" value="default">Save channel</button></footer>
+  </form></dialog>
+  <div id="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
+
