@@ -158,6 +158,20 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(any(item["id"] == channel["id"] for item in app.channels()))
         self.assertNotIn("Temporary", (app.EXPORT_DIR / "guide.xml").read_text(encoding="utf-8"))
 
+    def test_channels_can_be_reordered(self):
+        first = app.save_channel({"name": "First", "number": "1", "items": [{"id": "1", "title": "One"}]})
+        second = app.save_channel({"name": "Second", "number": "2", "items": [{"id": "2", "title": "Two"}]})
+        ordered = app.reorder_channels([second["id"], first["id"]])
+        self.assertEqual([item["name"] for item in ordered], ["Second", "First"])
+        with self.assertRaisesRegex(ValueError, "did not match"):
+            app.reorder_channels([first["id"]])
+
+    def test_automatic_backup_excludes_plex_credentials(self):
+        app.save_channel({"name": "Backed Up", "number": "7", "items": [{"id": "7", "title": "Safe"}]})
+        snapshot = json.loads(sorted(app.BACKUP_DIR.glob("*.json"))[-1].read_text(encoding="utf-8"))
+        self.assertIn("channels", snapshot)
+        self.assertNotIn("plex_token", json.dumps(snapshot))
+
     def test_example_tool(self):
         app.ensure_files()
         tools = app.plugin_tools()

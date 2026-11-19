@@ -1,6 +1,8 @@
-# Public ChannelForge 2
+# Public ChannelForge 3
 
 Public ChannelForge is a standalone, local-first live TV server for Plex users. It runs continuously in the background, maintains deterministic 24/7 channel schedules, hosts XMLTV and M3U endpoints, and starts Plex HLS playback at the correct live-program offset. ErsatzTV is not required.
+
+Version 3 introduces the studio workspace inspired by the private ChannelForge manager: a fixed sidebar and status bar, overview metrics and live lineup, dedicated searchable poster library, draggable channel ordering, a four-step channel builder, expanded ordered/shuffle/marathon/franchise modes, branding and guide-artwork workspaces, system health cards, and automatic credential-free configuration backups. Private artwork, private APIs, Fish Audio, and ErsatzTV-specific operations are intentionally not copied.
 
 The built-in **Watch TV** screen includes an embedded HLS player, channel rail, now-playing progress, and six-hour visual guide. Viewers click a channel and watch immediately in ChannelForge without adding it to Plex DVR.
 

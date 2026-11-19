@@ -28,7 +28,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.7.1"
+VERSION = "3.0.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -50,6 +50,7 @@ CHANNELS_FILE = DATA_DIR / "channels.json"
 EXPORT_DIR = DATA_DIR / "exports"
 PLUGINS_DIR = DATA_DIR / "plugins"
 ASSETS_DIR = DATA_DIR / "assets"
+BACKUP_DIR = DATA_DIR / "backups"
 WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
 LOCK = threading.RLock()
 HLS_PROXY: dict[str, tuple[str, float]] = {}
@@ -248,6 +249,15 @@ def config(public: bool = False) -> dict:
 def channels() -> list[dict]:
     value = load_json(CHANNELS_FILE, [])
     return value if isinstance(value, list) else []
+
+
+def backup_state(reason: str) -> None:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    snapshot = {"created_at": datetime.now(timezone.utc).isoformat(), "reason": reason, "channels": channels(), "assets": asset_manifest()}
+    name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json"
+    atomic_json(BACKUP_DIR / name, snapshot)
+    for stale in sorted(BACKUP_DIR.glob("*.json"))[:-20]:
+        stale.unlink(missing_ok=True)
 
 
 def asset_manifest() -> list[dict]:
@@ -612,7 +622,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         "logo_asset_id": str(payload.get("logo_asset_id", ""))[:80],
         "background_asset_id": str(payload.get("background_asset_id", ""))[:80],
         "corner_bug_asset_id": str(payload.get("corner_bug_asset_id", ""))[:80],
-        "playback_mode": str(payload.get("playback_mode", "ordered")) if str(payload.get("playback_mode", "ordered")) in {"ordered", "shuffle", "marathon"} else "ordered",
+        "playback_mode": str(payload.get("playback_mode", "ordered")) if str(payload.get("playback_mode", "ordered")) in {"ordered", "shuffle", "shuffle_in_order", "marathon", "franchise"} else "ordered",
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "schedule_anchor": str(payload.get("schedule_anchor") or datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()),
     }
@@ -620,6 +630,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
 
 def save_channel(payload: dict, channel_id: str = "") -> dict:
     with LOCK:
+        backup_state("edit channel" if channel_id else "create channel")
         values = channels()
         if channel_id:
             previous = next((value for value in values if value.get("id") == channel_id), None)
@@ -640,12 +651,26 @@ def save_channel(payload: dict, channel_id: str = "") -> dict:
 
 def delete_channel(channel_id: str) -> None:
     with LOCK:
+        backup_state("delete channel")
         values = channels()
         updated = [item for item in values if item.get("id") != channel_id]
         if len(values) == len(updated):
             raise ValueError("Channel not found.")
         atomic_json(CHANNELS_FILE, updated)
         generate_exports(updated)
+
+
+def reorder_channels(ids: list[str]) -> list[dict]:
+    with LOCK:
+        backup_state("reorder channels")
+        values = channels()
+        existing = {item["id"]: item for item in values}
+        if set(ids) != set(existing) or len(ids) != len(existing):
+            raise ValueError("Channel order did not match the saved channels.")
+        ordered = [existing[channel_id] for channel_id in ids]
+        atomic_json(CHANNELS_FILE, ordered)
+        generate_exports(ordered)
+        return ordered
 
 
 def xmltv_time(value: datetime) -> str:
@@ -704,12 +729,16 @@ def scheduled_items(channel: dict) -> list[dict]:
     stable_key = lambda item: hashlib.sha256(f'{seed}:{item.get("id", "")}'.encode()).hexdigest()
     if mode == "shuffle":
         return sorted(items, key=stable_key)
-    if mode == "marathon":
+    if mode in {"shuffle_in_order", "marathon", "franchise"}:
         groups: dict[str, list[dict]] = {}
         for item in items:
-            group = str(item.get("series") or item.get("title") or item.get("id"))
+            title = str(item.get("title") or item.get("id"))
+            franchise = re.split(r"\s*(?:\d+|:| - )\s*", title, maxsplit=1)[0] if mode == "franchise" else ""
+            group = str(item.get("series") or franchise or title)
             groups.setdefault(group, []).append(item)
-        group_names = sorted(groups, key=lambda name: hashlib.sha256(f"{seed}:{name}".encode()).hexdigest())
+        group_names = list(groups)
+        if mode in {"shuffle_in_order", "franchise"}:
+            group_names.sort(key=lambda name: hashlib.sha256(f"{seed}:{name}".encode()).hexdigest())
         return [item for name in group_names for item in sorted(groups[name], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", ""))))]
     return items
 
@@ -1009,7 +1038,7 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     except ValueError:
                         pass
-                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": values, "now_playing": now_playing, "assets": asset_manifest(), "tools": plugin_tools(), "data_dir": str(DATA_DIR), "server_base": server_base()})
+                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": values, "now_playing": now_playing, "assets": asset_manifest(), "tools": plugin_tools(), "backup_count": len(list(BACKUP_DIR.glob("*.json"))), "data_dir": str(DATA_DIR), "server_base": server_base()})
             elif parsed.path == "/api/plex/libraries":
                 self.send_json(200, {"libraries": plex_libraries()})
             elif parsed.path == "/api/plex/items":
@@ -1096,7 +1125,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/tasks.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/tasks.css", "/studio.css", "/desk.css", "/guide.css", "/wizard.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
@@ -1140,6 +1169,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, start_plex_signin())
             elif parsed.path == "/api/channels":
                 self.send_json(200, {"channel": save_channel(payload)})
+            elif parsed.path == "/api/channels/order":
+                ids = payload.get("ids", [])
+                if not isinstance(ids, list):
+                    raise ValueError("Channel order must be a list.")
+                self.send_json(200, {"channels": reorder_channels([str(item) for item in ids])})
             elif parsed.path == "/api/exports":
                 self.send_json(200, generate_exports())
             elif parsed.path == "/api/assets/generate":
