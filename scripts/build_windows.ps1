@@ -3,7 +3,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 python -m pip install -r requirements.txt
-python -m PyInstaller --noconfirm --clean --onefile --name Public_ChannelForge --add-data "web;web" --add-data "plugins;plugins" Public_ChannelForge.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_ChannelForge --add-data "web;web" --add-data "plugins;plugins" Public_ChannelForge.py
 
 $payload = Join-Path $root "installer\payload"
 New-Item -ItemType Directory -Force -Path $payload | Out-Null

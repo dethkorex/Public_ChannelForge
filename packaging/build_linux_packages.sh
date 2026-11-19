@@ -17,7 +17,7 @@ chmod +x "$APP_ROOT/Public_ChannelForge/install.sh" "$APP_ROOT/Public_ChannelFor
 tar -C "$APP_ROOT" -czf "$OUT/Public_ChannelForge-${VERSION}-linux-x64.tar.gz" Public_ChannelForge
 
 DEB="$WORK/deb"
-mkdir -p "$DEB/DEBIAN" "$DEB/opt/public-channelforge" "$DEB/usr/bin" "$DEB/usr/share/applications"
+mkdir -p "$DEB/DEBIAN" "$DEB/opt/public-channelforge" "$DEB/usr/bin" "$DEB/usr/share/applications" "$DEB/usr/lib/systemd/user"
 cp "$ROOT/Public_ChannelForge.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$DEB/opt/public-channelforge/"
 cp -R "$ROOT/web" "$ROOT/plugins" "$DEB/opt/public-channelforge/"
 cat > "$DEB/DEBIAN/control" <<EOF
@@ -45,14 +45,26 @@ Terminal=false
 Type=Application
 Categories=AudioVideo;Utility;
 EOF
+cat > "$DEB/usr/lib/systemd/user/public-channelforge.service" <<'EOF'
+[Unit]
+Description=Public ChannelForge standalone TV server
+After=network-online.target
+[Service]
+ExecStart=/usr/bin/public-channelforge --no-browser
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=default.target
+EOF
 dpkg-deb --root-owner-group --build "$DEB" "$OUT/Public_ChannelForge-${VERSION}-linux-all.deb"
 
 ARCH="$WORK/arch"
-mkdir -p "$ARCH/opt/public-channelforge" "$ARCH/usr/bin" "$ARCH/usr/share/applications"
+mkdir -p "$ARCH/opt/public-channelforge" "$ARCH/usr/bin" "$ARCH/usr/share/applications" "$ARCH/usr/lib/systemd/user"
 cp "$ROOT/Public_ChannelForge.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$ARCH/opt/public-channelforge/"
 cp -R "$ROOT/web" "$ROOT/plugins" "$ARCH/opt/public-channelforge/"
 cp "$DEB/usr/bin/public-channelforge" "$ARCH/usr/bin/"
 cp "$DEB/usr/share/applications/public-channelforge.desktop" "$ARCH/usr/share/applications/"
+cp "$DEB/usr/lib/systemd/user/public-channelforge.service" "$ARCH/usr/lib/systemd/user/"
 cat > "$ARCH/.PKGINFO" <<EOF
 pkgname = public-channelforge
 pkgbase = public-channelforge

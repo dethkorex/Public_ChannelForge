@@ -1,6 +1,8 @@
-# Public ChannelForge
+# Public ChannelForge 2
 
-Public ChannelForge is a private, local-first channel guide builder for Plex users. It lets each user connect their own Plex server, select library titles, build channel rotations, and export XMLTV and M3U files. It includes a small Python extension system for community tools.
+Public ChannelForge is a standalone, local-first live TV server for Plex users. It runs continuously in the background, maintains deterministic 24/7 channel schedules, hosts XMLTV and M3U endpoints, and starts Plex HLS playback at the correct live-program offset. ErsatzTV is not required.
+
+The built-in **Watch TV** screen includes an embedded HLS player, channel rail, now-playing progress, and six-hour visual guide. Viewers click a channel and watch immediately in ChannelForge without adding it to Plex DVR.
 
 The built-in **Asset Studio** creates original channel logos, guide backgrounds, and corner bugs from a channel name and user-selected colors. Users can also upload artwork they own and assign a logo to an XMLTV channel. Artwork remains in the user's local application-data folder.
 
@@ -12,10 +14,10 @@ The interface and asset workflow remain part of ChannelForge. Only the original 
 
 1. Download `Public_ChannelForge_Setup.exe` from the latest GitHub Release.
 2. Run it and choose the install folder, Desktop shortcut, and optional startup shortcut.
-3. Public ChannelForge opens at `http://127.0.0.1:8787`.
+3. Public ChannelForge starts its background TV server and opens at `http://127.0.0.1:8787`.
 4. Open **Setup**, enter your Plex server URL and token, and select **Test and save**.
 5. Return to **Channels**, create a channel, choose a Plex library, and select titles.
-6. Open **Guide exports** to download or copy the XMLTV and M3U URLs.
+6. Open **Guide exports** to copy the hosted XMLTV and M3U URLs into your DVR, tuner client, or IPTV player.
 
 Windows may show a SmartScreen warning because community builds are not code-signed. Verify the SHA-256 checksum shown in the GitHub release before running the installer.
 
@@ -84,13 +86,17 @@ Wayland compositors used by Omarchy do not need special configuration because th
 ## Plex setup details
 
 - Use the URL that is reachable from the same computer, such as `http://127.0.0.1:32400` or `http://192.168.1.20:32400`.
-- To find a Plex token: in Plex Web, open a media item, select **Get Info** → **View XML**, and copy the `X-Plex-Token` value from the URL.
+- To configure Plex automatically: in Plex Web, open a media item, select **Get Info** → **View XML**, copy the complete URL, and paste it into ChannelForge. The app extracts `X-Plex-Token`, securely stores it locally, and removes it from the visible server URL. Manual token entry remains available.
 - The token is written only to the current user's configuration directory. It is never sent anywhere except the configured Plex server.
 - Public ChannelForge binds to localhost by default, so other devices cannot access the dashboard unless a user deliberately adds their own proxy/network configuration.
 
-## What the exports do
+## Standalone server and live playback
 
-The XMLTV export is a repeating guide based on the duration metadata Plex reports. The M3U is a channel-discovery list for compatible tools; Public ChannelForge does not transcode or restream media. Playback remains handled by Plex or another DVR/tuner tool the user configures.
+ChannelForge owns the channel clock and guide. Every channel has a stable schedule anchor; restarting the application does not reset the lineup to its first title. The XMLTV includes current and upcoming programs based on Plex duration metadata. The M3U points to ChannelForge's `/live/<channel>.m3u8` URLs. When a player opens one, ChannelForge resolves the current program and offset, then creates a Plex HLS session for that exact live position.
+
+Plex remains the media source and transcoder, but ErsatzTV and its database/server are no longer involved. ChannelForge hosts the guide, playlist, channel clock, web manager, artwork, and live entry points.
+
+For clients on another device, choose **Local network** in Setup, enter a base URL such as `http://192.168.1.50:8787`, save, and restart ChannelForge. Only expose this server on a trusted home network; it has no internet-facing authentication.
 
 ## Community tools
 

@@ -24,7 +24,7 @@ class Installer(tk.Tk):
         default = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Programs" / APP
         self.destination = tk.StringVar(value=str(default))
         self.shortcut = tk.BooleanVar(value=True)
-        self.autostart = tk.BooleanVar(value=False)
+        self.autostart = tk.BooleanVar(value=True)
         self.page = 0
         self.body = ttk.Frame(self, padding=28)
         self.body.pack(fill="both", expand=True)

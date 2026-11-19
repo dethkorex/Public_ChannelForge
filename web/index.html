@@ -4,14 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Public ChannelForge</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css">
 </head>
 <body>
-  <header><div class="mark">CF</div><div><h1>Public ChannelForge</h1><p>Build personal TV guides from your Plex library.</p></div><span id="version"></span></header>
-  <nav><button data-view="channels" class="active">Channels</button><button data-view="assets">Asset Studio</button><button data-view="setup">Setup</button><button data-view="exports">Guide exports</button><button data-view="tools">Tools</button></nav>
+  <header><div class="mark">CF</div><div><h1>Public ChannelForge</h1><p>Standalone live TV server for your Plex library.</p></div><span id="version"></span></header>
+  <nav><button data-view="watch" class="active">Watch TV</button><button data-view="channels">Channels</button><button data-view="assets">Asset Studio</button><button data-view="setup">Setup</button><button data-view="exports">Guide exports</button><button data-view="tools">Tools</button></nav>
   <main>
-    <section id="channels" class="view active">
-      <div class="section-title"><div><h2>Your channels</h2><p>Create a lineup, arrange its titles, and export a guide.</p></div><button id="new-channel" class="primary">Create channel</button></div>
+    <section id="watch" class="view active">
+      <div class="section-title"><div><h2>Live TV</h2><p>Choose a channel to watch directly in ChannelForge. No Plex DVR setup is needed.</p></div><button id="refresh-guide">Refresh guide</button></div>
+      <div class="tv-shell"><div class="player-panel"><div class="video-frame"><video id="tv-player" controls playsinline></video><div id="player-placeholder"><span>CF</span><p>Select a live channel</p></div></div><div class="now-playing"><span id="playing-channel">ChannelForge Live</span><h3 id="playing-title">Select a channel from the guide</h3><div class="progress"><i id="playing-progress"></i></div><p id="playing-time" class="muted"></p></div></div><div id="watch-channels" class="watch-channels"></div></div>
+      <div class="guide-heading"><h3>Six-hour channel guide</h3><span id="guide-updated" class="muted"></span></div><div id="guide-grid" class="guide-grid"></div>
+    </section>
+    <section id="channels" class="view">
+      <div class="section-title"><div><h2>Your live channels</h2><p>ChannelForge keeps every lineup on a continuous 24/7 clock and hosts the streams and guide.</p></div><button id="new-channel" class="primary">Create channel</button></div>
       <div id="channel-list" class="cards"></div>
     </section>
     <section id="assets" class="view">
@@ -39,15 +44,18 @@
     <section id="setup" class="view">
       <h2>Connect Plex</h2><p>Your Plex URL and token stay on this computer. They are never bundled into exports.</p>
       <form id="setup-form" class="panel form-grid">
-        <label>Plex server URL<input id="plex-url" required placeholder="http://192.168.1.20:32400"></label>
+        <label>Plex server URL<input id="plex-url" required placeholder="http://192.168.1.20:32400?X-Plex-Token=..."></label>
         <label>Plex token<input id="plex-token" type="password" placeholder="Leave blank to keep the saved token"></label>
         <label>Guide length (hours)<input id="guide-hours" type="number" min="1" max="168" value="24"></label>
+        <label>Network access<select id="bind-host"><option value="127.0.0.1">This computer only</option><option value="0.0.0.0">Local network</option></select></label>
+        <label class="wide">Public/base URL <input id="public-url" placeholder="Optional, e.g. http://192.168.1.50:8787"></label>
+        <p class="muted wide">For TVs or DVRs on another device, choose Local network and enter this computer's LAN URL. Restart ChannelForge after changing network access.</p>
         <div class="wide"><button class="primary">Test and save</button> <span id="token-status"></span></div>
       </form>
-      <details class="panel"><summary>Where do I find my Plex token?</summary><p>In Plex Web, open any media item, choose <b>Get Info</b> → <b>View XML</b>, then copy the value after <code>X-Plex-Token=</code> in the address bar.</p></details>
+      <details class="panel"><summary>Automatic Plex token setup</summary><p>In Plex Web, open any media item, choose <b>Get Info</b> → <b>View XML</b>, then copy the complete browser URL and paste it into Plex server URL. ChannelForge automatically extracts <code>X-Plex-Token</code>, saves it locally, and removes it from the visible URL. You may also enter the token manually.</p></details>
     </section>
     <section id="exports" class="view">
-      <h2>Guide exports</h2><p>Use these local URLs in a compatible DVR, tuner proxy, or guide tool while ChannelForge is running.</p>
+      <h2>Hosted TV endpoints</h2><p>ChannelForge hosts these URLs continuously while the background application is running. No ErsatzTV server is required.</p>
       <div class="cards"><article><h3>XMLTV guide</h3><code id="xmltv-url"></code><a class="button" href="/exports/guide.xml" download>Download XMLTV</a></article><article><h3>M3U channel list</h3><code id="m3u-url"></code><a class="button" href="/exports/channels.m3u" download>Download M3U</a></article></div>
       <button id="regenerate" class="primary">Regenerate exports</button>
     </section>
@@ -65,7 +73,7 @@
     <footer><button type="button" id="cancel-dialog">Cancel</button><button class="primary" value="default">Save channel</button></footer>
   </form></dialog>
   <div id="toast"></div>
-  <script src="/app.js"></script>
+  <script src="/hls.min.js"></script><script src="/app.js"></script>
 </body>
 </html>
 

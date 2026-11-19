@@ -25,7 +25,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "1.1.0"
+VERSION = "2.0.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -74,6 +74,8 @@ def config(public: bool = False) -> dict:
         "plex_token": str(value.get("plex_token", "")),
         "guide_hours": max(1, min(168, int(value.get("guide_hours", 24)))),
         "port": max(1024, min(65535, int(value.get("port", DEFAULT_PORT)))),
+        "bind_host": str(value.get("bind_host", HOST)).strip() or HOST,
+        "public_url": str(value.get("public_url", "")).strip().rstrip("/"),
     }
     if public:
         result["plex_token"] = ""
@@ -207,6 +209,27 @@ def plex_request(path: str, settings: dict | None = None) -> ET.Element:
         raise ValueError("Plex returned an unexpected response.") from exc
 
 
+def normalize_plex_connection(raw_url: str, supplied_token: str = "") -> tuple[str, str]:
+    """Extract X-Plex-Token from a pasted Plex URL without retaining it in the URL."""
+    raw_url = raw_url.strip()
+    parsed = urllib.parse.urlsplit(raw_url)
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    token = supplied_token.strip()
+    for key in list(query):
+        if key.lower() == "x-plex-token":
+            if not token and query[key]:
+                token = query[key][0].strip()
+            del query[key]
+    clean_query = urllib.parse.urlencode(query, doseq=True)
+    clean_path = parsed.path.rstrip("/")
+    if clean_path.endswith("/web/index.html"):
+        clean_path = clean_path[:-len("/web/index.html")]
+    clean_url = urllib.parse.urlunsplit((parsed.scheme or "http", parsed.netloc, clean_path, clean_query, "")).rstrip("/")
+    if not parsed.netloc:
+        raise ValueError("Enter a complete Plex URL such as http://127.0.0.1:32400.")
+    return clean_url, token
+
+
 def plex_libraries() -> list[dict]:
     root = plex_request("/library/sections")
     return [
@@ -230,6 +253,7 @@ def plex_items(section: str) -> list[dict]:
             "year": node.get("year", ""),
             "type": node.get("type", "video"),
             "duration_ms": int(node.get("duration", "1800000") or 1800000),
+            "key": node.get("key", f"/library/metadata/{rating_key}"),
         })
     return result
 
@@ -252,6 +276,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "id": str(item["id"]), "title": str(item.get("title", "Untitled"))[:300],
             "year": str(item.get("year", ""))[:10], "type": str(item.get("type", "video"))[:30],
             "duration_ms": max(60000, min(86400000, int(item.get("duration_ms", 1800000)))),
+            "key": str(item.get("key", f"/library/metadata/{item['id']}"))[:500],
         })
     if not normalized:
         raise ValueError("The selected titles were invalid.")
@@ -260,12 +285,17 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         "section": str(payload.get("section", ""))[:20], "items": normalized,
         "logo_asset_id": str(payload.get("logo_asset_id", ""))[:80],
         "updated_at": datetime.now(timezone.utc).isoformat(),
+        "schedule_anchor": str(payload.get("schedule_anchor") or datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()),
     }
 
 
 def save_channel(payload: dict, channel_id: str = "") -> dict:
     with LOCK:
         values = channels()
+        if channel_id:
+            previous = next((value for value in values if value.get("id") == channel_id), None)
+            if previous and not payload.get("schedule_anchor"):
+                payload = {**payload, "schedule_anchor": previous.get("schedule_anchor")}
         item = clean_channel(payload, channel_id)
         if channel_id:
             index = next((i for i, value in enumerate(values) if value.get("id") == channel_id), None)
@@ -293,6 +323,80 @@ def xmltv_time(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S +0000")
 
 
+def parse_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc).replace(second=0, microsecond=0)
+
+
+def schedule_position(channel: dict, moment: datetime | None = None) -> dict:
+    """Resolve a deterministic 24/7 channel position for any UTC moment."""
+    moment = (moment or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    items = channel.get("items", [])
+    if not items:
+        raise ValueError("This channel has no scheduled titles.")
+    durations = [max(60_000, int(item.get("duration_ms", 1_800_000))) for item in items]
+    cycle_ms = sum(durations)
+    anchor = parse_timestamp(str(channel.get("schedule_anchor", "")))
+    elapsed_ms = int((moment - anchor).total_seconds() * 1000)
+    cycles, within = divmod(elapsed_ms, cycle_ms)
+    cursor = anchor + timedelta(milliseconds=cycles * cycle_ms)
+    for index, duration in enumerate(durations):
+        if within < duration:
+            start = cursor
+            stop = start + timedelta(milliseconds=duration)
+            return {"item": items[index], "index": index, "start": start, "stop": stop, "offset_ms": within}
+        within -= duration
+        cursor += timedelta(milliseconds=duration)
+    raise RuntimeError("Could not resolve channel schedule.")
+
+
+def schedule_window(channel: dict, start: datetime, end: datetime) -> list[dict]:
+    position = schedule_position(channel, start)
+    cursor = position["start"]
+    index = position["index"]
+    items = channel["items"]
+    result = []
+    while cursor < end:
+        item = items[index]
+        stop = cursor + timedelta(milliseconds=max(60_000, int(item.get("duration_ms", 1_800_000))))
+        result.append({"item": item, "start": cursor, "stop": stop})
+        cursor, index = stop, (index + 1) % len(items)
+    return result
+
+
+def server_base(settings: dict | None = None) -> str:
+    settings = settings or config()
+    if settings.get("public_url"):
+        return settings["public_url"]
+    host = settings.get("bind_host", HOST)
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    return f"http://{host}:{settings['port']}"
+
+
+def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
+    """Create a Plex universal-transcoder HLS session for the live schedule point."""
+    settings = config()
+    position = schedule_position(channel, moment)
+    item = position["item"]
+    metadata_path = str(item.get("key") or f"/library/metadata/{item['id']}")
+    if not metadata_path.startswith("/library/metadata/"):
+        metadata_path = f"/library/metadata/{item['id']}"
+    parameters = {
+        "path": metadata_path,
+        "mediaIndex": "0", "partIndex": "0", "protocol": "hls",
+        "offset": f"{position['offset_ms'] / 1000:.3f}", "fastSeek": "1",
+        "directPlay": "1", "directStream": "1", "subtitleSize": "100",
+        "audioBoost": "100", "location": "lan", "session": secrets.token_hex(12),
+        "X-Plex-Token": settings["plex_token"], "X-Plex-Product": APP_NAME,
+        "X-Plex-Version": VERSION, "X-Plex-Client-Identifier": "public-channelforge",
+    }
+    return settings["plex_url"] + "/video/:/transcode/universal/start.m3u8?" + urllib.parse.urlencode(parameters)
+
+
 def generate_exports(values: list[dict] | None = None) -> dict:
     values = values if values is not None else channels()
     settings = config()
@@ -304,16 +408,12 @@ def generate_exports(values: list[dict] | None = None) -> dict:
         ET.SubElement(node, "display-name").text = channel["number"]
         logo = next((item for item in asset_manifest() if item.get("id") == channel.get("logo_asset_id")), None)
         if logo:
-            ET.SubElement(node, "icon", {"src": f"http://{HOST}:{settings['port']}/user-assets/{logo['filename']}"})
-    start = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+            ET.SubElement(node, "icon", {"src": f"{server_base(settings)}/user-assets/{logo['filename']}"})
+    start = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(hours=2)
     end = start + timedelta(hours=settings["guide_hours"])
     for channel in values:
-        cursor, index = start, 0
-        items = channel.get("items", [])
-        while items and cursor < end:
-            item = items[index % len(items)]
-            duration = timedelta(milliseconds=max(60000, int(item.get("duration_ms", 1800000))))
-            stop = min(cursor + duration, end)
+        for slot in schedule_window(channel, start, end):
+            item, cursor, stop = slot["item"], slot["start"], slot["stop"]
             program = ET.SubElement(tv, "programme", {
                 "start": xmltv_time(cursor), "stop": xmltv_time(stop),
                 "channel": f"public-channelforge.{channel['id']}",
@@ -322,14 +422,13 @@ def generate_exports(values: list[dict] | None = None) -> dict:
             if item.get("year"):
                 ET.SubElement(program, "date").text = str(item["year"])
             ET.SubElement(program, "category", {"lang": "en"}).text = item.get("type", "video").title()
-            cursor, index = stop, index + 1
     ET.indent(tv)
     guide_path = EXPORT_DIR / "guide.xml"
     ET.ElementTree(tv).write(guide_path, encoding="utf-8", xml_declaration=True)
-    base = f"http://{HOST}:{settings['port']}"
+    base = server_base(settings)
     lines = ["#EXTM3U url-tvg=\"" + base + "/exports/guide.xml\""]
     for channel in values:
-        stream = settings["plex_url"] + "/web/index.html#!/server/" + urllib.parse.quote(channel["id"])
+        stream = base + "/live/" + urllib.parse.quote(channel["id"]) + ".m3u8"
         lines.extend([
             f'#EXTINF:-1 tvg-id="public-channelforge.{channel["id"]}" tvg-chno="{html.escape(channel["number"])}",{channel["name"]}',
             stream,
@@ -382,12 +481,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self' http: https:; media-src 'self' blob: http: https:")
         self.end_headers()
         self.wfile.write(body)
 
     def send_json(self, status: int, payload: object) -> None:
         self.send_bytes(status, json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8")
+
+    def redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -402,12 +507,31 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/api/status":
-                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": channels(), "assets": asset_manifest(), "tools": plugin_tools(), "data_dir": str(DATA_DIR)})
+                values = channels()
+                now_playing = {}
+                for channel in values:
+                    try:
+                        position = schedule_position(channel)
+                        now_playing[channel["id"]] = {
+                            "title": position["item"].get("title", "Untitled"),
+                            "start": position["start"].isoformat(), "stop": position["stop"].isoformat(),
+                            "offset_ms": position["offset_ms"],
+                        }
+                    except ValueError:
+                        pass
+                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": values, "now_playing": now_playing, "assets": asset_manifest(), "tools": plugin_tools(), "data_dir": str(DATA_DIR), "server_base": server_base()})
             elif parsed.path == "/api/plex/libraries":
                 self.send_json(200, {"libraries": plex_libraries()})
             elif parsed.path == "/api/plex/items":
                 section = urllib.parse.parse_qs(parsed.query).get("section", [""])[0]
                 self.send_json(200, {"items": plex_items(section)})
+            elif parsed.path == "/api/guide":
+                moment = datetime.now(timezone.utc)
+                guide = []
+                for channel in channels():
+                    slots = schedule_window(channel, moment, moment + timedelta(hours=6))
+                    guide.append({"channel_id": channel["id"], "name": channel["name"], "number": channel["number"], "logo_asset_id": channel.get("logo_asset_id", ""), "programs": [{"title": slot["item"].get("title", "Untitled"), "year": slot["item"].get("year", ""), "type": slot["item"].get("type", "video"), "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat()} for slot in slots]})
+                self.send_json(200, {"generated_at": moment.isoformat(), "channels": guide})
             elif parsed.path.startswith("/exports/"):
                 requested = Path(parsed.path).name
                 if requested not in {"guide.xml", "channels.m3u"}:
@@ -416,13 +540,21 @@ class Handler(BaseHTTPRequestHandler):
                 if not path.exists():
                     generate_exports()
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+            elif parsed.path.startswith("/live/") and parsed.path.endswith(".m3u8"):
+                channel_id = Path(parsed.path).stem
+                channel = next((item for item in channels() if item.get("id") == channel_id), None)
+                if not channel:
+                    raise FileNotFoundError
+                if not config()["plex_token"]:
+                    raise ValueError("Plex is not connected.")
+                self.redirect(plex_live_url(channel))
             elif parsed.path.startswith("/user-assets/"):
                 filename = Path(parsed.path).name
                 match = next((item for item in asset_manifest() if item.get("filename") == filename), None)
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css"):
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
@@ -439,12 +571,15 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.body()
             if parsed.path == "/api/setup":
                 old = config()
-                token = str(payload.get("plex_token", "")).strip() or old["plex_token"]
+                plex_url, pasted_token = normalize_plex_connection(str(payload.get("plex_url", old["plex_url"])), str(payload.get("plex_token", "")))
+                token = pasted_token or old["plex_token"]
                 updated = {
-                    "plex_url": str(payload.get("plex_url", old["plex_url"])).strip().rstrip("/"),
+                    "plex_url": plex_url,
                     "plex_token": token,
                     "guide_hours": max(1, min(168, int(payload.get("guide_hours", old["guide_hours"])))),
                     "port": old["port"],
+                    "bind_host": str(payload.get("bind_host", old["bind_host"])).strip() or HOST,
+                    "public_url": str(payload.get("public_url", old["public_url"])).strip().rstrip("/"),
                 }
                 plex_request("/", updated)
                 atomic_json(CONFIG_FILE, updated)
@@ -500,6 +635,19 @@ def ensure_files() -> None:
         atomic_json(CONFIG_FILE, config())
     if not CHANNELS_FILE.exists():
         atomic_json(CHANNELS_FILE, [])
+    else:
+        migrated = channels()
+        changed = False
+        for channel in migrated:
+            if not channel.get("schedule_anchor"):
+                channel["schedule_anchor"] = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
+                changed = True
+            for item in channel.get("items", []):
+                if not item.get("key") and item.get("id"):
+                    item["key"] = f"/library/metadata/{item['id']}"
+                    changed = True
+        if changed:
+            atomic_json(CHANNELS_FILE, migrated)
     generate_exports()
 
 
@@ -513,7 +661,7 @@ def open_data_folder() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Public_ChannelForge local guide builder")
+    parser = argparse.ArgumentParser(description="Public_ChannelForge standalone TV server")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--data-dir", action="store_true", help="Open the application data directory and exit")
@@ -523,8 +671,9 @@ def main() -> None:
         open_data_folder()
         return
     port = args.port or config()["port"]
-    server = ThreadingHTTPServer((HOST, port), Handler)
-    url = f"http://{HOST}:{port}"
+    bind_host = config()["bind_host"]
+    server = ThreadingHTTPServer((bind_host, port), Handler)
+    url = f"http://{HOST if bind_host in {'0.0.0.0', '::'} else bind_host}:{port}"
     print(f"{APP_NAME} {VERSION} is running at {url}")
     print(f"Data directory: {DATA_DIR}")
     if not args.no_browser:
