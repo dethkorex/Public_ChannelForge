@@ -1,0 +1,1 @@
+.channel-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}.video-frame video{position:relative;z-index:1}.channel-bug{display:none;position:absolute;right:3%;top:4%;width:13%;height:20%;object-fit:contain;z-index:2;pointer-events:none;filter:drop-shadow(0 3px 7px #000)}.channel-bug.active{display:block}#player-placeholder{position:absolute;z-index:3}

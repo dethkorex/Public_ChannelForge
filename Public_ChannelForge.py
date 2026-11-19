@@ -25,7 +25,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -49,6 +49,16 @@ PLUGINS_DIR = DATA_DIR / "plugins"
 ASSETS_DIR = DATA_DIR / "assets"
 WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
 LOCK = threading.RLock()
+DEFAULT_ASSET_THEMES = {
+    "classic": ("Classic TV", "#f4c95d", "#d66b4d"),
+    "neon": ("Neon Night", "#42f5e9", "#9b5cff"),
+    "cinema": ("Cinema", "#f1d18a", "#6b1d2c"),
+    "kids": ("Kids Pop", "#ff6fb5", "#4dd9ff"),
+    "sports": ("Sports Arena", "#7cff6b", "#1473e6"),
+    "news": ("News Desk", "#42a5ff", "#e9f2ff"),
+    "spooky": ("Spooky", "#c875ff", "#ff7b4d"),
+    "minimal": ("Minimal", "#ffffff", "#6f7f95"),
+}
 
 
 def atomic_json(path: Path, payload: object) -> None:
@@ -117,6 +127,42 @@ def save_asset_record(record: dict, content: bytes) -> dict:
     return item
 
 
+def default_asset_svg(label: str, kind: str, primary: str, secondary: str) -> bytes:
+    dimensions = {"logo": (1200, 675), "guide-background": (1920, 1080), "corner-bug": (600, 600)}
+    width, height = dimensions[kind]
+    safe_label = html.escape(label.upper())
+    if kind == "guide-background":
+        body = f'<path d="M0 {height*.72} Q {width*.28} {height*.48} {width*.52} {height*.7} T {width} {height*.52} V {height} H0Z" fill="url(#g)" opacity=".28"/><g opacity=".18">' + "".join(f'<circle cx="{width*(.12+i*.15)}" cy="{height*(.18+(i%2)*.14)}" r="{height*.12}" fill="none" stroke="{primary}" stroke-width="6"/>' for i in range(6)) + "</g>"
+        title_y, title_size = height * .82, 46
+    elif kind == "corner-bug":
+        body = f'<circle cx="{width/2}" cy="{height/2}" r="{height*.39}" fill="url(#g)" opacity=".92"/><circle cx="{width/2}" cy="{height/2}" r="{height*.31}" fill="#08111f"/>'
+        title_y, title_size = height * .53, 42
+    else:
+        body = f'<rect x="{width*.08}" y="{height*.14}" width="{width*.84}" height="{height*.72}" rx="64" fill="url(#g)" opacity=".9"/><rect x="{width*.105}" y="{height*.18}" width="{width*.79}" height="{height*.64}" rx="48" fill="#08111f"/>'
+        title_y, title_size = height * .53, 64
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="{primary}"/><stop offset="1" stop-color="{secondary}"/></linearGradient></defs><rect width="100%" height="100%" fill="#08111f"/>{body}<text x="50%" y="{title_y}" text-anchor="middle" fill="{primary}" font-family="Arial,sans-serif" font-size="{title_size}" font-weight="800" letter-spacing="5">{safe_label}</text></svg>'''
+    return svg.encode("utf-8")
+
+
+def install_default_assets() -> None:
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    values = asset_manifest()
+    known = {item.get("id") for item in values}
+    changed = False
+    for slug, (label, primary, secondary) in DEFAULT_ASSET_THEMES.items():
+        for kind in ("logo", "guide-background", "corner-bug"):
+            asset_id = f"builtin-{slug}-{kind}"
+            filename = f"{asset_id}.svg"
+            if asset_id not in known:
+                values.append({"id": asset_id, "name": f"{label} {kind.replace('-', ' ').title()}", "kind": kind, "filename": filename, "content_type": "image/svg+xml", "built_in": True, "created_at": "2026-11-19T00:00:00+00:00"})
+                changed = True
+            path = ASSETS_DIR / filename
+            if not path.exists():
+                path.write_bytes(default_asset_svg(label, kind, primary, secondary))
+    if changed:
+        atomic_json(ASSETS_DIR / "manifest.json", values)
+
+
 def generate_asset(payload: dict) -> dict:
     name = str(payload.get("name", "")).strip()
     if not name:
@@ -183,6 +229,8 @@ def delete_asset(asset_id: str) -> None:
         match = next((item for item in values if item.get("id") == asset_id), None)
         if not match:
             raise ValueError("Asset not found.")
+        if match.get("built_in"):
+            raise ValueError("Built-in starter assets cannot be deleted.")
         path = ASSETS_DIR / Path(match["filename"]).name
         if path.exists():
             path.unlink()
@@ -320,6 +368,8 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         "id": existing_id or secrets.token_hex(8), "name": name[:100], "number": number[:12],
         "section": str(payload.get("section", ""))[:20], "items": normalized,
         "logo_asset_id": str(payload.get("logo_asset_id", ""))[:80],
+        "background_asset_id": str(payload.get("background_asset_id", ""))[:80],
+        "corner_bug_asset_id": str(payload.get("corner_bug_asset_id", ""))[:80],
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "schedule_anchor": str(payload.get("schedule_anchor") or datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()),
     }
@@ -594,7 +644,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
@@ -668,6 +718,7 @@ def ensure_files() -> None:
     EXPORT_DIR.mkdir(exist_ok=True)
     PLUGINS_DIR.mkdir(exist_ok=True)
     ASSETS_DIR.mkdir(exist_ok=True)
+    install_default_assets()
     example = PLUGINS_DIR / "example_summary.py"
     bundled = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "plugins" / "example_summary.py"
     if not example.exists() and bundled.exists():

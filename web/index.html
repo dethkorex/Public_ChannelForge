@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Public ChannelForge</title>
-  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css"><link rel="stylesheet" href="/plex.css">
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css"><link rel="stylesheet" href="/plex.css"><link rel="stylesheet" href="/overlays.css">
 </head>
 <body>
   <header><div class="mark">CF</div><div><h1>Public ChannelForge</h1><p>Standalone live TV server for your Plex library.</p></div><span id="version"></span></header>
@@ -12,7 +12,7 @@
   <main>
     <section id="watch" class="view active">
       <div class="section-title"><div><h2>Live TV</h2><p>Choose a channel to watch directly in ChannelForge. No Plex DVR setup is needed.</p></div><button id="refresh-guide">Refresh guide</button></div>
-      <div class="tv-shell"><div class="player-panel"><div class="video-frame"><video id="tv-player" controls playsinline></video><div id="player-placeholder"><span>CF</span><p>Select a live channel</p></div></div><div class="now-playing"><span id="playing-channel">ChannelForge Live</span><h3 id="playing-title">Select a channel from the guide</h3><div class="progress"><i id="playing-progress"></i></div><p id="playing-time" class="muted"></p></div></div><div id="watch-channels" class="watch-channels"></div></div>
+      <div class="tv-shell"><div class="player-panel"><div class="video-frame"><img id="channel-bg" class="channel-bg" alt=""><video id="tv-player" controls playsinline></video><img id="channel-bug" class="channel-bug" alt=""><div id="player-placeholder"><span>CF</span><p>Select a live channel</p></div></div><div class="now-playing"><span id="playing-channel">ChannelForge Live</span><h3 id="playing-title">Select a channel from the guide</h3><div class="progress"><i id="playing-progress"></i></div><p id="playing-time" class="muted"></p></div></div><div id="watch-channels" class="watch-channels"></div></div>
       <div class="guide-heading"><h3>Six-hour channel guide</h3><span id="guide-updated" class="muted"></span></div><div id="guide-grid" class="guide-grid"></div>
     </section>
     <section id="channels" class="view">
@@ -69,7 +69,7 @@
   <dialog id="channel-dialog"><form id="channel-form" method="dialog">
     <div class="section-title"><h2 id="dialog-title">Create channel</h2><button type="button" class="icon" id="close-dialog">×</button></div>
     <input id="channel-id" type="hidden">
-    <div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label>Channel logo<select id="channel-logo"><option value="">No logo</option></select></label><label>Plex library<select id="library" required><option value="">Choose a library</option></select></label></div>
+    <div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label>Channel logo<select id="channel-logo"><option value="">No logo</option></select></label><label>Guide/player background<select id="channel-background"><option value="">Default background</option></select></label><label>Corner bug<select id="channel-corner-bug"><option value="">No corner bug</option></select></label><label>Plex library<select id="library" required><option value="">Choose a library</option></select></label></div>
     <div id="media-status" class="muted">Choose a Plex library to load titles.</div><div id="media-list" class="media-list"></div>
     <footer><button type="button" id="cancel-dialog">Cancel</button><button class="primary" value="default">Save channel</button></footer>
   </form></dialog>

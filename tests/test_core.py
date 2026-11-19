@@ -99,6 +99,16 @@ class CoreTests(unittest.TestCase):
         self.assertIn("My Station", content)
         self.assertNotIn("Fish", content)
 
+    def test_installs_complete_neutral_starter_asset_pack(self):
+        app.install_default_assets()
+        built_ins = [asset for asset in app.asset_manifest() if asset.get("built_in")]
+        self.assertEqual(len(built_ins), len(app.DEFAULT_ASSET_THEMES) * 3)
+        self.assertEqual({asset["kind"] for asset in built_ins}, {"logo", "guide-background", "corner-bug"})
+        for asset in built_ins:
+            self.assertTrue((app.ASSETS_DIR / asset["filename"]).is_file())
+        with self.assertRaisesRegex(ValueError, "cannot be deleted"):
+            app.delete_asset(built_ins[0]["id"])
+
     def test_rejects_active_svg_upload(self):
         import base64
         unsafe = base64.b64encode(b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>').decode()
