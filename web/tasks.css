@@ -1,0 +1,1 @@
+.watch-channel-row{display:grid;grid-template-columns:1fr 68px;gap:6px}.watch-channel-row .watch-channel{width:100%}.watch-delete{padding:8px 5px;font-size:12px}.setup-steps article.done>span{font-size:0}.setup-steps article.done>span::after{content:"✓";font-size:23px;font-weight:900}.task-complete{color:var(--accent);font-weight:800}

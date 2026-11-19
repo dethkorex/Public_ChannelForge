@@ -151,6 +151,12 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least one"):
             app.clean_channel({"name": "Empty", "number": "1", "items": []})
 
+    def test_channel_can_be_deleted_and_exports_are_updated(self):
+        channel = app.save_channel({"name": "Temporary", "number": "404", "items": [{"id": "4", "title": "Remove Me", "duration_ms": 60000}]})
+        app.delete_channel(channel["id"])
+        self.assertFalse(any(item["id"] == channel["id"] for item in app.channels()))
+        self.assertNotIn("Temporary", (app.EXPORT_DIR / "guide.xml").read_text(encoding="utf-8"))
+
     def test_example_tool(self):
         app.ensure_files()
         tools = app.plugin_tools()

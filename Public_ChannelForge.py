@@ -27,7 +27,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.6.1"
+VERSION = "2.6.2"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
@@ -53,6 +53,7 @@ WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web
 LOCK = threading.RLock()
 HLS_PROXY: dict[str, tuple[str, float]] = {}
 UPDATE_JOBS: dict[str, dict] = {}
+PLAYBACK_ERRORS: dict[str, str] = {}
 DEFAULT_ASSET_THEMES = {
     "classic": ("Classic TV", "#f4c95d", "#d66b4d"),
     "neon": ("Neon Night", "#42f5e9", "#9b5cff"),
@@ -728,9 +729,12 @@ def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
         # to an original codec/container it may not support.
         "directPlay": "0", "directStream": "0", "videoCodec": "h264", "audioCodec": "aac",
         "videoQuality": "100", "videoResolution": "1920x1080", "maxVideoBitrate": "20000", "subtitleSize": "100",
-        "audioBoost": "100", "location": "lan", "session": secrets.token_hex(12),
+        "audioBoost": "100", "location": "lan", "context": "streaming", "copyts": "1", "session": secrets.token_hex(12),
         "X-Plex-Token": settings["plex_token"], "X-Plex-Product": APP_NAME,
-        "X-Plex-Version": VERSION, "X-Plex-Client-Identifier": "public-channelforge",
+        "X-Plex-Version": VERSION, "X-Plex-Client-Identifier": persistent_client_identifier(),
+        "X-Plex-Platform": "Chrome", "X-Plex-Platform-Version": "120.0", "X-Plex-Device": "Linux",
+        "X-Plex-Device-Name": APP_NAME, "X-Plex-Model": "hosted",
+        "X-Plex-Client-Profile-Extra": "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
     }
     return settings["plex_url"] + "/video/:/transcode/universal/start.m3u8?" + urllib.parse.urlencode(parameters)
 
@@ -776,8 +780,13 @@ def fetch_plex_stream(url: str, range_header: str = "") -> tuple[bytes, str, str
             final_url = response.geturl()
             status = getattr(response, "status", 200)
             content_range = response.headers.get("Content-Range", "")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(2048).decode("utf-8", "replace")
+        status = re.search(r'(?:status|message)=["\']([^"\']+)', detail, re.IGNORECASE)
+        reason = status.group(1) if status else str(exc.reason)
+        raise ValueError(f"Plex rejected the stream request (HTTP {exc.code}: {reason}).") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise ValueError("Plex could not produce a playable stream. Check that transcoding is enabled on the Plex server.") from exc
+        raise ValueError(f"ChannelForge could not reach the Plex stream: {getattr(exc, 'reason', exc)}") from exc
     if data.lstrip().startswith(b"#EXTM3U") or "mpegurl" in content_type:
         data = rewrite_hls_manifest(data, final_url)
         content_type = "application/vnd.apple.mpegurl"
@@ -919,6 +928,11 @@ class Handler(BaseHTTPRequestHandler):
                 image_path = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
                 data, content_type = plex_binary(image_path)
                 self.send_bytes(200, data, content_type)
+            elif parsed.path == "/api/playback/status":
+                channel_id = urllib.parse.parse_qs(parsed.query).get("channel", [""])[0]
+                with LOCK:
+                    error = PLAYBACK_ERRORS.get(channel_id, "")
+                self.send_json(200, {"ok": not bool(error), "error": error})
             elif parsed.path == "/api/guide":
                 offset = max(-24, min(168, int(urllib.parse.parse_qs(parsed.query).get("offset", ["0"])[0])))
                 moment = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(hours=offset)
@@ -956,7 +970,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise FileNotFoundError
                 if not config()["plex_token"]:
                     raise ValueError("Plex is not connected.")
-                data, content_type, _url, status, content_range = fetch_plex_stream(plex_live_url(channel))
+                try:
+                    data, content_type, _url, status, content_range = fetch_plex_stream(plex_live_url(channel))
+                    with LOCK:
+                        PLAYBACK_ERRORS.pop(channel_id, None)
+                except Exception as exc:
+                    with LOCK:
+                        PLAYBACK_ERRORS[channel_id] = str(exc)
+                    raise
                 self.send_bytes(status, data, content_type, {"Content-Range": content_range, "Accept-Ranges": "bytes"})
             elif parsed.path.startswith("/hls-proxy/"):
                 proxy_id = parsed.path.rsplit("/", 1)[-1]
@@ -972,7 +993,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/tasks.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")

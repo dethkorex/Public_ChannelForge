@@ -8,6 +8,8 @@ Playback is proxied through ChannelForge as same-origin HLS and requested from P
 
 The **Get Started** screen walks new users through connecting Plex, creating a channel, testing it in the player, and copying the hosted stream URLs. Setup includes a separate connection test with a clear success or failure result.
 
+Completed setup tasks show a visible check mark. Channels can be deleted either from the Channels manager or directly from the Watch TV channel rail.
+
 After connection, ChannelForge displays the Plex username, server name, and server version supplied by that server. Library browsing includes Plex posters, summaries, ratings, years, and media types. Poster bytes are proxied through ChannelForge so the Plex token is never placed in browser image URLs.
 
 The built-in **Asset Studio** creates original channel logos, guide backgrounds, and corner bugs from a channel name and user-selected colors. Users can also upload artwork they own and assign a logo to an XMLTV channel. Artwork remains in the user's local application-data folder.
