@@ -27,7 +27,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "2.6.0"
+VERSION = "2.6.1"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 
