@@ -28,7 +28,7 @@ Priority: optional
 Architecture: all
 Depends: python3 (>= 3.10), ffmpeg
 Maintainer: Public ChannelForge contributors
-Description: Local-first Plex channel guide builder
+Description: Local-first personal channel guide builder
  Build personal channel rotations and export XMLTV and M3U guides.
 EOF
 cat > "$DEB/usr/bin/public-channelforge" <<'EOF'
@@ -39,7 +39,7 @@ chmod 755 "$DEB/usr/bin/public-channelforge"
 cat > "$DEB/usr/share/applications/public-channelforge.desktop" <<'EOF'
 [Desktop Entry]
 Name=Public ChannelForge
-Comment=Build personal Plex channel guides
+Comment=Build personal channels from local folders or Plex
 Exec=public-channelforge
 Terminal=false
 Type=Application
@@ -69,7 +69,7 @@ cat > "$ARCH/.PKGINFO" <<EOF
 pkgname = public-channelforge
 pkgbase = public-channelforge
 pkgver = $VERSION-1
-pkgdesc = Local-first Plex channel guide builder
+pkgdesc = Local-first personal channel guide builder
 url = https://github.com/dethkorex/Public_ChannelForge
 builddate = $(date +%s)
 packager = Public ChannelForge contributors

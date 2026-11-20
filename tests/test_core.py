@@ -16,6 +16,7 @@ class CoreTests(unittest.TestCase):
         app.DATA_DIR.mkdir(parents=True, exist_ok=True)
         app.atomic_json(app.CONFIG_FILE, {"plex_url": "http://127.0.0.1:32400", "plex_token": "test", "guide_hours": 2, "port": 8787, "bind_host": "127.0.0.1", "public_url": ""})
         app.atomic_json(app.CHANNELS_FILE, [])
+        app.LOCAL_LIBRARY_CACHE.clear()
 
     def test_public_config_hides_token(self):
         value = app.config(True)
@@ -74,6 +75,33 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(items[0]["series"], "Example Show")
         self.assertIn("S01E01", items[0]["title"])
         self.assertEqual(items[0]["part_key"], "/library/parts/99/file.mkv")
+
+    def test_local_library_scans_media_and_sidecar_poster(self):
+        root = Path(tempfile.mkdtemp(prefix="channel-forge-local-"))
+        video = root / "Series" / "Pilot Episode.mkv"
+        video.parent.mkdir()
+        video.write_bytes(b"media")
+        video.with_suffix(".jpg").write_bytes(b"poster")
+        library = app.save_local_library("Local TV", str(root))
+        with mock.patch.object(app, "local_duration_ms", return_value=2_700_000):
+            items = app.local_items(library["key"])
+        self.assertEqual(items[0]["source"], "local")
+        self.assertEqual(items[0]["file_path"], str(video.resolve()))
+        self.assertEqual(items[0]["duration_ms"], 2_700_000)
+        self.assertTrue(items[0]["thumb"])
+        data, content_type = app.local_image(library["key"], items[0]["id"])
+        self.assertEqual(data, b"poster")
+        self.assertEqual(content_type, "image/jpeg")
+
+    def test_local_channel_does_not_require_plex_token(self):
+        root = Path(tempfile.mkdtemp(prefix="channel-forge-local-play-"))
+        video = root / "Movie.mp4"
+        video.write_bytes(b"media")
+        library = app.save_local_library("Movies", str(root))
+        item = {"id": "local-test", "title": "Movie", "duration_ms": 600000, "source": "local", "file_path": str(video), "key": "local:test"}
+        channel = app.clean_channel({"name": "Local", "number": "10", "section": library["key"], "items": [item]})
+        app.atomic_json(app.CONFIG_FILE, {"plex_url": "http://127.0.0.1:32400", "plex_token": "", "local_libraries": [{"id": library["id"], "name": "Movies", "path": str(root)}]})
+        self.assertEqual(app.local_media_path(channel["items"][0]), video.resolve())
 
     def test_live_url_uses_plex_hls_at_current_offset(self):
         channel = app.clean_channel({"name": "Live", "number": "3", "schedule_anchor": "2026-01-01T00:00:00+00:00", "items": [

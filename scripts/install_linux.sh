@@ -22,7 +22,7 @@ chmod +x "$BIN_DIR/public-channelforge"
 cat > "$DESKTOP_DIR/public-channelforge.desktop" <<EOF
 [Desktop Entry]
 Name=Public ChannelForge
-Comment=Build personal Plex channel guides
+Comment=Build personal channels from local folders or Plex
 Exec=$BIN_DIR/public-channelforge
 Terminal=false
 Type=Application

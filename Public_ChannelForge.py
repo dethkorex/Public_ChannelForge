@@ -1,4 +1,4 @@
-"""Public_ChannelForge: local-first Plex channel guide builder."""
+"""Public_ChannelForge: local-first personal channel guide builder."""
 
 from __future__ import annotations
 
@@ -28,9 +28,11 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
+MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
+POSTER_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 
 
 def app_dir() -> Path:
@@ -57,6 +59,7 @@ HLS_PROXY: dict[str, tuple[str, float]] = {}
 UPDATE_JOBS: dict[str, dict] = {}
 PLAYBACK_ERRORS: dict[str, str] = {}
 FFMPEG_SESSIONS: dict[str, dict] = {}
+LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
 STREAM_DIR = DATA_DIR / "streams"
 DEFAULT_ASSET_THEMES = {
     "classic": ("Classic TV", "#f4c95d", "#d66b4d"),
@@ -238,12 +241,62 @@ def config(public: bool = False) -> dict:
         "public_url": str(value.get("public_url", "")).strip().rstrip("/"),
         "plex_profile": value.get("plex_profile", {}) if isinstance(value.get("plex_profile", {}), dict) else {},
         "client_identifier": str(value.get("client_identifier", "")) or secrets.token_hex(16),
+        "local_libraries": value.get("local_libraries", []) if isinstance(value.get("local_libraries", []), list) else [],
     }
     if public:
         result["plex_token"] = ""
         result["token_saved"] = bool(value.get("plex_token"))
         result.pop("client_identifier", None)
     return result
+
+
+def local_libraries(settings: dict | None = None) -> list[dict]:
+    """Return valid user-configured folders without walking them."""
+    values = (settings or config()).get("local_libraries", [])
+    result = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        library_id = str(value.get("id", ""))
+        name = str(value.get("name", "")).strip()
+        path = Path(str(value.get("path", ""))).expanduser()
+        if re.fullmatch(r"[a-f0-9]{12}", library_id) and name and path.is_absolute():
+            result.append({"id": library_id, "key": f"local:{library_id}", "title": name[:100], "type": "local", "path": str(path)})
+    return result
+
+
+def save_local_library(name: str, raw_path: str) -> dict:
+    if not raw_path.strip():
+        raise ValueError("Enter the full path to a local media folder.")
+    path = Path(raw_path.strip()).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError("Choose an existing local media folder.")
+    old = config()
+    existing = local_libraries(old)
+    if any(Path(item["path"]).resolve() == path for item in existing):
+        raise ValueError("That folder is already a local library.")
+    item = {"id": secrets.token_hex(6), "name": (name.strip() or path.name or "Local media")[:100], "path": str(path)}
+    raw = load_json(CONFIG_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    raw["local_libraries"] = [{"id": entry["id"], "name": entry["title"], "path": entry["path"]} for entry in existing] + [item]
+    atomic_json(CONFIG_FILE, raw)
+    LOCAL_LIBRARY_CACHE.clear()
+    return {**item, "key": f"local:{item['id']}", "title": item["name"], "type": "local"}
+
+
+def delete_local_library(library_id: str) -> None:
+    raw = load_json(CONFIG_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    values = raw.get("local_libraries", [])
+    if not isinstance(values, list):
+        values = []
+    updated = [item for item in values if isinstance(item, dict) and item.get("id") != library_id]
+    if len(updated) == len(values):
+        raise ValueError("Local library not found.")
+    raw["local_libraries"] = updated
+    atomic_json(CONFIG_FILE, raw)
 
 
 def channels() -> list[dict]:
@@ -588,6 +641,113 @@ def plex_items(section: str) -> list[dict]:
     return result
 
 
+def all_libraries() -> list[dict]:
+    local = [{"key": item["key"], "title": item["title"], "type": "local", "source": "local"} for item in local_libraries()]
+    result = []
+    if config()["plex_token"]:
+        try:
+            result.extend({**item, "source": "plex"} for item in plex_libraries())
+        except ValueError:
+            if not local:
+                raise
+    return result + local
+
+
+def local_library(section: str) -> dict:
+    library_id = section.split(":", 1)[1] if section.startswith("local:") else ""
+    match = next((item for item in local_libraries() if item["id"] == library_id), None)
+    if not match:
+        raise ValueError("Local library was not found.")
+    return match
+
+
+def local_poster(path: Path, root: Path) -> Path | None:
+    candidates = [path.with_suffix(extension) for extension in POSTER_EXTENSIONS]
+    candidates += [path.parent / f"poster{extension}" for extension in POSTER_EXTENSIONS]
+    candidates += [path.parent / f"folder{extension}" for extension in POSTER_EXTENSIONS]
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+            if resolved.is_file():
+                return resolved
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def local_duration_ms(path: Path) -> int:
+    """Read duration with ffprobe when available; use a safe guide fallback otherwise."""
+    try:
+        ffmpeg = Path(ffmpeg_path())
+    except ValueError:
+        return 1_800_000
+    probe_name = "ffprobe.exe" if sys.platform == "win32" else "ffprobe"
+    probe = ffmpeg.with_name(probe_name)
+    executable = str(probe) if probe.is_file() else shutil.which("ffprobe")
+    if not executable:
+        return 1_800_000
+    try:
+        completed = subprocess.run(
+            [executable, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=12, creationflags=0x08000000 if sys.platform == "win32" else 0,
+        )
+        return max(60_000, min(86_400_000, int(float(completed.stdout.strip()) * 1000)))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 1_800_000
+
+
+def local_items(section: str) -> list[dict]:
+    cached = LOCAL_LIBRARY_CACHE.get(section)
+    if cached and cached[0] > time.time() - 60:
+        return cached[1]
+    library = local_library(section)
+    root = Path(library["path"]).resolve()
+    result = []
+    try:
+        files = sorted((path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS), key=lambda path: str(path).lower())
+    except OSError as exc:
+        raise ValueError("ChannelForge could not read that local library.") from exc
+    for path in files[:20_000]:
+        resolved = path.resolve()
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            continue
+        identity = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:24]
+        poster = local_poster(resolved, root)
+        title = resolved.stem.replace("_", " ").replace(".", " ").strip()
+        result.append({
+            "id": f"local-{identity}", "title": title, "year": "", "type": "video",
+            "duration_ms": local_duration_ms(resolved), "key": f"local:{identity}",
+            "thumb": f"local:{identity}" if poster else "", "summary": str(relative.parent) if relative.parent != Path(".") else "Local media",
+            "content_rating": "", "rating": "", "series": relative.parts[0] if len(relative.parts) > 1 else "",
+            "season": 0, "episode": 0, "part_key": "", "container": resolved.suffix.lstrip("."),
+            "video_codec": "", "audio_codec": "", "source": "local", "file_path": str(resolved),
+        })
+    LOCAL_LIBRARY_CACHE[section] = (time.time(), result)
+    return result
+
+
+def library_items(section: str) -> list[dict]:
+    return local_items(section) if section.startswith("local:") else plex_items(section)
+
+
+def local_image(section: str, media_id: str) -> tuple[bytes, str]:
+    library = local_library(section)
+    root = Path(library["path"]).resolve()
+    item = next((entry for entry in local_items(section) if entry["id"] == media_id), None)
+    if not item:
+        raise ValueError("Local poster was not found.")
+    poster = local_poster(Path(item["file_path"]), root)
+    if not poster:
+        raise ValueError("Local poster was not found.")
+    content_type = mimetypes.guess_type(poster.name)[0] or "application/octet-stream"
+    if not content_type.startswith("image/") or poster.stat().st_size > 12_000_000:
+        raise ValueError("Local poster is invalid or larger than 12 MB.")
+    return poster.read_bytes(), content_type
+
+
 def clean_channel(payload: dict, existing_id: str = "") -> dict:
     name = str(payload.get("name", "")).strip()
     if not name:
@@ -597,7 +757,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         raise ValueError("Channel number is required.")
     items = payload.get("items", [])
     if not isinstance(items, list) or not items:
-        raise ValueError("Select at least one Plex title.")
+        raise ValueError("Select at least one media title.")
     normalized = []
     for item in items:
         if not isinstance(item, dict) or not str(item.get("id", "")).strip():
@@ -613,6 +773,8 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "season": max(0, int(item.get("season", 0) or 0)), "episode": max(0, int(item.get("episode", 0) or 0)),
             "part_key": str(item.get("part_key", ""))[:500], "container": str(item.get("container", ""))[:30],
             "video_codec": str(item.get("video_codec", ""))[:30], "audio_codec": str(item.get("audio_codec", ""))[:30],
+            "source": "local" if item.get("source") == "local" else "plex",
+            "file_path": str(item.get("file_path", ""))[:4000] if item.get("source") == "local" else "",
         })
     if not normalized:
         raise ValueError("The selected titles were invalid.")
@@ -799,8 +961,21 @@ def plex_part_key(item: dict) -> str:
     return key
 
 
+def local_media_path(item: dict) -> Path:
+    candidate = Path(str(item.get("file_path", ""))).resolve()
+    if item.get("source") != "local" or not candidate.is_file() or candidate.suffix.lower() not in MEDIA_EXTENSIONS:
+        raise ValueError("The local media file is missing or unsupported.")
+    for library in local_libraries():
+        try:
+            candidate.relative_to(Path(library["path"]).resolve())
+            return candidate
+        except ValueError:
+            continue
+    raise ValueError("That media file is outside the configured local libraries.")
+
+
 def start_ffmpeg_session(channel: dict) -> str:
-    """Create an Ersatz-style local HLS encoder fed by Plex's authenticated media file."""
+    """Create a local HLS encoder fed by Plex or an approved local media file."""
     position = schedule_position(channel)
     item = position["item"]
     identity = hashlib.sha256(f'{channel["id"]}:{item["id"]}:{position["start"].isoformat()}'.encode()).hexdigest()[:20]
@@ -813,10 +988,15 @@ def start_ffmpeg_session(channel: dict) -> str:
                 if session["process"].poll() is None:
                     session["process"].terminate()
                 FFMPEG_SESSIONS.pop(session_id, None)
-    settings = config()
-    part_url = settings["plex_url"] + plex_part_key(item)
-    separator = "&" if "?" in part_url else "?"
-    part_url += separator + urllib.parse.urlencode({"X-Plex-Token": settings["plex_token"]})
+    if item.get("source") == "local":
+        media_input = str(local_media_path(item))
+    else:
+        settings = config()
+        if not settings["plex_token"]:
+            raise ValueError("This channel uses Plex media, but Plex is not connected.")
+        media_input = settings["plex_url"] + plex_part_key(item)
+        separator = "&" if "?" in media_input else "?"
+        media_input += separator + urllib.parse.urlencode({"X-Plex-Token": settings["plex_token"]})
     directory = STREAM_DIR / identity
     directory.mkdir(parents=True, exist_ok=True)
     for old in directory.glob("*"):
@@ -824,7 +1004,7 @@ def start_ffmpeg_session(channel: dict) -> str:
     remaining = max(30, int((position["stop"] - datetime.now(timezone.utc)).total_seconds()))
     command = [
         ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin", "-re",
-        "-ss", f'{position["offset_ms"] / 1000:.3f}', "-i", part_url, "-t", str(remaining),
+        "-ss", f'{position["offset_ms"] / 1000:.3f}', "-i", media_input, "-t", str(remaining),
         "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast",
         "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-ar", "48000",
         "-f", "hls", "-hls_time", "4", "-hls_list_size", "8",
@@ -1044,6 +1224,15 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/plex/items":
                 section = urllib.parse.parse_qs(parsed.query).get("section", [""])[0]
                 self.send_json(200, {"items": plex_items(section)})
+            elif parsed.path == "/api/libraries":
+                self.send_json(200, {"libraries": all_libraries()})
+            elif parsed.path == "/api/library/items":
+                section = urllib.parse.parse_qs(parsed.query).get("section", [""])[0]
+                self.send_json(200, {"items": library_items(section)})
+            elif parsed.path == "/api/local/image":
+                query = urllib.parse.parse_qs(parsed.query)
+                data, content_type = local_image(query.get("section", [""])[0], query.get("id", [""])[0])
+                self.send_bytes(200, data, content_type)
             elif parsed.path == "/api/plex/image":
                 image_path = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
                 data, content_type = plex_binary(image_path)
@@ -1088,8 +1277,6 @@ class Handler(BaseHTTPRequestHandler):
                 channel = next((item for item in channels() if item.get("id") == channel_id), None)
                 if not channel:
                     raise FileNotFoundError
-                if not config()["plex_token"]:
-                    raise ValueError("Plex is not connected.")
                 try:
                     session_id = start_ffmpeg_session(channel)
                     with LOCK:
@@ -1152,9 +1339,13 @@ class Handler(BaseHTTPRequestHandler):
                     "bind_host": str(payload.get("bind_host", old["bind_host"])).strip() or HOST,
                     "public_url": str(payload.get("public_url", old["public_url"])).strip().rstrip("/"),
                     "client_identifier": old["client_identifier"],
+                    "local_libraries": old["local_libraries"],
                 }
-                root = plex_request("/", updated)
-                updated["plex_profile"] = plex_profile(root)
+                if token:
+                    root = plex_request("/", updated)
+                    updated["plex_profile"] = plex_profile(root)
+                else:
+                    updated["plex_profile"] = {}
                 atomic_json(CONFIG_FILE, updated)
                 generate_exports()
                 self.send_json(200, {"ok": True, "config": config(True)})
@@ -1167,6 +1358,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"ok": True, "profile": plex_profile(root), "libraries": len(libraries_root.findall("Directory"))})
             elif parsed.path == "/api/plex/signin/start":
                 self.send_json(200, start_plex_signin())
+            elif parsed.path == "/api/local/libraries":
+                self.send_json(200, {"library": save_local_library(str(payload.get("name", "")), str(payload.get("path", "")))})
             elif parsed.path == "/api/channels":
                 self.send_json(200, {"channel": save_channel(payload)})
             elif parsed.path == "/api/channels/order":
@@ -1207,6 +1400,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         try:
+            if self.path.startswith("/api/local/libraries/"):
+                delete_local_library(self.path.rsplit("/", 1)[-1])
+                LOCAL_LIBRARY_CACHE.clear()
+                return self.send_json(200, {"ok": True})
             if self.path.startswith("/api/assets/"):
                 delete_asset(self.path.rsplit("/", 1)[-1])
                 return self.send_json(200, {"ok": True})

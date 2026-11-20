@@ -11,8 +11,10 @@ $pathFfmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
 if ($pathFfmpeg) { $ffmpegCandidates += Get-Item $pathFfmpeg.Source }
 $ffmpeg = $ffmpegCandidates | Where-Object Length -gt 10000000 | Sort-Object Length -Descending | Select-Object -First 1
 if (-not $ffmpeg) { throw "The real FFmpeg binary was not found (a Chocolatey shim is not sufficient). Install ffmpeg and run this script again." }
+$ffprobe = Get-Item (Join-Path $ffmpeg.DirectoryName "ffprobe.exe") -ErrorAction SilentlyContinue
+if (-not $ffprobe) { throw "ffprobe.exe was not found beside FFmpeg. Install the complete FFmpeg package and run this script again." }
 Write-Host "Bundling FFmpeg from $($ffmpeg.FullName) ($([math]::Round($ffmpeg.Length / 1MB, 1)) MB)"
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_ChannelForge --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.FullName);." Public_ChannelForge.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_ChannelForge --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.FullName);." --add-binary "$($ffprobe.FullName);." Public_ChannelForge.py
 
 $payload = Join-Path $root "installer\payload"
 New-Item -ItemType Directory -Force -Path $payload | Out-Null

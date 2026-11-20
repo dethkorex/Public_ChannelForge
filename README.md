@@ -1,14 +1,14 @@
 # Public ChannelForge 3
 
-Public ChannelForge is a standalone, local-first live TV server for Plex users. It runs continuously in the background, maintains deterministic 24/7 channel schedules, hosts XMLTV and M3U endpoints, and starts Plex HLS playback at the correct live-program offset. ErsatzTV is not required.
+Public ChannelForge is a standalone, local-first live TV server for local media folders, Plex libraries, or both. It runs continuously in the background, maintains deterministic 24/7 channel schedules, and hosts XMLTV, M3U, and browser-compatible HLS endpoints. Plex and ErsatzTV are optional.
 
 Version 3 introduces the studio workspace inspired by the private ChannelForge manager: a fixed sidebar and status bar, overview metrics and live lineup, dedicated searchable poster library, draggable channel ordering, a four-step channel builder, expanded ordered/shuffle/marathon/franchise modes, branding and guide-artwork workspaces, system health cards, and automatic credential-free configuration backups. Private artwork, private APIs, Fish Audio, and ErsatzTV-specific operations are intentionally not copied.
 
 The built-in **Watch TV** screen includes an embedded HLS player, channel rail, now-playing progress, and six-hour visual guide. Viewers click a channel and watch immediately in ChannelForge without adding it to Plex DVR.
 
-Playback uses an Ersatz-style local FFmpeg pipeline: ChannelForge reads the authenticated Plex media part, converts it to browser-compatible H.264/AAC HLS, and serves the playlist and segments from its own origin. Playback therefore does not depend on Plex accepting ChannelForge as a transcoder client, and avoids the cross-origin redirects and unsupported source codecs that can otherwise produce a black 0:00 player in Linux browsers.
+Playback uses a standalone FFmpeg pipeline. ChannelForge reads either an approved local-library file or an authenticated Plex media part, converts it to browser-compatible H.264/AAC HLS, and serves the playlist and segments from its own origin. Local-only users do not need a Plex account or server.
 
-The **Get Started** screen walks new users through connecting Plex, creating a channel, testing it in the player, and copying the hosted stream URLs. Setup includes a separate connection test with a clear success or failure result.
+The **Get Started** screen walks new users through adding a local folder or connecting Plex, creating a channel, testing it in the player, and copying the hosted stream URLs.
 
 Completed setup tasks show a visible check mark. Channels can be deleted either from the Channels manager or directly from the Watch TV channel rail.
 
@@ -29,8 +29,8 @@ The interface and asset workflow remain part of ChannelForge. Only the original 
 1. Download `Public_ChannelForge_Setup.exe` from the latest GitHub Release.
 2. Run it and choose the install folder, Desktop shortcut, and optional startup shortcut.
 3. Public ChannelForge starts its background TV server and opens at `http://127.0.0.1:8787`.
-4. On first launch, select **Sign in with Plex** and approve ChannelForge in the official Plex window. ChannelForge discovers and configures your server automatically.
-5. Return to **Channels**, create a channel, choose a Plex library, and select titles.
+4. On first launch, choose **Add a local media folder**, **Sign in with Plex**, or configure both.
+5. Open **Channels**, create a channel, choose any configured library, and select titles.
 6. Open **Guide exports** to copy the hosted XMLTV and M3U URLs into your DVR, tuner client, or IPTV player.
 
 Windows may show a SmartScreen warning because community builds are not code-signed. Verify the SHA-256 checksum shown in the GitHub release before running the installer.
@@ -97,9 +97,17 @@ The app uses XDG paths on Linux:
 
 Wayland compositors used by Omarchy do not need special configuration because the interface runs in the default browser. If the browser does not open automatically, visit `http://127.0.0.1:8787`.
 
-## Plex setup details
+## Local-folder setup
 
-- First launch requires a Plex connection before channels can be created. **Sign in with Plex** uses Plex's official PIN authorization page, never asks ChannelForge for your password, automatically receives the account token after approval, and discovers the best available Plex Media Server connection.
+- Open **System** → **Media sources**, enter a friendly library name, and provide the absolute path to an existing folder.
+- ChannelForge scans that folder recursively for MKV, MP4, M4V, AVI, MOV, WebM, TS, M2TS, MPEG, WMV, and FLV video files.
+- Add `poster.jpg`, `folder.jpg`, or an image with the same filename as a video to display local artwork.
+- The folder must remain available while its channels are playing. Removing a source never deletes the user's media.
+- Saved paths are validated before playback; ChannelForge will only open video files inside configured local-library roots.
+
+## Optional Plex setup details
+
+- **Sign in with Plex** uses Plex's official PIN authorization page, never asks ChannelForge for your password, automatically receives the account token after approval, and discovers the best available Plex Media Server connection.
 - Manual setup remains available from the onboarding screen for unusual network layouts or servers that Plex discovery cannot reach.
 - Use the URL that is reachable from the same computer, such as `http://127.0.0.1:32400` or `http://192.168.1.20:32400`.
 - To configure Plex automatically: in Plex Web, open a media item, select **Get Info** → **View XML**, copy the complete URL, and paste it into ChannelForge. The app extracts `X-Plex-Token`, securely stores it locally, and removes it from the visible server URL. Manual token entry remains available.
@@ -108,9 +116,9 @@ Wayland compositors used by Omarchy do not need special configuration because th
 
 ## Standalone server and live playback
 
-ChannelForge owns the channel clock and guide. Every channel has a stable schedule anchor; restarting the application does not reset the lineup to its first title. The XMLTV includes current and upcoming programs based on Plex duration metadata. The M3U points to ChannelForge's `/live/<channel>.m3u8` URLs. When a player opens one, ChannelForge resolves the current program and offset, then creates a Plex HLS session for that exact live position.
+ChannelForge owns the channel clock and guide. Every channel has a stable schedule anchor; restarting the application does not reset the lineup to its first title. The XMLTV includes current and upcoming programs using probed local-file or Plex duration metadata. The M3U points to ChannelForge's `/live/<channel>.m3u8` URLs. When a player opens one, ChannelForge resolves the current program and offset, then creates an HLS session for that exact live position.
 
-Plex remains the authenticated media source, but ChannelForge performs browser-compatible live transcoding locally with FFmpeg. ErsatzTV and its database/server are not involved. ChannelForge hosts the guide, playlist, channel clock, web manager, artwork, local encoder, and live entry points.
+Local folders and Plex can be used independently or together. ChannelForge performs browser-compatible live transcoding locally with FFmpeg and hosts the guide, playlist, channel clock, web manager, artwork, encoder, and live entry points.
 
 ## Channel playback modes
 
