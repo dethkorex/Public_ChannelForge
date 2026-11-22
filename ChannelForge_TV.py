@@ -9,7 +9,7 @@ import threading
 import urllib.request
 from pathlib import Path
 
-VERSION = "3.3.2"
+VERSION = "3.3.3"
 DIRECTORY = "https://directory.channelforge.tv/v1/catalog"
 GITHUB = "https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"
 

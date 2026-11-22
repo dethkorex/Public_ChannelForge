@@ -77,11 +77,19 @@ class Installer(tk.Tk):
 
     def shortcut_file(self, location: Path, target: Path):
         location.parent.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        environment.update({
+            "CHANNELFORGE_SHORTCUT": str(location),
+            "CHANNELFORGE_TARGET": str(target),
+            "CHANNELFORGE_WORKDIR": str(target.parent),
+        })
         script = (
-            "$s=(New-Object -COM WScript.Shell).CreateShortcut($args[0]);"
-            "$s.TargetPath=$args[1];$s.WorkingDirectory=$args[2];$s.Save()"
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:CHANNELFORGE_SHORTCUT);"
+            "$s.TargetPath=$env:CHANNELFORGE_TARGET;"
+            "$s.WorkingDirectory=$env:CHANNELFORGE_WORKDIR;"
+            "$s.Save()"
         )
-        subprocess.run(["powershell", "-NoProfile", "-Command", script, str(location), str(target), str(target.parent)], check=True, creationflags=0x08000000)
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True, env=environment, creationflags=0x08000000)
 
     def install(self):
         try:
