@@ -28,7 +28,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.3.0"
+VERSION = "3.3.1"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -53,6 +53,7 @@ EXPORT_DIR = DATA_DIR / "exports"
 PLUGINS_DIR = DATA_DIR / "plugins"
 ASSETS_DIR = DATA_DIR / "assets"
 BACKUP_DIR = DATA_DIR / "backups"
+POSTER_CACHE_DIR = DATA_DIR / "poster-cache"
 WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
 LOCK = threading.RLock()
 HLS_PROXY: dict[str, tuple[str, float]] = {}
@@ -564,6 +565,11 @@ def plex_request(path: str, settings: dict | None = None) -> ET.Element:
 def plex_binary(path: str) -> tuple[bytes, str]:
     if not path.startswith("/") or path.startswith("//"):
         raise ValueError("Invalid Plex image path.")
+    cache_key = hashlib.sha256(path.encode()).hexdigest()
+    cache_file, cache_meta = POSTER_CACHE_DIR / f"{cache_key}.img", POSTER_CACHE_DIR / f"{cache_key}.json"
+    if cache_file.is_file() and cache_meta.is_file():
+        metadata = load_json(cache_meta, {})
+        return cache_file.read_bytes(), str(metadata.get("content_type", "image/jpeg"))
     settings = config()
     if not settings["plex_token"]:
         raise ValueError("Enter a Plex token in Setup first.")
@@ -576,6 +582,11 @@ def plex_binary(path: str) -> tuple[bytes, str]:
             content_type = response.headers.get_content_type()
             if not content_type.startswith("image/"):
                 raise ValueError("Plex did not return an image.")
+            POSTER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            temporary = cache_file.with_suffix(".tmp")
+            temporary.write_bytes(data)
+            temporary.replace(cache_file)
+            atomic_json(cache_meta, {"content_type": content_type, "cached_at": int(time.time())})
             return data, content_type
     except (urllib.error.URLError, TimeoutError) as exc:
         raise ValueError("Could not load that Plex image.") from exc
@@ -931,6 +942,9 @@ def save_channel(payload: dict, channel_id: str = "") -> dict:
             values.append(item)
         atomic_json(CHANNELS_FILE, values)
         generate_exports(values)
+        plex_posters = [str(media.get("thumb", "")) for media in item["items"] if media.get("source") != "local" and media.get("thumb")]
+        if plex_posters:
+            threading.Thread(target=lambda: [plex_binary(path) for path in plex_posters], daemon=True, name="channel-forge-poster-cache").start()
         return item
 
 
@@ -1136,7 +1150,7 @@ def start_ffmpeg_session(channel: dict) -> str:
     ]
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=0x08000000 if sys.platform == "win32" else 0)
     with LOCK:
-        FFMPEG_SESSIONS[identity] = {"process": process, "directory": directory, "channel_id": channel["id"], "created": time.time()}
+        FFMPEG_SESSIONS[identity] = {"process": process, "directory": directory, "channel_id": channel["id"], "created": time.time(), "last_access": time.time()}
     deadline = time.time() + 25
     playlist = directory / "index.m3u8"
     while time.time() < deadline:
@@ -1157,6 +1171,25 @@ def stop_ffmpeg_sessions() -> None:
     for session in sessions:
         if session["process"].poll() is None:
             session["process"].terminate()
+
+
+def reap_idle_sessions_once(now: float | None = None) -> int:
+    """Stop encoders whose viewers stopped requesting HLS data."""
+    moment = now if now is not None else time.time()
+    with LOCK:
+        expired = [(key, value) for key, value in FFMPEG_SESSIONS.items() if moment - value.get("last_access", value.get("created", moment)) > 60]
+        for key, _value in expired:
+            FFMPEG_SESSIONS.pop(key, None)
+    for _key, session in expired:
+        if session["process"].poll() is None:
+            session["process"].terminate()
+    return len(expired)
+
+
+def reap_idle_sessions() -> None:
+    while True:
+        time.sleep(15)
+        reap_idle_sessions_once()
 
 
 atexit.register(stop_ffmpeg_sessions)
@@ -1473,6 +1506,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise FileNotFoundError
                 with LOCK:
                     session = FFMPEG_SESSIONS.get(parts[1])
+                    if session:
+                        session["last_access"] = time.time()
                 if not session:
                     raise FileNotFoundError
                 path = session["directory"] / parts[2]
@@ -1675,6 +1710,7 @@ def main() -> None:
     print(f"Data directory: {DATA_DIR}")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    threading.Thread(target=reap_idle_sessions, daemon=True, name="channel-forge-idle-reaper").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

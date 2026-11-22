@@ -281,6 +281,16 @@ class CoreTests(unittest.TestCase):
         self.assertRegex(items[0]["stream_url"], r"/vault/[a-f0-9]{24}\.m3u8$")
         self.assertEqual(app.vault_source(items[0]["id"])["id"], "99")
 
+    def test_idle_playback_session_is_stopped(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        app.FFMPEG_SESSIONS["idle"] = {"process": process, "created": 1.0, "last_access": 10.0}
+        app.FFMPEG_SESSIONS["active"] = {"process": mock.Mock(), "created": 90.0, "last_access": 90.0}
+        self.assertEqual(app.reap_idle_sessions_once(100.0), 1)
+        process.terminate.assert_called_once()
+        self.assertNotIn("idle", app.FFMPEG_SESSIONS)
+        self.assertIn("active", app.FFMPEG_SESSIONS)
+
     def test_updater_compares_semantic_versions(self):
         self.assertGreater(app.version_tuple("v2.10.0"), app.version_tuple("2.9.9"))
         self.assertEqual(app.version_tuple("v2.3"), (2, 3, 0))
