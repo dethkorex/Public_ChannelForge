@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 import http.client
+import io
 from unittest import mock
 from pathlib import Path
 
@@ -102,6 +103,23 @@ class CoreTests(unittest.TestCase):
         channel = app.clean_channel({"name": "Local", "number": "10", "section": library["key"], "items": [item]})
         app.atomic_json(app.CONFIG_FILE, {"plex_url": "http://127.0.0.1:32400", "plex_token": "", "local_libraries": [{"id": library["id"], "name": "Movies", "path": str(root)}]})
         self.assertEqual(app.local_media_path(channel["items"][0]), video.resolve())
+
+    def test_local_movie_upload_streams_into_configured_library(self):
+        root = Path(tempfile.mkdtemp(prefix="channel-forge-upload-"))
+        library = app.save_local_library("Uploads", str(root))
+        handler = mock.Mock()
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Content-Length": "11"}
+        handler.rfile = io.BytesIO(b"movie-bytes")
+        result = app.upload_local_media(handler, library["key"], "My Movie.mp4")
+        uploaded = root / "ChannelForge Uploads" / result["name"]
+        self.assertEqual(uploaded.read_bytes(), b"movie-bytes")
+
+    def test_remote_movie_upload_is_rejected(self):
+        handler = mock.Mock()
+        handler.client_address = ("192.0.2.10", 12345)
+        with self.assertRaisesRegex(ValueError, "only from"):
+            app.upload_local_media(handler, "local:missing", "movie.mp4")
 
     def test_live_url_uses_plex_hls_at_current_offset(self):
         channel = app.clean_channel({"name": "Live", "number": "3", "schedule_anchor": "2026-01-01T00:00:00+00:00", "items": [

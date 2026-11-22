@@ -28,7 +28,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.2.0"
+VERSION = "3.2.1"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -832,6 +832,40 @@ def local_image(section: str, media_id: str) -> tuple[bytes, str]:
     return poster.read_bytes(), content_type
 
 
+def upload_local_media(handler: BaseHTTPRequestHandler, section: str, filename: str) -> dict:
+    if handler.client_address[0] not in {"127.0.0.1", "::1"}:
+        raise ValueError("Movie uploads are allowed only from the computer running ChannelForge.")
+    library = local_library(section)
+    original = Path(urllib.parse.unquote(filename)).name
+    safe_name = re.sub(r"[^A-Za-z0-9._() -]+", "_", original).strip(" .")
+    if not safe_name or Path(safe_name).suffix.lower() not in MEDIA_EXTENSIONS:
+        raise ValueError("Choose a supported video file.")
+    length = int(handler.headers.get("Content-Length", "0") or 0)
+    if length < 1 or length > 20 * 1024 * 1024 * 1024:
+        raise ValueError("Movie uploads must be between 1 byte and 20 GB.")
+    folder = Path(library["path"]).resolve() / "ChannelForge Uploads"
+    folder.mkdir(parents=True, exist_ok=True)
+    destination = folder / safe_name
+    if destination.exists():
+        destination = folder / f"{destination.stem}-{secrets.token_hex(3)}{destination.suffix}"
+    temporary = destination.with_suffix(destination.suffix + ".uploading")
+    remaining = length
+    try:
+        with temporary.open("wb") as output:
+            while remaining:
+                chunk = handler.rfile.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError("The upload ended before the complete movie was received.")
+                output.write(chunk)
+                remaining -= len(chunk)
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    LOCAL_LIBRARY_CACHE.pop(section, None)
+    return {"name": destination.name, "size": destination.stat().st_size, "library": library["title"]}
+
+
 def clean_channel(payload: dict, existing_id: str = "") -> dict:
     name = str(payload.get("name", "")).strip()
     if not name:
@@ -1411,6 +1445,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/api/local/upload":
+                query = urllib.parse.parse_qs(parsed.query)
+                result = upload_local_media(self, query.get("section", [""])[0], self.headers.get("X-File-Name", ""))
+                return self.send_json(201, {"upload": result})
             payload = self.body()
             if parsed.path == "/api/setup":
                 old = config()
