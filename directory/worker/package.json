@@ -1,0 +1,7 @@
+{
+  "name": "channelforge-directory-worker",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {"dev": "wrangler dev", "deploy": "wrangler deploy", "test": "node --test test/*.test.js"},
+  "devDependencies": {"wrangler": "^4.0.0"}
+}

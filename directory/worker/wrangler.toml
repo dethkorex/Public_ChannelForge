@@ -1,0 +1,13 @@
+name = "channelforge-directory"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[[kv_namespaces]]
+binding = "CREATORS"
+id = "REPLACE_WITH_PRODUCTION_KV_ID"
+
+[triggers]
+crons = ["*/2 * * * *"]
+
+[vars]
+OFFLINE_AFTER_SECONDS = "360"

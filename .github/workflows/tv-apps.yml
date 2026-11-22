@@ -1,0 +1,56 @@
+name: Build TV apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  fire-tv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Build installable Fire TV APK
+        run: |
+          gradle -p tv/firetv :app:assembleDebug
+          mkdir -p tv-release
+          cp tv/firetv/app/build/outputs/apk/debug/app-debug.apk tv-release/ChannelForgeTV-FireTV.apk
+          sha256sum tv-release/ChannelForgeTV-FireTV.apk > tv-release/SHA256SUMS-TV.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChannelForge-TV-FireTV
+          path: tv-release/*
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: tv-release/*
+
+  roku:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package Roku channel
+        run: |
+          mkdir -p tv-release
+          cd tv/roku
+          zip -r ../../tv-release/ChannelForgeTV-Roku.zip manifest source components
+          cd ../..
+          sha256sum tv-release/ChannelForgeTV-Roku.zip > tv-release/SHA256SUMS-Roku.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChannelForge-TV-Roku
+          path: tv-release/*
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: tv-release/*

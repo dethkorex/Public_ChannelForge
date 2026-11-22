@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="ChannelCard" extends="Group">
+  <interface><field id="itemContent" type="node" onChange="itemChanged"/><field id="focusPercent" type="float" onChange="focusChanged"/></interface>
+  <script type="text/brightscript" uri="ChannelCard.brs" />
+  <children><Rectangle id="background" width="760" height="88" color="0x0d1724ff"/><Label id="number" translation="[18,13]" width="105" height="60" color="0x67f0c2ff" font="font:MediumBoldSystemFont"/><Label id="title" translation="[126,10]" width="600" height="35" font="font:MediumBoldSystemFont"/><Label id="now" translation="[126,47]" width="600" height="28" color="0xa9b7c8ff" font="font:SmallSystemFont"/></children>
+</component>

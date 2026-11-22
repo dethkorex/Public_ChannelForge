@@ -7,4 +7,9 @@ __pycache__/
 release/
 installer/payload/
 *.tgz
+.gradle/
+tv/firetv/.gradle/
+tv/firetv/app/build/
+directory/worker/node_modules/
+directory/*.db
 

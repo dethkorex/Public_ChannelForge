@@ -2,6 +2,18 @@
 
 Public ChannelForge is a standalone, local-first live TV server for local media folders, Plex libraries, or both. It runs continuously in the background, maintains deterministic 24/7 channel schedules, and hosts XMLTV, M3U, and browser-compatible HLS endpoints. Plex and ErsatzTV are optional.
 
+## ChannelForge TV ecosystem
+
+Version 3.2 adds three public components without changing the owner's private ChannelForge build:
+
+- **Hosted Creator Directory** — creators explicitly publish their public XMLTV/M3U endpoints. An edge health check temporarily hides offline studios and restores them automatically.
+- **ChannelForge TV for Fire TV / Android TV** — downloadable remote-first APK with creator browsing, channel surfing, HLS playback, and a full-screen guide HUD.
+- **ChannelForge TV for Roku** — native SceneGraph/BrightScript channel with the same directory, channel surfing, guide, and HLS playback model.
+
+Publishing remains opt-in because channel names and stream endpoints may be private. The directory never receives Plex credentials, local filesystem paths, media databases, or video files. A creator's ChannelForge server must have a public HTTPS URL while viewers watch; the hosted directory removes the need for the project owner to run a separate discovery server, but it is not a video relay or CDN.
+
+Source and deployment instructions are in [`directory/`](directory/), [`tv/firetv/`](tv/firetv/), and [`tv/roku/`](tv/roku/). Tagged releases build the installable Fire TV APK and Roku ZIP automatically.
+
 Version 3 introduces the studio workspace inspired by the private ChannelForge manager: a fixed sidebar and status bar, overview metrics and live lineup, dedicated searchable poster library, draggable channel ordering, a four-step channel builder, expanded ordered/shuffle/marathon/franchise modes, branding and guide-artwork workspaces, system health cards, and automatic credential-free configuration backups. Private artwork, private APIs, Fish Audio, and ErsatzTV-specific operations are intentionally not copied.
 
 The built-in **Watch TV** screen includes an embedded HLS player, channel rail, now-playing progress, and six-hour visual guide. Viewers click a channel and watch immediately in ChannelForge without adding it to Plex DVR.

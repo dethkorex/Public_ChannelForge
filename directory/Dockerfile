@@ -1,0 +1,7 @@
+FROM python:3.12-alpine
+WORKDIR /app
+COPY server.py .
+ENV CHANNELFORGE_DIRECTORY_HOST=0.0.0.0 CHANNELFORGE_DIRECTORY_PORT=8790 CHANNELFORGE_DIRECTORY_DB=/data/directory.db
+VOLUME ["/data"]
+EXPOSE 8790
+CMD ["python", "server.py"]

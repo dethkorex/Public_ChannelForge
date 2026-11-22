@@ -28,7 +28,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -242,10 +242,16 @@ def config(public: bool = False) -> dict:
         "plex_profile": value.get("plex_profile", {}) if isinstance(value.get("plex_profile", {}), dict) else {},
         "client_identifier": str(value.get("client_identifier", "")) or secrets.token_hex(16),
         "local_libraries": value.get("local_libraries", []) if isinstance(value.get("local_libraries", []), list) else [],
+        "directory_url": str(value.get("directory_url", "https://directory.channelforge.tv")).strip().rstrip("/"),
+        "creator_id": str(value.get("creator_id", "")),
+        "creator_key": str(value.get("creator_key", "")),
+        "creator_profile": value.get("creator_profile", {}) if isinstance(value.get("creator_profile", {}), dict) else {},
     }
     if public:
         result["plex_token"] = ""
         result["token_saved"] = bool(value.get("plex_token"))
+        result["creator_key"] = ""
+        result["creator_published"] = bool(value.get("creator_id") and value.get("creator_key"))
         result.pop("client_identifier", None)
     return result
 
@@ -297,6 +303,84 @@ def delete_local_library(library_id: str) -> None:
         raise ValueError("Local library not found.")
     raw["local_libraries"] = updated
     atomic_json(CONFIG_FILE, raw)
+
+
+def directory_request(method: str, path: str, payload: dict | None = None, key: str = "") -> dict:
+    settings = config()
+    base = settings["directory_url"]
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("The Creator Directory must use HTTPS.")
+    data = json.dumps(payload).encode() if payload is not None else None
+    headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": f"{APP_NAME}/{VERSION}"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    request = urllib.request.Request(base + path, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            value = json.loads(response.read())
+            return value if isinstance(value, dict) else {}
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read()).get("error", "")
+        except Exception:
+            detail = ""
+        raise ValueError(detail or f"Creator Directory returned HTTP {exc.code}.") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValueError("Could not reach the hosted Creator Directory.") from exc
+
+
+def publish_creator(payload: dict) -> dict:
+    settings = config()
+    public_url = settings["public_url"]
+    if not public_url.startswith("https://"):
+        raise ValueError("Publishing requires a public HTTPS base URL for this ChannelForge server.")
+    profile = {
+        "name": str(payload.get("name", "")).strip()[:80],
+        "slug": str(payload.get("slug", "")).strip()[:60],
+        "description": str(payload.get("description", "")).strip()[:400],
+        "guide_url": public_url + "/exports/guide.xml",
+        "playlist_url": public_url + "/exports/channels.m3u",
+        "logo_url": str(payload.get("logo_url", "")).strip()[:1000],
+    }
+    if not profile["name"]:
+        raise ValueError("Enter a creator or studio name.")
+    if settings["creator_id"] and settings["creator_key"]:
+        result = directory_request("PUT", f'/v1/creators/{settings["creator_id"]}', profile, settings["creator_key"])
+        creator_id, creator_key = settings["creator_id"], settings["creator_key"]
+    else:
+        result = directory_request("POST", "/v1/creators", profile)
+        creator_id, creator_key = str(result.get("creator", {}).get("id", "")), str(result.get("api_key", ""))
+        if not creator_id or not creator_key:
+            raise ValueError("The Creator Directory did not return publishing credentials.")
+    raw = load_json(CONFIG_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    raw.update({"creator_id": creator_id, "creator_key": creator_key, "creator_profile": profile})
+    atomic_json(CONFIG_FILE, raw)
+    return result.get("creator", {"id": creator_id, **profile})
+
+
+def unpublish_creator() -> None:
+    settings = config()
+    if settings["creator_id"] and settings["creator_key"]:
+        directory_request("DELETE", f'/v1/creators/{settings["creator_id"]}', None, settings["creator_key"])
+    raw = load_json(CONFIG_FILE, {})
+    if isinstance(raw, dict):
+        raw.update({"creator_id": "", "creator_key": "", "creator_profile": {}})
+        atomic_json(CONFIG_FILE, raw)
+
+
+def sync_creator_async() -> None:
+    settings = config()
+    if not settings["creator_id"] or not settings["creator_key"] or not settings["creator_profile"]:
+        return
+    def worker() -> None:
+        try:
+            publish_creator(settings["creator_profile"])
+        except Exception as exc:
+            print(f"Creator Directory sync failed: {exc}")
+    threading.Thread(target=worker, daemon=True, name="channel-forge-directory-sync").start()
 
 
 def channels() -> list[dict]:
@@ -1131,6 +1215,7 @@ def generate_exports(values: list[dict] | None = None) -> dict:
         ])
     playlist_path = EXPORT_DIR / "channels.m3u"
     playlist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    sync_creator_async()
     return {"guide": str(guide_path), "playlist": str(playlist_path), "channels": len(values)}
 
 
@@ -1340,6 +1425,8 @@ class Handler(BaseHTTPRequestHandler):
                     "public_url": str(payload.get("public_url", old["public_url"])).strip().rstrip("/"),
                     "client_identifier": old["client_identifier"],
                     "local_libraries": old["local_libraries"],
+                    "directory_url": str(payload.get("directory_url", old["directory_url"])).strip().rstrip("/"),
+                    "creator_id": old["creator_id"], "creator_key": old["creator_key"], "creator_profile": old["creator_profile"],
                 }
                 if token:
                     root = plex_request("/", updated)
@@ -1360,6 +1447,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, start_plex_signin())
             elif parsed.path == "/api/local/libraries":
                 self.send_json(200, {"library": save_local_library(str(payload.get("name", "")), str(payload.get("path", "")))})
+            elif parsed.path == "/api/directory/publish":
+                raw = load_json(CONFIG_FILE, {})
+                if not isinstance(raw, dict):
+                    raw = {}
+                if payload.get("directory_url"):
+                    raw["directory_url"] = str(payload["directory_url"]).strip().rstrip("/")
+                if payload.get("public_url"):
+                    raw["public_url"] = str(payload["public_url"]).strip().rstrip("/")
+                atomic_json(CONFIG_FILE, raw)
+                generate_exports()
+                self.send_json(200, {"creator": publish_creator(payload)})
             elif parsed.path == "/api/channels":
                 self.send_json(200, {"channel": save_channel(payload)})
             elif parsed.path == "/api/channels/order":
@@ -1400,6 +1498,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         try:
+            if self.path == "/api/directory/publish":
+                unpublish_creator()
+                return self.send_json(200, {"ok": True})
             if self.path.startswith("/api/local/libraries/"):
                 delete_local_library(self.path.rsplit("/", 1)[-1])
                 LOCAL_LIBRARY_CACHE.clear()

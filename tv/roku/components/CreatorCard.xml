@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="CreatorCard" extends="Group">
+  <interface><field id="itemContent" type="node" onChange="itemChanged"/><field id="focusPercent" type="float" onChange="focusChanged"/></interface>
+  <script type="text/brightscript" uri="CreatorCard.brs" />
+  <children><Rectangle id="background" width="570" height="92" color="0x101b2aff"/><Label id="title" translation="[22,12]" width="520" height="35" font="font:MediumBoldSystemFont"/><Label id="description" translation="[22,49]" width="520" height="30" color="0xa9b7c8ff" font="font:SmallSystemFont"/></children>
+</component>
