@@ -14,17 +14,19 @@ if (-not $ffmpeg) { throw "The real FFmpeg binary was not found (a Chocolatey sh
 $ffprobe = Get-Item (Join-Path $ffmpeg.DirectoryName "ffprobe.exe") -ErrorAction SilentlyContinue
 if (-not $ffprobe) { throw "ffprobe.exe was not found beside FFmpeg. Install the complete FFmpeg package and run this script again." }
 Write-Host "Bundling FFmpeg from $($ffmpeg.FullName) ($([math]::Round($ffmpeg.Length / 1MB, 1)) MB)"
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_ChannelForge --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.FullName);." --add-binary "$($ffprobe.FullName);." Public_ChannelForge.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Creator --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.FullName);." --add-binary "$($ffprobe.FullName);." Public_ChannelForge.py
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_TV --add-data "web\hls.min.js;web" ChannelForge_TV.py
 
 $payload = Join-Path $root "installer\payload"
 New-Item -ItemType Directory -Force -Path $payload | Out-Null
-Copy-Item -Force (Join-Path $root "dist\Public_ChannelForge.exe") (Join-Path $payload "Public_ChannelForge.exe")
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_ChannelForge_Setup --add-data "installer\payload;payload" installer\windows_installer.py
+Copy-Item -Force (Join-Path $root "dist\ChannelForge_Creator.exe") (Join-Path $payload "ChannelForge_Creator.exe")
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Creator_Setup --add-data "installer\payload;payload" installer\windows_installer.py
 
 $release = Join-Path $root "release"
 New-Item -ItemType Directory -Force -Path $release | Out-Null
-Copy-Item -Force (Join-Path $root "dist\Public_ChannelForge_Setup.exe") $release
+Copy-Item -Force (Join-Path $root "dist\ChannelForge_Creator_Setup.exe") $release
+# Legacy alias keeps the in-app updater working for releases installed before the rename.
+Copy-Item -Force (Join-Path $root "dist\ChannelForge_Creator_Setup.exe") (Join-Path $release "Public_ChannelForge_Setup.exe")
 Copy-Item -Force (Join-Path $root "dist\ChannelForge_TV.exe") $release
-Get-FileHash (Join-Path $release "Public_ChannelForge_Setup.exe") -Algorithm SHA256 | Format-List
+Get-FileHash (Join-Path $release "ChannelForge_Creator_Setup.exe") -Algorithm SHA256 | Format-List
 

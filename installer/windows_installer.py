@@ -1,4 +1,4 @@
-"""Small graphical installer, packaged as Public_ChannelForge_Setup.exe."""
+"""Small graphical installer, packaged as ChannelForge_Creator_Setup.exe."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-APP = "Public_ChannelForge"
+APP = "ChannelForge_Creator"
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 PAYLOAD = ROOT / "payload" / f"{APP}.exe"
 
@@ -44,7 +44,7 @@ class Installer(tk.Tk):
         self.clear()
         self.back.configure(state="normal" if self.page else "disabled")
         if self.page == 0:
-            ttk.Label(self.body, text="Welcome to Public ChannelForge", font=("Segoe UI", 20, "bold")).pack(anchor="w", pady=(18, 12))
+            ttk.Label(self.body, text="Welcome to ChannelForge Creator", font=("Segoe UI", 20, "bold")).pack(anchor="w", pady=(18, 12))
             ttk.Label(self.body, text="Create personal TV channels from local folders, Plex, or both.\n\nThis public build contains no private APIs, artwork, presets, or user data.", wraplength=530).pack(anchor="w")
         elif self.page == 1:
             ttk.Label(self.body, text="Choose an install folder", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(8, 18))
@@ -97,7 +97,7 @@ class Installer(tk.Tk):
             if self.autostart.get():
                 startup = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{APP}.lnk"
                 self.shortcut_file(startup, target)
-            messagebox.showinfo("Installation complete", "Public ChannelForge is installed. The setup page will open in your browser.")
+            messagebox.showinfo("Installation complete", "ChannelForge Creator is installed. Leave the application open while viewers use your channels.")
             subprocess.Popen([str(target)], cwd=str(destination))
             self.destroy()
         except Exception as exc:

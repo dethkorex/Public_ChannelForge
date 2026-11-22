@@ -28,7 +28,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.3.1"
+VERSION = "3.3.2"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -149,7 +149,8 @@ def update_asset_name(release: dict) -> tuple[str, str]:
     names = {item["name"] for item in release["assets"]}
     version = release["latest_version"]
     if sys.platform == "win32":
-        return "Public_ChannelForge_Setup.exe", "SHA256SUMS.txt"
+        candidate = "ChannelForge_Creator_Setup.exe" if "ChannelForge_Creator_Setup.exe" in names else "Public_ChannelForge_Setup.exe"
+        return candidate, "SHA256SUMS.txt"
     if Path("/etc/arch-release").exists():
         candidate = f"public-channelforge-{version}-1-any.pkg.tar.zst"
     elif Path("/etc/debian_version").exists():
@@ -1708,9 +1709,20 @@ def main() -> None:
     url = f"http://{HOST if bind_host in {'0.0.0.0', '::'} else bind_host}:{port}"
     print(f"{APP_NAME} {VERSION} is running at {url}")
     print(f"Data directory: {DATA_DIR}")
+    threading.Thread(target=reap_idle_sessions, daemon=True, name="channel-forge-idle-reaper").start()
+    if not args.no_browser and sys.platform == "win32":
+        import webview
+        thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server")
+        thread.start()
+        webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(1100, 720), background_color="#08111f")
+        try:
+            webview.start(debug=False)
+        finally:
+            server.shutdown()
+            server.server_close()
+        return
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    threading.Thread(target=reap_idle_sessions, daemon=True, name="channel-forge-idle-reaper").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

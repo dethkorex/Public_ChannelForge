@@ -38,12 +38,14 @@ The interface and asset workflow remain part of ChannelForge. Only the original 
 
 ## Windows installation
 
-1. Download `Public_ChannelForge_Setup.exe` from the latest GitHub Release.
+1. Download `ChannelForge_Creator_Setup.exe` from the latest GitHub Release.
 2. Run it and choose the install folder, Desktop shortcut, and optional startup shortcut.
-3. Public ChannelForge starts its background TV server and opens at `http://127.0.0.1:8787`.
+3. `ChannelForge_Creator.exe` opens as a dedicated desktop application window and starts its TV server at `http://127.0.0.1:8787` inside the same process.
 4. On first launch, choose **Add a local media folder**, **Sign in with Plex**, or configure both.
 5. Open **Channels**, create a channel, choose any configured library, and select titles.
 6. Open **Guide exports** to copy the hosted XMLTV and M3U URLs into your DVR, tuner client, or IPTV player.
+
+Leave the Public ChannelForge application open while viewers use its channels. The window hosts the XMLTV guide, M3U playlist, artwork, and on-demand HLS streams; closing it deliberately takes that creator's channels offline. `ChannelForge_TV.exe` is a separate native-window viewer for watching published studios and does not open the default browser.
 
 Windows may show a SmartScreen warning because community builds are not code-signed. Verify the SHA-256 checksum shown in the GitHub release before running the installer.
 
@@ -154,7 +156,7 @@ From PowerShell on Windows:
 ./scripts/build_windows.ps1
 ```
 
-The script installs the pinned PyInstaller build dependency and creates `release/Public_ChannelForge_Setup.exe` plus a SHA-256 checksum in the console. The installer is per-user and does not require administrator rights.
+The script installs the pinned build dependencies and creates `release/ChannelForge_Creator_Setup.exe` and `release/ChannelForge_TV.exe` plus SHA-256 checksums. The installer is per-user and does not require administrator rights.
 
 ## Developer run and tests
 

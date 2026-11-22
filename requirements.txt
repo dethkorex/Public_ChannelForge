@@ -1,4 +1,4 @@
-# Public_ChannelForge uses only Python's standard library at runtime.
-# PyInstaller is required only to build the Windows executables.
+# PyInstaller packages the Windows executables; pywebview provides their native app windows.
 pyinstaller>=6.11,<7
+pywebview>=5.4,<7
 

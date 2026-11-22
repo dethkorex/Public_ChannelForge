@@ -7,10 +7,9 @@ import os
 import sys
 import threading
 import urllib.request
-import webbrowser
 from pathlib import Path
 
-VERSION = "3.3.1"
+VERSION = "3.3.2"
 DIRECTORY = "https://directory.channelforge.tv/v1/catalog"
 GITHUB = "https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"
 
@@ -60,10 +59,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
+    import webview
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     url = f"http://127.0.0.1:{server.server_port}/"
-    threading.Timer(0.4, lambda: webbrowser.open(url)).start()
-    server.serve_forever()
+    thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-tv-server")
+    thread.start()
+    webview.create_window("ChannelForge TV", url=url, width=1500, height=900, min_size=(1100, 700), background_color="#080414")
+    try:
+        webview.start(debug=False)
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 if __name__ == "__main__":
