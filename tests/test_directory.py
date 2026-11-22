@@ -15,10 +15,11 @@ class DirectoryTests(unittest.TestCase):
         os.environ.pop("CHANNELFORGE_DIRECTORY_ALLOW_HTTP", None)
 
     def test_creator_payload_contains_only_public_metadata(self):
-        value = server.clean_payload({"name": "My Studio", "description": "Channels", "guide_url": "http://example.test/guide.xml", "playlist_url": "http://example.test/channels.m3u"})
+        value = server.clean_payload({"name": "My Studio", "description": "Channels", "guide_url": "http://example.test/guide.xml", "playlist_url": "http://example.test/channels.m3u", "vault_url": "http://example.test/api/public/vault"})
         self.assertEqual(value["slug"], "my-studio")
         self.assertNotIn("plex_token", value)
         self.assertNotIn("local_libraries", value)
+        self.assertEqual(value["vault_url"], "http://example.test/api/public/vault")
 
     def test_production_rejects_non_https_endpoints(self):
         os.environ.pop("CHANNELFORGE_DIRECTORY_ALLOW_HTTP", None)

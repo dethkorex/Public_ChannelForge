@@ -35,7 +35,7 @@ jobs:
       - shell: powershell
         run: ./scripts/build_windows.ps1
       - shell: powershell
-        run: (Get-FileHash release/Public_ChannelForge_Setup.exe -Algorithm SHA256).Hash + "  Public_ChannelForge_Setup.exe" | Set-Content release/SHA256SUMS.txt
+        run: Get-ChildItem release/*.exe | Get-FileHash -Algorithm SHA256 | ForEach-Object { $_.Hash + "  " + (Split-Path $_.Path -Leaf) } | Set-Content release/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
           name: Public_ChannelForge-Windows

@@ -15,6 +15,7 @@ $ffprobe = Get-Item (Join-Path $ffmpeg.DirectoryName "ffprobe.exe") -ErrorAction
 if (-not $ffprobe) { throw "ffprobe.exe was not found beside FFmpeg. Install the complete FFmpeg package and run this script again." }
 Write-Host "Bundling FFmpeg from $($ffmpeg.FullName) ($([math]::Round($ffmpeg.Length / 1MB, 1)) MB)"
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_ChannelForge --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.FullName);." --add-binary "$($ffprobe.FullName);." Public_ChannelForge.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_TV --add-data "web\hls.min.js;web" ChannelForge_TV.py
 
 $payload = Join-Path $root "installer\payload"
 New-Item -ItemType Directory -Force -Path $payload | Out-Null
@@ -24,5 +25,6 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name Public_Cha
 $release = Join-Path $root "release"
 New-Item -ItemType Directory -Force -Path $release | Out-Null
 Copy-Item -Force (Join-Path $root "dist\Public_ChannelForge_Setup.exe") $release
+Copy-Item -Force (Join-Path $root "dist\ChannelForge_TV.exe") $release
 Get-FileHash (Join-Path $release "Public_ChannelForge_Setup.exe") -Algorithm SHA256 | Format-List
 

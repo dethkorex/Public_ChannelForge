@@ -27,9 +27,12 @@ def connection() -> sqlite3.Connection:
     database.execute("""CREATE TABLE IF NOT EXISTS creators (
         id TEXT PRIMARY KEY, slug TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
         description TEXT NOT NULL, guide_url TEXT NOT NULL, playlist_url TEXT NOT NULL,
-        logo_url TEXT NOT NULL, key_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+        vault_url TEXT NOT NULL DEFAULT '', logo_url TEXT NOT NULL, key_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
         updated_at INTEGER NOT NULL
     )""")
+    columns = {row[1] for row in database.execute("PRAGMA table_info(creators)")}
+    if "vault_url" not in columns:
+        database.execute("ALTER TABLE creators ADD COLUMN vault_url TEXT NOT NULL DEFAULT ''")
     return database
 
 
@@ -56,12 +59,13 @@ def clean_payload(payload: dict) -> dict:
         "description": str(payload.get("description", "")).strip()[:400],
         "guide_url": clean_url(payload.get("guide_url")),
         "playlist_url": clean_url(payload.get("playlist_url")),
+        "vault_url": clean_url(payload.get("vault_url")),
         "logo_url": clean_url(payload.get("logo_url"), True),
     }
 
 
 def public_creator(row: sqlite3.Row) -> dict:
-    return {key: row[key] for key in ("id", "slug", "name", "description", "guide_url", "playlist_url", "logo_url", "updated_at")}
+    return {key: row[key] for key in ("id", "slug", "name", "description", "guide_url", "playlist_url", "vault_url", "logo_url", "updated_at")}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -116,9 +120,9 @@ class Handler(BaseHTTPRequestHandler):
             value = clean_payload(self.body())
             creator_id, api_key = secrets.token_hex(12), secrets.token_urlsafe(32)
             with connection() as database:
-                database.execute("INSERT INTO creators VALUES (?,?,?,?,?,?,?,?,1,?)", (
+                database.execute("INSERT INTO creators (id,slug,name,description,guide_url,playlist_url,vault_url,logo_url,key_hash,active,updated_at) VALUES (?,?,?,?,?,?,?,?,?,1,?)", (
                     creator_id, value["slug"], value["name"], value["description"], value["guide_url"],
-                    value["playlist_url"], value["logo_url"], hashlib.sha256(api_key.encode()).hexdigest(), int(time.time()),
+                    value["playlist_url"], value["vault_url"], value["logo_url"], hashlib.sha256(api_key.encode()).hexdigest(), int(time.time()),
                 ))
             self.send_json(201, {"creator": {"id": creator_id, **value}, "api_key": api_key})
         except sqlite3.IntegrityError:
@@ -146,8 +150,8 @@ class Handler(BaseHTTPRequestHandler):
                     database.execute("UPDATE creators SET active=0,updated_at=? WHERE id=?", (int(time.time()), creator_id))
                     return self.send_json(200, {"ok": True})
                 value = clean_payload(self.body())
-                database.execute("UPDATE creators SET slug=?,name=?,description=?,guide_url=?,playlist_url=?,logo_url=?,active=1,updated_at=? WHERE id=?", (
-                    value["slug"], value["name"], value["description"], value["guide_url"], value["playlist_url"], value["logo_url"], int(time.time()), creator_id,
+                database.execute("UPDATE creators SET slug=?,name=?,description=?,guide_url=?,playlist_url=?,vault_url=?,logo_url=?,active=1,updated_at=? WHERE id=?", (
+                    value["slug"], value["name"], value["description"], value["guide_url"], value["playlist_url"], value["vault_url"], value["logo_url"], int(time.time()), creator_id,
                 ))
             self.send_json(200, {"creator": {"id": creator_id, **value}})
         except Exception as exc:

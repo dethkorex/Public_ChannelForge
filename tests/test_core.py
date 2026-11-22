@@ -272,6 +272,15 @@ class CoreTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_public_vhs_vault_uses_proxied_posters_and_playable_urls(self):
+        app.save_channel({"name": "Vault TV", "number": "80", "items": [{"id": "99", "title": "Retro Movie", "year": "1985", "duration_ms": 600000, "key": "/library/metadata/99", "thumb": "/library/metadata/99/thumb/1"}]})
+        items = app.vault_items()
+        self.assertEqual(items[0]["title"], "Retro Movie")
+        self.assertIn("/api/plex/image?path=", items[0]["poster_url"])
+        self.assertNotIn("X-Plex-Token", items[0]["poster_url"])
+        self.assertRegex(items[0]["stream_url"], r"/vault/[a-f0-9]{24}\.m3u8$")
+        self.assertEqual(app.vault_source(items[0]["id"])["id"], "99")
+
     def test_updater_compares_semantic_versions(self):
         self.assertGreater(app.version_tuple("v2.10.0"), app.version_tuple("2.9.9"))
         self.assertEqual(app.version_tuple("v2.3"), (2, 3, 0))

@@ -14,6 +14,8 @@ sub load()
       node.title = creator.name
       node.description = creator.description
       node.url = creator.playlist_url
+      node.shortDescriptionLine2 = creator.vault_url
+      node.hdPosterUrl = creator.logo_url
     end for
   end if
   m.top.content = root

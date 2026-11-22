@@ -28,7 +28,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.2.1"
+VERSION = "3.3.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -335,13 +335,18 @@ def publish_creator(payload: dict) -> dict:
     public_url = settings["public_url"]
     if not public_url.startswith("https://"):
         raise ValueError("Publishing requires a public HTTPS base URL for this ChannelForge server.")
+    logo_asset_id = str(payload.get("logo_asset_id", "")).strip()
+    selected_logo = next((asset for asset in asset_manifest() if asset.get("id") == logo_asset_id), None)
+    logo_url = public_url + "/user-assets/" + urllib.parse.quote(selected_logo["filename"]) if selected_logo else str(payload.get("logo_url", "")).strip()[:1000]
     profile = {
         "name": str(payload.get("name", "")).strip()[:80],
         "slug": str(payload.get("slug", "")).strip()[:60],
         "description": str(payload.get("description", "")).strip()[:400],
         "guide_url": public_url + "/exports/guide.xml",
         "playlist_url": public_url + "/exports/channels.m3u",
-        "logo_url": str(payload.get("logo_url", "")).strip()[:1000],
+        "vault_url": public_url + "/api/public/vault",
+        "logo_url": logo_url,
+        "logo_asset_id": logo_asset_id if selected_logo else "",
     }
     if not profile["name"]:
         raise ValueError("Enter a creator or studio name.")
@@ -1243,14 +1248,62 @@ def generate_exports(values: list[dict] | None = None) -> dict:
     lines = ["#EXTM3U url-tvg=\"" + base + "/exports/guide.xml\""]
     for channel in values:
         stream = base + "/live/" + urllib.parse.quote(channel["id"]) + ".m3u8"
+        logo = next((item for item in asset_manifest() if item.get("id") == channel.get("logo_asset_id")), None)
+        logo_attribute = f' tvg-logo="{base}/user-assets/{logo["filename"]}"' if logo else ""
         lines.extend([
-            f'#EXTINF:-1 tvg-id="public-channelforge.{channel["id"]}" tvg-chno="{html.escape(channel["number"])}",{channel["name"]}',
+            f'#EXTINF:-1 tvg-id="public-channelforge.{channel["id"]}" tvg-chno="{html.escape(channel["number"])}"{logo_attribute},{channel["name"]}',
             stream,
         ])
     playlist_path = EXPORT_DIR / "channels.m3u"
     playlist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     sync_creator_async()
     return {"guide": str(guide_path), "playlist": str(playlist_path), "channels": len(values)}
+
+
+def vault_item_id(item: dict) -> str:
+    identity = f'{item.get("source", "plex")}:{item.get("id", "")}:{item.get("file_path", "")}'
+    return hashlib.sha256(identity.encode()).hexdigest()[:24]
+
+
+def vault_items() -> list[dict]:
+    result, seen = [], set()
+    base = server_base()
+    for channel in channels():
+        section = str(channel.get("section", ""))
+        for item in channel.get("items", []):
+            item_id = vault_item_id(item)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            thumb = str(item.get("thumb", ""))
+            if item.get("source") == "local" and thumb:
+                poster_url = f"{base}/api/local/image?section={urllib.parse.quote(section)}&id={urllib.parse.quote(str(item.get('id', '')))}"
+            elif thumb:
+                poster_url = f"{base}/api/plex/image?path={urllib.parse.quote(thumb)}"
+            else:
+                poster_url = ""
+            result.append({
+                "id": item_id, "title": item.get("title", "Untitled"), "year": item.get("year", ""),
+                "type": item.get("type", "video"), "summary": item.get("summary", ""),
+                "poster_url": poster_url, "stream_url": f"{base}/vault/{item_id}.m3u8",
+                "duration_ms": item.get("duration_ms", 1800000),
+            })
+    return result
+
+
+def vault_source(item_id: str) -> dict:
+    for channel in channels():
+        for item in channel.get("items", []):
+            if vault_item_id(item) == item_id:
+                return item
+    raise ValueError("Vault title was not found.")
+
+
+def start_vault_session(item_id: str) -> str:
+    item = vault_source(item_id)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    channel = {"id": f"vault-{item_id}", "items": [item], "schedule_anchor": now.isoformat(), "playback_mode": "ordered"}
+    return start_ffmpeg_session(channel)
 
 
 def plugin_tools() -> list[dict]:
@@ -1295,6 +1348,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self' http: https:; media-src 'self' blob: http: https:")
         for name, value in (extra_headers or {}).items():
@@ -1369,6 +1423,8 @@ class Handler(BaseHTTPRequestHandler):
                     slots = schedule_window(channel, moment, moment + timedelta(hours=6))
                     guide.append({"channel_id": channel["id"], "name": channel["name"], "number": channel["number"], "logo_asset_id": channel.get("logo_asset_id", ""), "programs": [{"title": slot["item"].get("title", "Untitled"), "year": slot["item"].get("year", ""), "type": slot["item"].get("type", "video"), "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat()} for slot in slots]})
                 self.send_json(200, {"generated_at": moment.isoformat(), "channels": guide})
+            elif parsed.path == "/api/public/vault":
+                self.send_json(200, {"version": 1, "generated_at": datetime.now(timezone.utc).isoformat(), "items": vault_items()})
             elif parsed.path == "/api/update":
                 release = latest_release()
                 release.pop("assets", None)
@@ -1404,6 +1460,12 @@ class Handler(BaseHTTPRequestHandler):
                     with LOCK:
                         PLAYBACK_ERRORS[channel_id] = str(exc)
                     raise
+                self.redirect(f"/ffmpeg-stream/{session_id}/index.m3u8")
+            elif parsed.path.startswith("/vault/") and parsed.path.endswith(".m3u8"):
+                item_id = Path(parsed.path).stem
+                if not re.fullmatch(r"[a-f0-9]{24}", item_id):
+                    raise FileNotFoundError
+                session_id = start_vault_session(item_id)
                 self.redirect(f"/ffmpeg-stream/{session_id}/index.m3u8")
             elif parsed.path.startswith("/ffmpeg-stream/"):
                 parts = parsed.path.strip("/").split("/")
