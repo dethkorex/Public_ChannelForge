@@ -102,8 +102,9 @@ public class MainActivity extends Activity {
         }
     };
     private boolean playbackWaiting, playbackFailed;
-    private final Runnable resetLiveRetries = () -> liveRetries = 0;
+    private final Runnable resetPlaybackRetries = () -> { liveRetries = 0; movieRetries = 0; };
     private VaultItem activeMovie;
+    private int movieRetries;
     private final LruCache<String, Bitmap> posters = new LruCache<String, Bitmap>(6 * 1024 * 1024) {
         @Override protected int sizeOf(String address, Bitmap image) { return image.getByteCount(); }
     };
@@ -116,7 +117,7 @@ public class MainActivity extends Activity {
                 ++liveRetries;
                 showBuffering("Reconnecting to the studio…", true);
                 scheduleLive(1000);
-            } else failPlayback();
+            } else if (!retryMovieConnection()) failPlayback();
         }
     };
     private final Runnable continueLive = () -> {
@@ -245,7 +246,7 @@ public class MainActivity extends Activity {
                 .setConnectTimeoutMs(6000).setReadTimeoutMs(10000);
         player = new ExoPlayer.Builder(this, new DefaultRenderersFactory(this).setEnableDecoderFallback(true))
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(http))
-                .setLoadControl(new DefaultLoadControl.Builder().setBufferDurationsMs(8000, 25000, 1400, 2500).build())
+                .setLoadControl(new DefaultLoadControl.Builder().setBufferDurationsMs(15000, 35000, 3500, 6000).build())
                 .setBandwidthMeter(new DefaultBandwidthMeter.Builder(this).setInitialBitrateEstimate(240_000L).build())
                 .setAudioAttributes(AudioAttributes.DEFAULT, true)
                 .build();
@@ -423,7 +424,7 @@ public class MainActivity extends Activity {
                 if (tunedChannel != null && error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW
                         && liveRetries < 2) {
                     ++liveRetries;
-                    video.removeCallbacks(resetLiveRetries);
+                    video.removeCallbacks(resetPlaybackRetries);
                     showBuffering("Catching up to live TV…", true);
                     waitForPlayback();
                     player.seekToDefaultPosition();
@@ -441,7 +442,15 @@ public class MainActivity extends Activity {
                 } else if (tunedChannel != null && liveRetries < 2) {
                     showBuffering("Reconnecting to the studio…", true);
                     scheduleLive(1200L * ++liveRetries);
-                } else failPlayback();
+                } else {
+                    boolean transientFailure = error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+                            || error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT;
+                    if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
+                        int code = ((HttpDataSource.InvalidResponseCodeException) cause).responseCode;
+                        transientFailure = code == 408 || code == 429 || code >= 500;
+                    }
+                    if (!transientFailure || !retryMovieConnection()) failPlayback();
+                }
             }
         });
     }
@@ -1759,7 +1768,7 @@ public class MainActivity extends Activity {
 
     private void waitForPlayback() {
         playbackFailed = false;
-        video.removeCallbacks(resetLiveRetries);
+        video.removeCallbacks(resetPlaybackRetries);
         if (playbackWaiting) return;
         playbackWaiting = true;
         long timeout = tunedChannel == null ? 24_000L : (liveRetries == 0 ? 12_000L : 16_000L);
@@ -1774,22 +1783,22 @@ public class MainActivity extends Activity {
     private void hidePlaybackBuffer() {
         clearPlaybackDeadline();
         bufferPanel.setVisibility(View.GONE);
-        if (tunedChannel != null && player.isPlaying()) {
-            video.removeCallbacks(resetLiveRetries);
-            video.postDelayed(resetLiveRetries, 4000);
+        if (player.isPlaying()) {
+            video.removeCallbacks(resetPlaybackRetries);
+            video.postDelayed(resetPlaybackRetries, tunedChannel != null ? 4000 : 30000);
         }
     }
 
     private void startStream(String url, boolean live) {
         renderedFrame = false;
-        video.removeCallbacks(resetLiveRetries);
+        video.removeCallbacks(resetPlaybackRetries);
         String host = Uri.parse(url).getHost();
-        boolean constrained = live && host != null && host.endsWith(".app.lhr.life");
+        boolean constrained = host != null && host.endsWith(".app.lhr.life");
         player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
                 .setMaxVideoBitrate(constrained ? 260_000 : Integer.MAX_VALUE).build());
         MediaItem.Builder media = new MediaItem.Builder().setUri(url).setMimeType(MimeTypes.APPLICATION_M3U8);
         if (live) {
-            media.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(6000).build());
+            media.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(12000).build());
             player.setMediaItem(media.build());
         } else {
             player.setMediaItem(media.build(), 0);
@@ -1802,6 +1811,21 @@ public class MainActivity extends Activity {
         playbackFailed = true;
         if (activeMovie != null && !ejectingTape) clearCassette();
         showBuffering("The studio could not deliver video. Press OK to retry or Back for the guide.", false);
+    }
+
+    private boolean retryMovieConnection() {
+        if (activeMovie == null || guideVisible || ejectingTape || movieRetries >= 2) return false;
+        movieRetries++;
+        showBuffering("Reconnecting to the movie…", true);
+        waitForPlayback();
+        // Preparing the same media item retains its playback position.
+        VaultItem movie = activeMovie;
+        video.post(() -> {
+            if (activeMovie != movie || guideVisible || ejectingTape) return;
+            player.prepare();
+            if (cassetteMotion == null) player.play();
+        });
+        return true;
     }
 
     private void play(int index) {
@@ -1833,6 +1857,7 @@ public class MainActivity extends Activity {
         video.removeCallbacks(liveProgramBoundary);
         streamTitle = movie.title;
         activeMovie = movie;
+        movieRetries = 0;
         clearPlaybackDeadline();
         video.removeCallbacks(continueLive);
         guide.setVisibility(View.GONE);
@@ -1918,7 +1943,10 @@ public class MainActivity extends Activity {
             boolean select = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER;
             if (select && playbackFailed) {
                 if (tunedChannel != null) play(channelIndex);
-                else if (activeMovie != null) playMovie(activeMovie);
+                else if (activeMovie != null) {
+                    movieRetries = 0;
+                    retryMovieConnection();
+                }
                 return true;
             }
             if (key == KeyEvent.KEYCODE_BACK || key == KeyEvent.KEYCODE_BUTTON_B || (select && tunedChannel != null)) {

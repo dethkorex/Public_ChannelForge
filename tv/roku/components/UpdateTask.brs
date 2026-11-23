@@ -18,7 +18,7 @@ sub load()
     end for
     m.top.notes = notes
   end if
-  installed = [3, 6, 0]
+  installed = [3, 6, 1]
   candidate = Mid(release.tag_name, 2).Tokenize(".")
   for index = 0 to 2
     part = Val(candidate[index])
@@ -28,7 +28,7 @@ sub load()
     end if
     if part < installed[index] then exit for
   end for
-  m.top.result = "UP TO DATE  ✓  v3.6.0"
+  m.top.result = "UP TO DATE  ✓  v3.6.1"
 end sub
 
 function requestRelease(address as string) as object

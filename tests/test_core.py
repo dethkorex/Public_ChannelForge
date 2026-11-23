@@ -80,8 +80,26 @@ class CoreTests(unittest.TestCase):
                 try:
                     app.start_public_media_server(automatic=True)
                     self.assertNotEqual(app.PUBLIC_MEDIA_SERVER.server_port, occupied.server_port)
+                    relay = app.PUBLIC_MEDIA_SERVER
+                    with mock.patch.object(app, "relay_reaches_this_creator") as proof:
+                        self.assertFalse(app.attach_media_funnel("https://studio.example"))
+                        proof.assert_not_called()
+                    self.assertIs(app.PUBLIC_MEDIA_SERVER, relay)
+                    self.assertTrue(app.relay_reaches_this_creator(f"http://127.0.0.1:{relay.server_port}"))
                 finally:
                     app.stop_public_media_server()
+
+    def test_failed_funnel_probe_keeps_the_verified_relay_listener(self):
+        with mock.patch.object(app, "PUBLIC_MEDIA_PORT", 0), mock.patch.object(app, "PUBLIC_MEDIA_SERVER", None):
+            try:
+                app.start_public_media_server(automatic=True)
+                relay = app.PUBLIC_MEDIA_SERVER
+                with mock.patch.object(app, "relay_reaches_this_creator", return_value=False):
+                    self.assertFalse(app.attach_media_funnel("https://studio.example"))
+                self.assertIs(app.PUBLIC_MEDIA_SERVER, relay)
+                self.assertTrue(app.relay_reaches_this_creator(f"http://127.0.0.1:{relay.server_port}"))
+            finally:
+                app.stop_public_media_server()
 
     def test_new_channel_publication_is_queued_and_can_be_disabled(self):
         with mock.patch.object(app, "PUBLISH_CHANGED", threading.Event()):

@@ -1,9 +1,3 @@
-- Live TV keeps one stream open as the next show or movie starts. Coming Up Next shows which title is about to air.
-- Creator can use an existing Tailscale Funnel dedicated to ChannelForge. Viewers find the studio in their guide without signing in or entering an address.
-- Channels go offline at the end of their lineup. In Creator, choose Refresh guide, Reshuffle lineup or Put back on TV. Movies remain on the studio’s Rewind Cinema shelf.
-- Fire TV adds movie search, genre and rating filters, and decade buttons from the 1960s through 2010+.
-- Live TV keeps a longer window of recent video. Fire TV can jump back to the live picture after a connection stall.
-- In Rewind Cinema, the TV/VCR lights up when your movie is ready. Choose Eject movie or press Back to return to the shelf.
-- Fixed a Linux movie freeze after VHS insertion. Movies shared through a custom public origin now use the remote streaming profile.
-- Creator limits temporary playback storage to 3 GiB and reserves 1 GiB of free space. The public directory checks offline studios less often.
-- Linux updates replace the existing installation. Creator and TV can restart after the update.
+- Creator keeps your studio discoverable when an older ChannelForge process is using the public media port. All channels and movies share the studio connection.
+- Fire TV now buffers a few seconds before playback and keeps a larger reserve during live TV. Movies can reconnect at the same position after a temporary network failure.
+- On supported FFmpeg builds, Creator prepares the first six seconds of remote movies and live TV ahead of playback.

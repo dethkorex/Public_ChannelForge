@@ -43,7 +43,7 @@ from release_metadata import read_latest_release
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.6.0"
+VERSION = "3.6.1"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -1832,14 +1832,9 @@ def start_public_tunnel() -> str:
             return TUNNEL_URL
         if TUNNEL_PROCESS is None or TUNNEL_PROCESS.poll() is not None:
             funnel = configured_media_funnel()
-            if funnel:
-                try:
-                    start_public_media_server()
-                    if relay_reaches_this_creator(funnel):
-                        TUNNEL_URL = funnel
-                        return funnel
-                except OSError:
-                    pass
+            if funnel and attach_media_funnel(funnel):
+                TUNNEL_URL = funnel
+                return funnel
             ssh = openssh_tool("ssh")
             if not ssh:
                 raise ValueError("Automatic public sharing requires OpenSSH, which was not found on this computer.")
@@ -2159,8 +2154,9 @@ def launch_encoder(identity, channel, position, profile, relay, budget):
     remaining = max(0.1, (position["stop"] - position["start"]).total_seconds() - position["offset_ms"] / 1000)
     input_timing = ["-re"] if on_demand else ["-re", "-ss", f'{position["offset_ms"] / 1000:.3f}']
     executable = ffmpeg_path()
-    if public_delivery and not on_demand and ffmpeg_supports_read_burst(executable):
-        input_timing += ["-readrate_initial_burst", "3"]
+    if public_delivery and ffmpeg_supports_read_burst(executable):
+        # Fill the viewer's startup buffer, then pace the encoder at normal speed.
+        input_timing += ["-readrate_initial_burst", "6"]
     output_timing = [] if on_demand else ["-t", f"{remaining:.3f}"]
     # Remote players need several extra segments to absorb relay jitter.
     hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments"] if on_demand else
@@ -3359,14 +3355,48 @@ class PublicMediaHandler(Handler):
     do_POST = do_PUT = do_DELETE = reject_write
 
 
+class PublicMediaServer(ThreadingHTTPServer):
+    def server_bind(self):
+        if sys.platform == "win32":
+            self.allow_reuse_address = False
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def open_public_media_server(port):
+    server = PublicMediaServer((HOST, port), PublicMediaHandler)
+    threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-public-media").start()
+    return server
+
+
+def attach_media_funnel(origin):
+    """Keep the relay listener available until the public Funnel proves ownership."""
+    global PUBLIC_MEDIA_SERVER
+    with PUBLIC_MEDIA_LOCK:
+        previous = PUBLIC_MEDIA_SERVER
+        if previous.server_port == PUBLIC_MEDIA_PORT:
+            return relay_reaches_this_creator(origin)
+        try:
+            candidate = open_public_media_server(PUBLIC_MEDIA_PORT)
+        except OSError:
+            return False
+        try:
+            if not relay_reaches_this_creator(origin):
+                return False
+            PUBLIC_MEDIA_SERVER = candidate
+        finally:
+            retired = previous if PUBLIC_MEDIA_SERVER is candidate else candidate
+            retired.shutdown()
+            retired.server_close()
+        return True
+
+
 def start_public_media_server(*, automatic: bool = False) -> None:
     global PUBLIC_MEDIA_SERVER
     with PUBLIC_MEDIA_LOCK:
         previous = PUBLIC_MEDIA_SERVER
         if previous is None or (not automatic and previous.server_port != PUBLIC_MEDIA_PORT):
-            server = ThreadingHTTPServer((HOST, 0 if automatic else PUBLIC_MEDIA_PORT), PublicMediaHandler)
-            threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-public-media").start()
-            PUBLIC_MEDIA_SERVER = server
+            PUBLIC_MEDIA_SERVER = open_public_media_server(0 if automatic else PUBLIC_MEDIA_PORT)
             if previous is not None:
                 previous.shutdown()
                 previous.server_close()
