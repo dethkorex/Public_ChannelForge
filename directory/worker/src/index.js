@@ -5,9 +5,23 @@ const token = () => [...crypto.getRandomValues(new Uint8Array(32))].map(value=>v
 const hash = async value => [...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value)))].map(byte=>byte.toString(16).padStart(2,"0")).join("");
 const safeUrl = value => {const url=new URL(text(value));if(url.protocol!=="https:"||url.username||url.password)throw new Error("Published endpoints must use public HTTPS.");return url.toString().slice(0,1000)};
 const publicCreator = value => {const {key_hash,failures,...visible}=value;return visible};
+const MIN_CREATOR = [3, 5, 19];
+
+function isSupportedCreator(version) {
+  const parts = text(version).match(/^v?(\d+)\.(\d+)\.(\d+)$/)?.slice(1).map(Number);
+  // Some existing public origins omit the version header. Their guide and
+  // playlist still need to pass protocol and reachability checks.
+  if (!parts) return true;
+  for (let index = 0; index < MIN_CREATOR.length; index++) {
+    if (parts[index] !== MIN_CREATOR[index]) return parts[index] > MIN_CREATOR[index];
+  }
+  return true;
+}
 
 async function readBody(request){const value=await request.json();if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("Expected an object.");return value}
 function validate(value) {
+  const creator_version = text(value.creator_version).slice(0, 32);
+  if (!isSupportedCreator(creator_version)) throw new Error("Update ChannelForge Creator to 3.5.19 or later to share worldwide.");
   const name = text(value.name).slice(0, 80);
   const slug = slugify(value.slug || name);
   if (!name || slug.length < 3) throw new Error("Creator name is required.");
@@ -30,6 +44,7 @@ function validate(value) {
     status_url: value.status_url ? validateEndpoint(value.status_url, "/api/public/channels") : "",
     vault_url: validateEndpoint(value.vault_url, "/api/public/vault"),
     logo_url: value.logo_url ? safeUrl(value.logo_url) : "",
+    ...(creator_version ? {creator_version} : {}),
   };
 }
 async function owned(request,env,id){const creator=await env.CREATORS.get(`creator:${id}`,"json"),provided=text(request.headers.get("authorization")).replace(/^Bearer\s+/i,"");if(!creator||!provided||await hash(provided)!==creator.key_hash)return null;return creator}
@@ -45,6 +60,9 @@ async function endpointOk(url, content) {
     });
     reader = response.body?.getReader();
     if (!response.ok || !reader) return false;
+    const installed = response.headers.get("x-channelforge-version")
+      || response.headers.get("server")?.match(/Public_ChannelForge\/(\d+\.\d+\.\d+)/i)?.[1];
+    if (!isSupportedCreator(installed)) return false;
     const decoder = new TextDecoder();
     let sample = "";
     while (sample.length < 2000) {

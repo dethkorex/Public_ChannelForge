@@ -3,3 +3,5 @@
 - Creator has a redesigned dashboard with quicker access to sources, channel editing, and worldwide sharing.
 - Fire TV loads the guide and movie catalog separately and uses adaptive playback.
 - Live TV continues into the next program and shows when a channel is offline.
+- Fullscreen Guide and Cinema use the whole screen. Fire TV has a collapsible sidebar with the same navigation as desktop.
+- The worldwide directory hides unsupported Creator versions until the studio updates and reconnects.

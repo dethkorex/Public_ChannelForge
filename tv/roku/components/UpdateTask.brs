@@ -18,5 +18,5 @@ sub load()
     end for
     m.top.notes = notes
   end if
-  if release.tag_name = "v3.5.25" then m.top.result = "UP TO DATE  ✓  v3.5.25" else m.top.result = "UPDATE " + release.tag_name + " AVAILABLE  ✓"
+  if release.tag_name = "v3.5.26" then m.top.result = "UP TO DATE  ✓  v3.5.26" else m.top.result = "UPDATE " + release.tag_name + " AVAILABLE  ✓"
 end sub

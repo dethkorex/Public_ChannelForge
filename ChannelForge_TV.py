@@ -20,7 +20,7 @@ from pathlib import Path
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.25"
+VERSION = "3.5.26"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -508,7 +508,10 @@ function adoptCreators(creators){
 function updateCinemaStudios(){
     const select=$('#cinema-studio-select');
     if(select){
-        select.replaceChildren(...allCreators.map(creator=>new Option(creator.name,creator.playlist_url)));
+        const options=allCreators.map(creator=>[creator.name,creator.playlist_url]);
+        const rendered=[...select.options].map(option=>[option.text,option.value]);
+        if(JSON.stringify(options)!==JSON.stringify(rendered))
+            select.replaceChildren(...options.map(([name,url])=>new Option(name,url)));
         select.disabled=!allCreators.length;
         select.value=selectedCreator?.playlist_url||'';
     }
@@ -1318,8 +1321,6 @@ function showScreen(name){
     document.querySelectorAll('[data-screen]').forEach(button=>button.classList.toggle('active',button.dataset.screen===name));
     document.body.classList.toggle('guide-mode',name==='live');
     document.body.classList.toggle('cinema-mode',name==='cinema');
-    if(name==='live'&&innerWidth>900)document.body.classList.add('menu-collapsed');
-    if(name==='cinema'&&innerWidth>900)document.body.classList.remove('menu-collapsed');
     if(name==='live')renderLiveGuide();
     if(name==='cinema'&&selectedCreator)studio(selectedCreator);
     if(innerWidth<=900)document.body.classList.remove('menu-open');

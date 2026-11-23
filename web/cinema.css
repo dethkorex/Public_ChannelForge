@@ -535,9 +535,12 @@
 .application-fullscreen body > header { flex: 0 0 76px; }
 .application-fullscreen main.wrap {
     flex: 1 1 0;
+    align-self: stretch;
+    width: auto;
     min-width: 0;
     min-height: 0;
     max-width: none;
+    margin-right: 0;
     overflow: auto;
     scrollbar-width: none;
 }
@@ -557,11 +560,13 @@
 }
 .application-fullscreen .cinema-mode [data-section-block="cinema"].vault-layout {
     min-height: 0;
+    grid-template-columns: minmax(0, 1.22fr) minmax(0, 1fr);
 }
 .application-fullscreen .cinema-mode [data-section-block="cinema"] :is(.vault,.selection) {
     height: auto;
     min-height: 0;
     overflow: hidden auto;
+    scrollbar-gutter: stable;
 }
 @media (max-height: 700px) {
     .application-fullscreen .cinema-mode { --cinema-top-height: clamp(76px, 17vh, 118px); }
@@ -571,6 +576,7 @@
 }
 @media (max-width: 760px) {
     .application-fullscreen .cinema-mode [data-section-block="cinema"].vault-layout {
+        grid-template-columns: minmax(0, 1fr);
         grid-template-rows: minmax(0, 1fr) minmax(0, .8fr);
     }
     .application-fullscreen .cinema-mode .cinema-hero { height: var(--cinema-top-height); }

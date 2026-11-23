@@ -40,7 +40,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.25"
+VERSION = "3.5.26"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -442,6 +442,7 @@ def publish_creator(payload: dict) -> dict:
         "playlist_url": public_url + "/exports/channels.m3u",
         "status_url": public_url + "/api/public/channels",
         "vault_url": public_url + "/api/public/vault",
+        "creator_version": VERSION,
         "logo_url": logo_url,
         "logo_asset_id": logo_asset_id if selected_logo else "",
     }
@@ -2725,6 +2726,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class PublicMediaHandler(Handler):
+    def end_headers(self) -> None:
+        self.send_header("X-ChannelForge-Version", VERSION)
+        super().end_headers()
+
     """Limit the public HTTPS origin to the paths TV viewers consume."""
 
     def catalog_base(self) -> str:

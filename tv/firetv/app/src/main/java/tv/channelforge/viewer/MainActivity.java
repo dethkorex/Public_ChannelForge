@@ -59,7 +59,14 @@ public class MainActivity extends Activity {
     private TextView insertMovie;
     private ExoPlayer player;
     private boolean renderedFrame;
-    private LinearLayout guide, creatorRail, channelRail;
+    private enum Page { HOME, LIVE, CINEMA, CONTINUE, FAVORITES }
+    private Page activePage = Page.HOME;
+    private Page renderedAuxiliary;
+    private final Map<Page, TextView> navButtons = new EnumMap<>(Page.class);
+    private LinearLayout guide, creatorRail, channelRail, navigationRail, menuPanel, auxiliaryPage;
+    private boolean menuCollapsed;
+    private int navigationWidth;
+
     private TextView status, banner, updateButton;
     private LinearLayout bufferPanel, bannerPanel;
     private ProgressBar bufferSpinner;
@@ -212,7 +219,12 @@ public class MainActivity extends Activity {
         video.setFocusable(false);
         root.addView(video, new FrameLayout.LayoutParams(-1, -1));
         guide = new LinearLayout(this); guide.setOrientation(LinearLayout.VERTICAL); guide.setPadding(dp(26),dp(16),dp(26),dp(15)); guide.setBackgroundColor(Color.argb(238, 4, 5, 20));
-        LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(10));
+        LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(8));
+        TextView menu = focusButton("☰");
+        menu.setContentDescription("Toggle navigation menu");
+        menu.setPadding(dp(12), 0, dp(12), 0);
+        menu.setOnClickListener(v -> toggleMenu());
+        header.addView(menu);
         ImageView logo=new ImageView(this);logo.setImageResource(R.mipmap.channel_forge_tv_icon);logo.setScaleType(ImageView.ScaleType.FIT_CENTER);header.addView(logo,new LinearLayout.LayoutParams(dp(68),dp(68)));
         LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);TextView brand=text("CHANNELFORGE TV",25,true);brand.setTextColor(color("#FFF229"));brand.setLetterSpacing(.16f);brandBox.addView(brand);TextView subtitle=text("THE COMMUNITY DIAL",11,true);subtitle.setTextColor(color("#55EFFF"));subtitle.setLetterSpacing(.28f);brandBox.addView(subtitle);header.addView(brandBox,new LinearLayout.LayoutParams(0,-2,1));
         screenSwitcher=focusButton("REWIND CINEMA");
@@ -226,12 +238,39 @@ public class MainActivity extends Activity {
         View line=new View(this);line.setBackgroundColor(color("#16DFF5"));guide.addView(line,new LinearLayout.LayoutParams(-1,dp(2)));
         status = text("●  CONNECTING TO THE PUBLIC CHANNEL DIRECTORY…", 12, true); status.setTextColor(color("#77F6A3"));status.setBackground(surface(new int[]{color("#111A3B"),color("#0A0B20")},color("#225E8B"),1,11));LinearLayout.LayoutParams statusLayout=new LinearLayout.LayoutParams(-1,-2);statusLayout.setMargins(0,dp(12),0,dp(12));guide.addView(status,statusLayout);
         LinearLayout columns = new LinearLayout(this); columns.setOrientation(LinearLayout.HORIZONTAL); guide.addView(columns, new LinearLayout.LayoutParams(-1, 0, 1));
-        LinearLayout creatorsPanel=panel();creatorRail=new LinearLayout(this);creatorRail.setOrientation(LinearLayout.VERTICAL);ScrollView creatorScroll=new ScrollView(this);creatorScroll.setVerticalScrollBarEnabled(false);creatorScroll.addView(creatorRail);creatorsPanel.addView(creatorScroll,new LinearLayout.LayoutParams(-1,0,1));LinearLayout.LayoutParams creatorsLayout=new LinearLayout.LayoutParams(0,-1,.29f);creatorsLayout.setMargins(0,0,dp(12),0);columns.addView(creatorsPanel,creatorsLayout);
-        LinearLayout channelsPanel=panel();channelRail=new LinearLayout(this);channelRail.setOrientation(LinearLayout.VERTICAL);ScrollView channelScroll=new ScrollView(this);channelScroll.setVerticalScrollBarEnabled(false);channelScroll.addView(channelRail);channelsPanel.addView(channelScroll,new LinearLayout.LayoutParams(-1,0,1));columns.addView(channelsPanel,new LinearLayout.LayoutParams(0,-1,.71f));
+        menuPanel = new LinearLayout(this);
+        menuPanel.setOrientation(LinearLayout.VERTICAL);
+        menuPanel.setBackground(surface(new int[]{color("#0A0B1C"), color("#150B2B")}, color("#2D365B"), 1, 10));
+        navigationWidth = dp(Math.max(158, Math.min(240, getResources().getConfiguration().screenWidthDp / 5)));
+        LinearLayout.LayoutParams menuLayout = new LinearLayout.LayoutParams(navigationWidth, -1);
+        menuLayout.setMargins(0, 0, dp(9), 0);
+        columns.addView(menuPanel, menuLayout);
+        ScrollView navigationScroll = new ScrollView(this);
+        navigationScroll.setFillViewport(true);
+        navigationScroll.setVerticalScrollBarEnabled(false);
+        LinearLayout menuContent = new LinearLayout(this);
+        menuContent.setPadding(dp(6), dp(5), dp(6), dp(5));
+        menuContent.setOrientation(LinearLayout.VERTICAL);
+        navigationRail = new LinearLayout(this);
+        navigationRail.setOrientation(LinearLayout.VERTICAL);
+        menuContent.addView(navigationRail);
+        creatorRail = new LinearLayout(this);
+        creatorRail.setOrientation(LinearLayout.VERTICAL);
+        menuContent.addView(creatorRail);
+        navigationScroll.addView(menuContent);
+        menuPanel.addView(navigationScroll, new LinearLayout.LayoutParams(-1, -1));
+        addNavigation("⌂", "Home", Page.HOME);
+        addNavigation("◉", "Live TV Guide", Page.LIVE);
+        addNavigation("▣", "Rewind Cinema", Page.CINEMA);
+        addNavigation("▶", "Continue Watching", Page.CONTINUE);
+        addNavigation("★", "Favorites", Page.FAVORITES);
+        TextView updatesLink = navigationButton("↻  Updates");
+        updatesLink.setOnClickListener(v -> selectUpdate());
+        navigationRail.addView(updatesLink);
+        LinearLayout channelsPanel=panel();channelRail=new LinearLayout(this);channelRail.setOrientation(LinearLayout.VERTICAL);ScrollView channelScroll=new ScrollView(this);channelScroll.setVerticalScrollBarEnabled(false);channelScroll.addView(channelRail);channelsPanel.addView(channelScroll,new LinearLayout.LayoutParams(-1,0,1));columns.addView(channelsPanel,new LinearLayout.LayoutParams(0,-1,1f));
         creatorRail.addView(sectionTitle("CREATOR STUDIOS","#5DEEFF"));
         creatorRail.addView(text("Searching worldwide…",14,false));
-        channelRail.addView(sectionTitle("LIVE TV GUIDE","#FF48C8"));
-        channelRail.addView(text("Finding public studios and channels…",16,false));
+        syncStudioScreen();
         TextView help = text("↑↓  SURF CHANNELS     •     OK  WATCH / GUIDE     •     BACK  RETURN TO GUIDE", 10, true); help.setTextColor(color("#7184A9")); guide.addView(help);
         root.addView(guide, new FrameLayout.LayoutParams(-1,-1));
         bufferPanel = panel();
@@ -417,6 +456,7 @@ public class MainActivity extends Activity {
         liveRail = null;
         movieRail = null;
         currentStudio = null;
+        auxiliaryPage = null;
         ++studioRequest;
         ++movieRequest;
         status.setText(error == null ? "NO PUBLIC STUDIOS ONLINE" : "PUBLIC DIRECTORY UNAVAILABLE  •  SELECT SCAN TO RETRY");
@@ -444,14 +484,6 @@ public class MainActivity extends Activity {
     private void renderCreators() {
         creatorRail.removeAllViews();
         status.setText("●  " + creators.size() + " PUBLIC CREATOR STUDIOS ONLINE");
-        TextView liveTab = focusButton("◉  LIVE TV GUIDE");
-        liveTab.setOnClickListener(v -> openCinemaScreen(false));
-        creatorRail.addView(liveTab);
-        addGap(creatorRail, 5);
-        TextView cinemaTab = focusButton("▣  REWIND CINEMA");
-        cinemaTab.setOnClickListener(v -> openCinemaScreen(true));
-        creatorRail.addView(cinemaTab);
-        addGap(creatorRail, 12);
         creatorRail.addView(sectionTitle("CREATOR STUDIOS", "#5DEEFF"));
         Creator selected = creators.get(0);
         for (Creator creator : creators) {
@@ -479,6 +511,7 @@ public class MainActivity extends Activity {
             vaultItems.clear();
             channelIndex = 0;
             channelRail.removeAllViews();
+            auxiliaryPage = null;
             liveRail = new LinearLayout(this);
             liveRail.setOrientation(LinearLayout.VERTICAL);
             movieRail = new LinearLayout(this);
@@ -523,22 +556,123 @@ public class MainActivity extends Activity {
                 channels.addAll(availableChannels);
                 channelIndex = Math.min(channelIndex, Math.max(0, channels.size() - 1));
                 renderChannels(creator.name);
+                if (activePage == Page.FAVORITES) syncStudioScreen();
             });
         });
         if (cinemaScreen && !movieShelfLoaded && !moviePageLoading) loadMoviePage(creator, 0);
     }
 
+    private TextView navigationButton(String label) {
+        TextView button = focusButton(label);
+        button.setTextSize(12);
+        button.setMinHeight(dp(37));
+        button.setPadding(dp(9), dp(3), dp(8), dp(3));
+        button.setMaxLines(1);
+        button.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        return button;
+    }
+
+    private void addNavigation(String icon, String label, Page page) {
+        TextView button = navigationButton(icon + "  " + label);
+        button.setTag(new String[]{icon, label});
+        button.setContentDescription(label);
+        button.setOnClickListener(v -> openPage(page));
+        navigationRail.addView(button);
+        navButtons.put(page, button);
+    }
+
+    private void toggleMenu() {
+        menuCollapsed = !menuCollapsed;
+        menuPanel.getLayoutParams().width = menuCollapsed ? dp(53) : navigationWidth;
+        menuPanel.requestLayout();
+        creatorRail.setVisibility(menuCollapsed ? View.GONE : View.VISIBLE);
+        for (TextView button : navButtons.values()) {
+            String[] parts = (String[]) button.getTag();
+            button.setText(menuCollapsed ? parts[0] : parts[0] + "  " + parts[1]);
+        }
+    }
+
     private void openCinemaScreen(boolean cinema) {
-        cinemaScreen = cinema;
+        openPage(cinema ? Page.CINEMA : Page.LIVE);
+    }
+
+    private void openPage(Page page) {
+        activePage = page;
+        cinemaScreen = page == Page.CINEMA;
         syncStudioScreen();
         if (cinemaScreen && currentStudio != null && !movieShelfLoaded && !moviePageLoading)
             loadMoviePage(currentStudio, 0);
     }
 
     private void syncStudioScreen() {
+        if (channelRail == null) return;
         screenSwitcher.setText(cinemaScreen ? "LIVE TV GUIDE" : "REWIND CINEMA");
-        if (liveRail != null) liveRail.setVisibility(cinemaScreen ? View.GONE : View.VISIBLE);
+        if (liveRail != null) liveRail.setVisibility(activePage == Page.LIVE ? View.VISIBLE : View.GONE);
         if (movieRail != null) movieRail.setVisibility(cinemaScreen ? View.VISIBLE : View.GONE);
+        if (auxiliaryPage != null && renderedAuxiliary == activePage
+                && (activePage == Page.HOME || activePage == Page.CONTINUE)) return;
+        if (auxiliaryPage != null) channelRail.removeView(auxiliaryPage);
+        auxiliaryPage = null;
+        if ((activePage == Page.LIVE && liveRail != null) || (cinemaScreen && movieRail != null)) return;
+        auxiliaryPage = new LinearLayout(this);
+        renderedAuxiliary = activePage;
+        auxiliaryPage.setOrientation(LinearLayout.VERTICAL);
+        channelRail.addView(auxiliaryPage);
+        if (activePage == Page.HOME) {
+            TextView hero = text("Live channels.\nOne community dial.", 26, true);
+            hero.setTextColor(color("#FFF271"));
+            hero.setBackground(surface(new int[]{color("#21184F"), color("#170B2B")}, color("#5B368E"), 1, 11));
+            auxiliaryPage.addView(hero);
+            addGap(auxiliaryPage, 8);
+            TextView guideButton = focusButton("OPEN LIVE TV GUIDE");
+            guideButton.setOnClickListener(v -> openPage(Page.LIVE));
+            auxiliaryPage.addView(guideButton);
+            addGap(auxiliaryPage, 5);
+            TextView cinemaButton = focusButton("OPEN REWIND CINEMA");
+            cinemaButton.setOnClickListener(v -> openPage(Page.CINEMA));
+            auxiliaryPage.addView(cinemaButton);
+        } else if (activePage == Page.FAVORITES) {
+            auxiliaryPage.addView(sectionTitle("FAVORITE CHANNELS", "#63EFFF"));
+            boolean found = false;
+            for (int i = 0; i < channels.size(); i++) {
+                int index = i;
+                Channel channel = channels.get(index);
+                if (!isFavorite(channel)) continue;
+                found = true;
+                TextView row = focusButton("★  CH " + displayNumber(channel, index) + "  " + channel.name);
+                row.setOnClickListener(v -> play(index));
+                auxiliaryPage.addView(row);
+            }
+            if (!found) auxiliaryPage.addView(text("Use the star in the guide to save a channel.", 13, false));
+        } else if (activePage == Page.CONTINUE) {
+            auxiliaryPage.addView(sectionTitle("CONTINUE WATCHING", "#63EFFF"));
+            auxiliaryPage.addView(text("No unfinished movies yet.", 13, false));
+        } else {
+            auxiliaryPage.addView(text("Waiting for a public studio. Select Scan for Channels to retry.", 14, false));
+            TextView retry = focusButton("↻ SCAN FOR CHANNELS");
+            retry.setOnClickListener(v -> loadDirectory());
+            auxiliaryPage.addView(retry);
+        }
+    }
+
+    private String favoriteKey(Channel channel) {
+        return (currentStudio == null ? "" : currentStudio.name) + Uri.parse(channel.url).getPath();
+    }
+
+    private boolean isFavorite(Channel channel) {
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getStringSet("favorite_channels", Collections.emptySet()).contains(favoriteKey(channel));
+    }
+
+    private void toggleFavorite(Channel channel, TextView button) {
+        SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
+        Set<String> saved = new HashSet<>(preferences.getStringSet("favorite_channels", Collections.emptySet()));
+        String key = favoriteKey(channel);
+        boolean added = saved.add(key);
+        if (!added) saved.remove(key);
+        preferences.edit().putStringSet("favorite_channels", saved).apply();
+        button.setText(added ? "★" : "☆");
+        button.setContentDescription((added ? "Remove from favorites: " : "Add to favorites: ") + channel.name);
     }
 
     private void loadMoviePage(Creator creator, int offset) {
@@ -666,7 +800,14 @@ public class MainActivity extends Activity {
             button.setOnClickListener(v -> play(index));
             LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
             layout.setMargins(0, 0, 0, dp(8));
-            liveRail.addView(button, layout);
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.addView(button, new LinearLayout.LayoutParams(0, -2, 1));
+            TextView star = navigationButton(isFavorite(channel) ? "★" : "☆");
+            star.setContentDescription("Toggle favorite: " + channel.name);
+            star.setOnClickListener(v -> toggleFavorite(channel, star));
+            row.addView(star, new LinearLayout.LayoutParams(dp(37), -2));
+            liveRail.addView(row, layout);
             if (guideVisible && !cinemaScreen && channel.url.equals(focusedChannel)) button.requestFocus();
         }
     }
@@ -723,7 +864,8 @@ public class MainActivity extends Activity {
         LinearLayout content = new LinearLayout(this);
         content.setBaselineAligned(false);
         content.setPadding(0, dp(8), 0, 0);
-        int height = Math.max(135, Math.min(440, getResources().getConfiguration().screenHeightDp - 305));
+        int screenHeight = getResources().getConfiguration().screenHeightDp;
+        int height = Math.max(118, Math.min(430, screenHeight - (screenHeight < 450 ? 236 : 284)));
         LinearLayout shelf = new LinearLayout(this);
         shelf.setOrientation(LinearLayout.VERTICAL);
         movieShelf = shelf;
