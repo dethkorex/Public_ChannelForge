@@ -63,11 +63,76 @@ async function endpointOk(url, content) {
   }
 }
 
-async function catalogSnapshot(env){const list=await env.CREATORS.list({prefix:"creator:"}),records=(await Promise.all(list.keys.map(key=>env.CREATORS.get(key.name,"json")))).filter(Boolean);return {version:1,generated_at:Math.floor(Date.now()/1000),creators:records.filter(item=>item.online).sort((a,b)=>a.name.localeCompare(b.name)).map(publicCreator)}}
-async function refreshCatalog(env){const snapshot=await catalogSnapshot(env);await env.CREATORS.put("catalog:v1",JSON.stringify(snapshot));return snapshot}
-async function register(request,env){const value=await validate(await readBody(request));const slugOwner=await env.CREATORS.get(`slug:${value.slug}`);if(slugOwner)return json({error:"Creator name is already registered."},409);if(!await endpointOk(value.guide_url,"xml")||!await endpointOk(value.playlist_url,"m3u")||!await endpointOk(value.vault_url,"json"))return json({error:"Guide, playlist, and vault must be online before publishing."},422);const id=crypto.randomUUID(),apiKey=token(),now=Math.floor(Date.now()/1000),creator={id,...value,key_hash:await hash(apiKey),online:true,last_ok:now,updated_at:now,failures:0};await Promise.all([env.CREATORS.put(`creator:${id}`,JSON.stringify(creator)),env.CREATORS.put(`slug:${value.slug}`,id)]);await refreshCatalog(env);return json({creator:publicCreator(creator),api_key:apiKey},201)}
-async function update(request,env,id){const creator=await owned(request,env,id);if(!creator)return json({error:"Invalid creator key."},403);if(request.method==="DELETE"){await Promise.all([env.CREATORS.delete(`creator:${id}`),env.CREATORS.delete(`slug:${creator.slug}`)]);await refreshCatalog(env);return json({ok:true})}const value=await validate(await readBody(request));if(!await endpointOk(value.guide_url,"xml")||!await endpointOk(value.playlist_url,"m3u")||!await endpointOk(value.vault_url,"json"))return json({error:"Guide, playlist, and vault must be online before republishing."},422);if(value.slug!==creator.slug){const owner=await env.CREATORS.get(`slug:${value.slug}`);if(owner&&owner!==id)return json({error:"Creator name is already registered."},409);await Promise.all([env.CREATORS.delete(`slug:${creator.slug}`),env.CREATORS.put(`slug:${value.slug}`,id)])}const now=Math.floor(Date.now()/1000),saved={...creator,...value,online:true,last_ok:now,failures:0,updated_at:now};await env.CREATORS.put(`creator:${id}`,JSON.stringify(saved));await refreshCatalog(env);return json({creator:publicCreator(saved)})}
-async function catalog(env){let snapshot=await env.CREATORS.get("catalog:v1","json");if(!snapshot)snapshot=await refreshCatalog(env);snapshot.generated_at=Math.floor(Date.now()/1000);return json(snapshot)}
+async function catalogSnapshot(env) {
+  const snapshot = await env.CREATORS.get("catalog:v1", "json");
+  return snapshot || {version: 1, generated_at: 0, creators: []};
+}
+
+async function refreshCatalog(env, changes, snapshot) {
+  snapshot ||= await catalogSnapshot(env);
+  const studios = new Map(snapshot.creators.map(creator => [creator.id, creator]));
+  for (const creator of changes) {
+    if (creator.online) studios.set(creator.id, publicCreator(creator));
+    else studios.delete(creator.id);
+  }
+  const creators = [...studios.values()].sort((a,b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  if (JSON.stringify(creators) !== JSON.stringify(snapshot.creators)) {
+    await env.CREATORS.put("catalog:v1", JSON.stringify({
+      version: 1, generated_at: Math.floor(Date.now()/1000), creators,
+    }));
+  }
+}
+
+async function publishable(value) {
+  const checks = await Promise.all([
+    endpointOk(value.guide_url, "xml"),
+    endpointOk(value.playlist_url, "m3u"),
+    endpointOk(value.vault_url, "json"),
+  ]);
+  return checks.every(Boolean);
+}
+
+async function register(request, env) {
+  const value = validate(await readBody(request));
+  const slugOwner = await env.CREATORS.get(`slug:${value.slug}`);
+  if (slugOwner) return json({error: "Creator name is already registered."}, 409);
+  if (!await publishable(value)) return json({error: "Guide, playlist, and vault must be online before publishing."}, 422);
+  const id = crypto.randomUUID(), apiKey = token(), now = Math.floor(Date.now()/1000);
+  const creator = {id, ...value, key_hash: await hash(apiKey), online: true, last_ok: now, updated_at: now, failures: 0};
+  await Promise.all([
+    env.CREATORS.put(`creator:${id}`, JSON.stringify(creator)),
+    env.CREATORS.put(`slug:${value.slug}`, id),
+  ]);
+  // KV may return a stale key list immediately after a write. Use this request's record.
+  await refreshCatalog(env, [creator]);
+  return json({creator: publicCreator(creator), api_key: apiKey}, 201);
+}
+
+async function update(request, env, id) {
+  const creator = await owned(request, env, id);
+  if (!creator) return json({error: "Invalid creator key."}, 403);
+  if (request.method === "DELETE") {
+    await Promise.all([env.CREATORS.delete(`creator:${id}`), env.CREATORS.delete(`slug:${creator.slug}`)]);
+    await refreshCatalog(env, [{id, online: false}]);
+    return json({ok: true});
+  }
+  const value = validate(await readBody(request));
+  if (!await publishable(value)) return json({error: "Guide, playlist, and vault must be online before republishing."}, 422);
+  if (value.slug !== creator.slug) {
+    const owner = await env.CREATORS.get(`slug:${value.slug}`);
+    if (owner && owner !== id) return json({error: "Creator name is already registered."}, 409);
+    await Promise.all([env.CREATORS.delete(`slug:${creator.slug}`), env.CREATORS.put(`slug:${value.slug}`, id)]);
+  }
+  const now = Math.floor(Date.now()/1000);
+  const saved = {...creator, ...value, online: true, last_ok: now, failures: 0, updated_at: now};
+  await env.CREATORS.put(`creator:${id}`, JSON.stringify(saved));
+  await refreshCatalog(env, [saved]);
+  return json({creator: publicCreator(saved)});
+}
+
+async function catalog(env) {
+  return json({...await catalogSnapshot(env), generated_at: Math.floor(Date.now()/1000)});
+}
 
 export default {
   async fetch(request, env) {
@@ -94,13 +159,19 @@ export default {
   },
   async scheduled(_event,env,ctx){ctx.waitUntil((async()=>{
     // Workers Free permits 50 outbound subrequests per invocation. Check at most
-    // ten creators (four endpoints each) in a rotating batch so the public
+    // eight creators (four endpoints each) in a rotating batch so the public
     // directory remains usable as the community grows without paid services.
     const list=await env.CREATORS.list({prefix:"creator:"}),keys=list.keys.sort((a,b)=>a.name.localeCompare(b.name));
-    if(!keys.length)return;
-    const batchSize=Math.min(10,keys.length),slot=Math.floor(Date.now()/120000),start=(slot*batchSize)%keys.length;
+    const snapshot=await catalogSnapshot(env),catalogChanges=[];
+    if(list.list_complete){
+      const knownIds=new Set(keys.map(key=>key.name.slice("creator:".length)));
+      const cutoff=Math.floor(Date.now()/1000)-180;
+      for(const studio of snapshot.creators){
+        if(studio.updated_at<cutoff&&!knownIds.has(studio.id))catalogChanges.push({id:studio.id,online:false});
+      }
+    }
+    const batchSize=Math.min(8,keys.length),slot=Math.floor(Date.now()/120000),start=(slot*batchSize)%keys.length;
     const selected=Array.from({length:batchSize},(_,index)=>keys[(start+index)%keys.length]);
-    let catalogChanged=false;
     for(const key of selected){
       const creator=await env.CREATORS.get(key.name,"json");if(!creator)continue;
       const checks=[endpointOk(creator.guide_url,"xml"),endpointOk(creator.playlist_url,"m3u")];
@@ -110,16 +181,17 @@ export default {
       if(healthy){
         // Healthy creators cause no recurring KV writes. Only recovery or a
         // cleared failure counter is persisted.
-        if(!wasOnline||previousFailures){creator.failures=0;creator.online=true;creator.last_ok=now;await env.CREATORS.put(key.name,JSON.stringify(creator));if(!wasOnline)catalogChanged=true}
+        if(!wasOnline||previousFailures){creator.failures=0;creator.online=true;creator.last_ok=now;await env.CREATORS.put(key.name,JSON.stringify(creator))}
       }else if(wasOnline&&previousFailures<1){
         // One missed probe is tolerated so a transient network hiccup does not
         // make a channel vanish from every TV guide.
         creator.failures=1;await env.CREATORS.put(key.name,JSON.stringify(creator));
       }else if(wasOnline){
-        creator.failures=2;creator.online=false;await env.CREATORS.put(key.name,JSON.stringify(creator));catalogChanged=true;
+        creator.failures=2;creator.online=false;await env.CREATORS.put(key.name,JSON.stringify(creator));
       }
       // An already-offline creator causes no further writes until it recovers.
+      catalogChanges.push(creator);
     }
-    if(catalogChanged)await refreshCatalog(env)
+    if(catalogChanges.length)await refreshCatalog(env,catalogChanges,snapshot);
   })())}
 };
