@@ -32,7 +32,15 @@ The built-in **Asset Studio** creates original channel logos, guide backgrounds,
 
 Every installation also includes 24 coordinated starter assets: logos, guide/player backgrounds, and corner bugs across Classic TV, Neon Night, Cinema, Kids Pop, Sports Arena, News Desk, Spooky, and Minimal themes. These are original neutral assets created for the public edition. Users can assign all three asset types while creating a channel, then replace them with generated or uploaded artwork later.
 
-Both native apps check the official GitHub Releases feed when they launch. When a newer release exists, the user is notified immediately and can approve an automatic download. Creator and ChannelForge TV show live download progress and verify the published SHA-256 checksum before offering the installer or executable. Windows Creator opens the verified setup wizard; Linux users receive an explicit “installation required” state, the verified Debian, Arch/Omarchy, or portable package, and a copyable install command. ChannelForge never silently installs or launches an update without confirmation.
+All ChannelForge apps expose an update control backed by the official GitHub Releases feed. Creator and desktop TV check on launch, notify immediately, show download progress, and verify the published SHA-256 checksum before offering the installer or executable. Fire TV detects the release and opens the exact official APK download; Android still requires the user to approve its package-installer prompt. Roku reports release availability in-app; Roku Store installs update automatically when distributed through the Store, while developer/sideload builds must be replaced through Roku's developer installer. Windows Creator opens the verified setup wizard; Linux users receive the verified Debian, Arch/Omarchy, or portable package and a copyable install command. ChannelForge never silently installs or launches an update without confirmation.
+
+ChannelForge TV v3.4.1 uses a collapsible hamburger sidebar. Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and Updates are separate workspaces instead of one long scrolling page. The sidebar collapses to an icon rail on desktop and becomes an overlay on smaller screens.
+
+Demo previews (real installations replace these sample studios and posters with published creator data):
+
+![ChannelForge TV home hub](preview/channel-forge-tv-v3.4.1-home.png)
+
+![ChannelForge TV Rewind Cinema](preview/channel-forge-tv-v3.4.1-cinema.png)
 
 This repository is the sanitized public edition. It contains **no private API credentials, Plex tokens, personal channel presets, media databases, logs, backups, or custom artwork** from the original ChannelForge installation.
 
