@@ -11,15 +11,42 @@
   <div class="workspace-topbar"><div><span>YOUR STUDIO</span><strong id="workspace-title">Overview</strong></div><div class="topbar-actions"><span id="topbar-status" class="status-dot">Connecting</span><button id="topbar-scan">Scan libraries</button><span id="version"></span></div></div>
   <main>
     <section id="start" class="view active">
-      <div class="welcome studio-welcome"><div><span class="channel-number">WELCOME TO CHANNELFORGE</span><h2>Your studio</h2><p>Your channels, local and Plex libraries, guide, and branding in one place.</p><div class="actions"><button id="overview-create" class="primary">Create a channel</button><button data-view="library">Browse library</button><button data-view="channels">Manage channels</button></div></div><div class="pulse-card"><strong id="coverage-value">0</strong><span>channels on air</span></div></div>
-      <section class="stat-grid"><article><span>CH</span><div><strong id="overview-channel-count">0</strong><small>live channels</small></div></article><article><span>BR</span><div><strong id="overview-asset-count">0</strong><small>branding assets</small></div></article><article><span>OK</span><div><strong id="overview-ready-count">0</strong><small>ready to watch</small></div></article><article><span>NEW</span><div><strong id="overview-attention-count">0</strong><small>need attention</small></div></article></section>
-      <div class="page-heading"><div><span class="channel-number">THE LIVE LINEUP</span><h2>Now playing</h2><p>See what is on and jump directly into a channel.</p></div><button data-view="channels">Manage channels →</button></div><div id="overview-now-playing" class="cards"></div>
-      <div class="setup-steps">
-        <article><span>1</span><div><h3>Add your media</h3><p id="step-connect-status">Connect Plex or add a local media folder.</p><button id="start-connect" class="primary">Add media source</button></div></article>
-        <article><span>2</span><div><h3>Create a channel</h3><p>Pick a library, select movies or episodes, then choose how they play.</p><button id="start-channel">Create my channel</button></div></article>
-        <article><span>3</span><div><h3>Watch and verify</h3><p>Tune the channel inside ChannelForge and check the guide.</p><button data-view="watch">Open Watch TV</button></div></article>
-      </div>
-      <div class="panel help-box"><h3>How channel schedules work</h3><p><b>Play in order</b> repeats your selected titles in their listed order. <b>Shuffle</b> creates a stable mixed lineup that remains consistent after restart. <b>Series marathon</b> keeps every show's episodes in season order. <b>Smart franchise timeline</b> mixes movies and complete TV series in story/release order.</p></div>
+      <section class="creator-launch">
+        <div class="creator-launch-main">
+          <h2 id="creator-overview-title">Your ChannelForge studio</h2>
+          <p>Build a lineup from your media and share it on ChannelForge TV.</p>
+          <div class="actions">
+            <button id="overview-create" class="primary">Create a channel</button>
+            <button data-view="channels">Manage channels</button>
+          </div>
+        </div>
+        <div class="creator-on-air">
+          <span id="overview-sharing" role="status">Checking sharing</span>
+          <b id="overview-channel-count">0 channels</b>
+          <button data-view="setup">Sources &amp; sharing</button>
+        </div>
+      </section>
+      <section class="creator-workbench">
+        <article class="creator-workbench-card">
+          <h3>Media sources</h3>
+          <p id="step-connect-status">Connect Plex or add a local folder.</p>
+          <small id="overview-movies">Plex movies are indexed automatically.</small>
+          <div class="actions">
+            <button id="start-connect">Manage sources</button>
+            <button data-view="library">Browse library</button>
+          </div>
+        </article>
+        <article class="creator-workbench-card">
+          <h3>Branding &amp; guide</h3>
+          <p>Set channel logos, overlays, and guide artwork.</p>
+          <div class="actions">
+            <button data-view="assets">Open branding</button>
+            <button data-view="exports">View guide artwork</button>
+          </div>
+        </article>
+      </section>
+      <div class="page-heading creator-lineup-heading"><div><h2>Now playing</h2></div><button data-view="watch">Open live guide</button></div>
+      <div id="overview-now-playing" class="cards creator-lineup"></div>
     </section>
     <section id="library" class="view"><div class="page-heading"><div><span class="channel-number">THE COLLECTION</span><h2>Library</h2><p>Browse local folders and Plex libraries, search titles, and start a channel from your collection.</p></div><button id="library-create-channel" class="primary">Create a channel</button></div><div class="library-controls panel"><label>Media library<select id="workspace-library"><option value="">Choose a library</option></select></label><label>Find a title<input id="workspace-library-search" type="search" placeholder="Search titles or years"></label><span id="workspace-library-count" class="muted"></span></div><div id="workspace-library-grid" class="studio-library-grid"><div class="empty">Choose a media library to browse.</div></div></section>
     <section id="watch" class="view">
@@ -61,7 +88,7 @@
           <h3>Plex</h3>
           <div id="plex-profile" class="plex-profile"></div>
           <p id="movie-scan-status" class="muted" role="status">Movies are scanned when Creator starts.</p>
-          <button type="button" id="setup-plex-signin" class="primary">Sign in with Plex</button>
+          <button type="button" id="setup-plex-signin" class="primary">Sign in with Plex</button><div id="setup-plex-signin-status" class="muted" role="status"></div>
         </article>
         <article class="panel">
           <h3>Worldwide sharing</h3>

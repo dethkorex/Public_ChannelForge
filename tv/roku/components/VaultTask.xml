@@ -1,2 +1,2 @@
 <?xml version="1.0" encoding="utf-8" ?>
-<component name="VaultTask" extends="Task"><interface><field id="url" type="string"/><field id="content" type="node"/></interface><script type="text/brightscript" uri="VaultTask.brs"/></component>
+<component name="VaultTask" extends="Task"><interface><field id="url" type="string"/><field id="offset" type="integer"/><field id="nextOffset" type="integer"/><field id="loaded" type="boolean"/><field id="content" type="node"/></interface><script type="text/brightscript" uri="VaultTask.brs"/></component>

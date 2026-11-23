@@ -41,6 +41,7 @@ import org.json.*;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -51,6 +52,11 @@ public class MainActivity extends Activity {
     private final List<Channel> channels = new ArrayList<>();
     private final List<VaultItem> vaultItems = new ArrayList<>();
     private PlayerView video;
+    private FrameLayout activityRoot;
+    private View cassetteMotion;
+    private boolean ejectingTape;
+    private LinearLayout movieDetails;
+    private TextView insertMovie;
     private ExoPlayer player;
     private boolean renderedFrame;
     private LinearLayout guide, creatorRail, channelRail;
@@ -97,6 +103,7 @@ public class MainActivity extends Activity {
     private static final String UPDATE_PERMISSION = BuildConfig.APPLICATION_ID + ".permission.UPDATE_RESULT";
     private static final int INSTALL_SETTINGS_REQUEST = 21;
     private FireTvUpdate pendingUpdate;
+    private String latestUpdateNotes = "";
     private boolean updateBusy, resumed;
     private int updateSession = -1;
     private boolean sessionCommitted, installerOpened;
@@ -186,7 +193,7 @@ public class MainActivity extends Activity {
     private void addGap(LinearLayout parent,int height){Space gap=new Space(this);parent.addView(gap,new LinearLayout.LayoutParams(1,dp(height)));}
 
     private void buildUi() {
-        FrameLayout root = new FrameLayout(this); root.setBackground(surface(new int[]{color("#050616"),color("#25073D"),color("#070312")},0,0,0));
+        FrameLayout root = new FrameLayout(this); activityRoot = root; root.setBackground(surface(new int[]{color("#050616"),color("#25073D"),color("#070312")},0,0,0));
         video = new PlayerView(this);
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent("ChannelForge-TV/" + BuildConfig.VERSION_NAME)
@@ -209,12 +216,7 @@ public class MainActivity extends Activity {
         ImageView logo=new ImageView(this);logo.setImageResource(R.mipmap.channel_forge_tv_icon);logo.setScaleType(ImageView.ScaleType.FIT_CENTER);header.addView(logo,new LinearLayout.LayoutParams(dp(68),dp(68)));
         LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);TextView brand=text("CHANNELFORGE TV",25,true);brand.setTextColor(color("#FFF229"));brand.setLetterSpacing(.16f);brandBox.addView(brand);TextView subtitle=text("THE COMMUNITY DIAL",11,true);subtitle.setTextColor(color("#55EFFF"));subtitle.setLetterSpacing(.28f);brandBox.addView(subtitle);header.addView(brandBox,new LinearLayout.LayoutParams(0,-2,1));
         screenSwitcher=focusButton("REWIND CINEMA");
-        screenSwitcher.setOnClickListener(v -> {
-            cinemaScreen = !cinemaScreen;
-            syncStudioScreen();
-            if (cinemaScreen && currentStudio != null && !movieShelfLoaded && !moviePageLoading)
-                loadMoviePage(currentStudio, 0);
-        });
+        screenSwitcher.setOnClickListener(v -> openCinemaScreen(!cinemaScreen));
         header.addView(screenSwitcher);
         updateButton=focusButton("UPDATES  •  v"+BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->selectUpdate());LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
         screenSwitcher.setId(View.generateViewId());
@@ -226,8 +228,10 @@ public class MainActivity extends Activity {
         LinearLayout columns = new LinearLayout(this); columns.setOrientation(LinearLayout.HORIZONTAL); guide.addView(columns, new LinearLayout.LayoutParams(-1, 0, 1));
         LinearLayout creatorsPanel=panel();creatorRail=new LinearLayout(this);creatorRail.setOrientation(LinearLayout.VERTICAL);ScrollView creatorScroll=new ScrollView(this);creatorScroll.setVerticalScrollBarEnabled(false);creatorScroll.addView(creatorRail);creatorsPanel.addView(creatorScroll,new LinearLayout.LayoutParams(-1,0,1));LinearLayout.LayoutParams creatorsLayout=new LinearLayout.LayoutParams(0,-1,.29f);creatorsLayout.setMargins(0,0,dp(12),0);columns.addView(creatorsPanel,creatorsLayout);
         LinearLayout channelsPanel=panel();channelRail=new LinearLayout(this);channelRail.setOrientation(LinearLayout.VERTICAL);ScrollView channelScroll=new ScrollView(this);channelScroll.setVerticalScrollBarEnabled(false);channelScroll.addView(channelRail);channelsPanel.addView(channelScroll,new LinearLayout.LayoutParams(-1,0,1));columns.addView(channelsPanel,new LinearLayout.LayoutParams(0,-1,.71f));
-        creatorRail.addView(sectionTitle("COMMUNITY STUDIOS","#5DEEFF"));creatorRail.addView(text("Searching worldwide…",14,false));
-        channelRail.addView(sectionTitle("WELCOME TO CHANNELFORGE TV","#FF48C8"));TextView welcome=text("Live creator channels and Rewind Cinema in one standalone Fire TV app.",24,true);welcome.setTextColor(color("#FFF229"));channelRail.addView(welcome);channelRail.addView(text("No Plex setup is needed on this Fire TV. Public studios appear here automatically when they are online.",15,false));
+        creatorRail.addView(sectionTitle("CREATOR STUDIOS","#5DEEFF"));
+        creatorRail.addView(text("Searching worldwide…",14,false));
+        channelRail.addView(sectionTitle("LIVE TV GUIDE","#FF48C8"));
+        channelRail.addView(text("Finding public studios and channels…",16,false));
         TextView help = text("↑↓  SURF CHANNELS     •     OK  WATCH / GUIDE     •     BACK  RETURN TO GUIDE", 10, true); help.setTextColor(color("#7184A9")); guide.addView(help);
         root.addView(guide, new FrameLayout.LayoutParams(-1,-1));
         bufferPanel = panel();
@@ -420,10 +424,11 @@ public class MainActivity extends Activity {
         TextView retry=focusButton("↻  SCAN PUBLIC DIRECTORY");retry.setOnClickListener(v->loadDirectory());creatorRail.addView(retry,new LinearLayout.LayoutParams(-1,-2));addGap(creatorRail,10);
         TextView pair=focusButton("＋  OPTIONAL DIRECT PAIR");pair.setOnClickListener(v->showPairingDialog());creatorRail.addView(pair,new LinearLayout.LayoutParams(-1,-2));
         creatorRail.addView(text("Pairing is optional. It connects one published studio directly while the global directory is unavailable.",12,false));
-        channelRail.addView(sectionTitle("CHANNELFORGE TV","#FF48C8"));
-        TextView hero=text("TURN THE DIAL.\nFIND SOMETHING UNFORGETTABLE.",27,true);hero.setTextColor(color("#FFF229"));hero.setBackground(surface(new int[]{color("#1A1450"),color("#32103F")},color("#12DFF9"),1,14));channelRail.addView(hero,new LinearLayout.LayoutParams(-1,-2));addGap(channelRail,12);
-        TextView detail=text(error==null?"No public creator studios are broadcasting right now.":"Both worldwide directory sources are unavailable. Your Fire TV app can retry without needing Creator installed on this device.",14,false);detail.setTextColor(color("#C6D1E7"));channelRail.addView(detail);
-        channelRail.addView(sectionTitle("WHAT APPEARS HERE","#5DEEFF"));channelRail.addView(text("• Live channels and the full program guide\n• Poster artwork and upcoming show details\n• Rewind Cinema movie shelves from online studios",14,false));
+        channelRail.addView(sectionTitle("LIVE TV GUIDE","#5DEEFF"));
+        TextView detail=text(error==null?"No public studios are online. Scan for channels to check again."
+                :"The public directory is unreachable. Scan for channels to retry.",15,false);
+        detail.setTextColor(color("#C6D1E7"));
+        channelRail.addView(detail);
         retry.requestFocus();
     }
 
@@ -439,7 +444,15 @@ public class MainActivity extends Activity {
     private void renderCreators() {
         creatorRail.removeAllViews();
         status.setText("●  " + creators.size() + " PUBLIC CREATOR STUDIOS ONLINE");
-        creatorRail.addView(sectionTitle("COMMUNITY STUDIOS", "#5DEEFF"));
+        TextView liveTab = focusButton("◉  LIVE TV GUIDE");
+        liveTab.setOnClickListener(v -> openCinemaScreen(false));
+        creatorRail.addView(liveTab);
+        addGap(creatorRail, 5);
+        TextView cinemaTab = focusButton("▣  REWIND CINEMA");
+        cinemaTab.setOnClickListener(v -> openCinemaScreen(true));
+        creatorRail.addView(cinemaTab);
+        addGap(creatorRail, 12);
+        creatorRail.addView(sectionTitle("CREATOR STUDIOS", "#5DEEFF"));
         Creator selected = creators.get(0);
         for (Creator creator : creators) {
             TextView button = focusButton(creator.name + "\n" + creator.description);
@@ -515,6 +528,13 @@ public class MainActivity extends Activity {
         if (cinemaScreen && !movieShelfLoaded && !moviePageLoading) loadMoviePage(creator, 0);
     }
 
+    private void openCinemaScreen(boolean cinema) {
+        cinemaScreen = cinema;
+        syncStudioScreen();
+        if (cinemaScreen && currentStudio != null && !movieShelfLoaded && !moviePageLoading)
+            loadMoviePage(currentStudio, 0);
+    }
+
     private void syncStudioScreen() {
         screenSwitcher.setText(cinemaScreen ? "LIVE TV GUIDE" : "REWIND CINEMA");
         if (liveRail != null) liveRail.setVisibility(cinemaScreen ? View.GONE : View.VISIBLE);
@@ -548,8 +568,8 @@ public class MainActivity extends Activity {
                         renderMovies(creator);
                     } else {
                         Set<String> known = new HashSet<>();
-                        for (VaultItem item : vaultItems) known.add(item.url);
-                        for (VaultItem item : movies) if (known.add(item.url)) vaultItems.add(item);
+                        for (VaultItem item : vaultItems) known.add(item.releaseKey());
+                        for (VaultItem item : movies) if (known.add(item.releaseKey())) vaultItems.add(item);
                         updateStudioStatus(creator.name);
                         growMovieShelf(creator);
                     }
@@ -593,12 +613,14 @@ public class MainActivity extends Activity {
 
     private List<VaultItem> parseVault(JSONObject value) throws JSONException {
         List<VaultItem> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
         JSONArray items = value.getJSONArray("items");
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.getJSONObject(i);
             if (!"movie".equals(item.optString("type"))) continue;
-            result.add(new VaultItem(item.optString("title", "Untitled"), item.optString("year"),
-                    item.optString("summary"), item.optString("thumbnail_url", item.optString("poster_url")), item.getString("stream_url")));
+            VaultItem movie = new VaultItem(item.optString("title", "Untitled"), item.optString("year"),
+                    item.optString("summary"), item.optString("thumbnail_url", item.optString("poster_url")), item.getString("stream_url"));
+            if (seen.add(movie.releaseKey())) result.add(movie);
         }
         return result;
     }
@@ -606,20 +628,72 @@ public class MainActivity extends Activity {
     private List<Channel> parseM3u(String m3u){List<Channel> result=new ArrayList<>();String pending="";for(String raw:m3u.split("\\r?\\n")){String line=raw.trim();if(line.startsWith("#EXTINF:")){int comma=line.lastIndexOf(',');pending=comma>=0?line.substring(comma+1).trim():"Channel";}else if(!line.isEmpty()&&!line.startsWith("#")&&!pending.isEmpty()){result.add(new Channel(pending,line));pending="";}}return result;}
 
     private void renderChannels(String creator) {
+        View focused = getCurrentFocus();
+        Object focusedChannel = focused == null ? null : focused.getTag();
         liveRail.removeAllViews();
         updateStudioStatus(creator);
-        liveRail.addView(sectionTitle("LIVE CHANNELS", "#5DEEFF"));
+        LinearLayout guideHeading = new LinearLayout(this);
+        guideHeading.setGravity(Gravity.CENTER_VERTICAL);
+        guideHeading.addView(sectionTitle("LIVE TV GUIDE", "#5DEEFF"), new LinearLayout.LayoutParams(0, -2, 1));
+        TextView scan = focusButton("↻ SCAN FOR CHANNELS");
+        scan.setOnClickListener(v -> loadDirectory());
+        guideHeading.addView(scan);
+        liveRail.addView(guideHeading);
+        addGap(liveRail, 10);
         if (channels.isEmpty()) liveRail.addView(text("No live channels are available from this studio.", 14, false));
         for (int i = 0; i < channels.size(); i++) {
             final int index = i;
             Channel channel = channels.get(i);
-            TextView button = focusButton("CH " + displayNumber(channel, i) + "   " + channel.name
-                    + "\n● LIVE NOW  •  PRESS OK TO WATCH");
+            String[] titles = currentAndNext(channel);
+            LinearLayout button = new LinearLayout(this);
+            button.setBaselineAligned(false);
+            button.setGravity(Gravity.CENTER_VERTICAL);
+            button.setFocusable(true);
+            button.setTag(channel.url);
+            button.setContentDescription("CH " + displayNumber(channel, i) + " " + channel.name + " "
+                    + titles[0] + ". Press OK to watch.");
+            button.setBackground(surface(new int[]{color("#191A39"), color("#0B1025")}, color("#2A6986"), 1, 8));
+            TextView station = text("CH " + displayNumber(channel, i) + "\n" + channel.name, 13, true);
+            station.setTextColor(color("#70EFFF"));
+            button.addView(station, new LinearLayout.LayoutParams(0, -2, 1));
+            button.addView(programCell("NOW", titles[0].isEmpty() ? "Live channel" : titles[0], true),
+                    new LinearLayout.LayoutParams(0, -1, 1.55f));
+            button.addView(programCell("NEXT", titles[1].isEmpty() ? "Schedule unavailable" : titles[1], false),
+                    new LinearLayout.LayoutParams(0, -1, 1.45f));
+            button.setOnFocusChangeListener((view, active) -> view.setBackground(surface(
+                    active ? new int[]{color("#351B57"), color("#191137")} : new int[]{color("#191A39"), color("#0B1025")},
+                    color(active ? "#FF51CA" : "#2A6986"), active ? 2 : 1, 8)));
             button.setOnClickListener(v -> play(index));
             LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
             layout.setMargins(0, 0, 0, dp(8));
             liveRail.addView(button, layout);
+            if (guideVisible && !cinemaScreen && channel.url.equals(focusedChannel)) button.requestFocus();
         }
+    }
+
+    private TextView programCell(String heading, String title, boolean current) {
+        TextView cell = text(heading + "\n" + title, 12, true);
+        cell.setMaxLines(3);
+        cell.setTextColor(color(current ? "#FFF087" : "#D6DEED"));
+        cell.setBackground(surface(new int[]{color("#101830"), color("#101126")},
+                color(current ? "#B6A541" : "#35416B"), 1, 4));
+        return cell;
+    }
+
+    private String[] currentAndNext(Channel channel) {
+        String[] titles = {"", ""};
+        if (channel.programs == null) return titles;
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < channel.programs.length(); i++) {
+            JSONObject current = channel.programs.optJSONObject(i);
+            if (current == null || guideTimeMillis(current, "start") > now || guideTimeMillis(current, "stop") <= now)
+                continue;
+            titles[0] = current.optString("title");
+            JSONObject next = channel.programs.optJSONObject(i + 1);
+            if (next != null) titles[1] = next.optString("title");
+            break;
+        }
+        return titles;
     }
 
     private void updateStudioStatus(String creator) {
@@ -646,20 +720,47 @@ public class MainActivity extends Activity {
             movieRail.addView(text("No movies available from this studio.", 14, false));
             return;
         }
+        LinearLayout content = new LinearLayout(this);
+        content.setBaselineAligned(false);
+        content.setPadding(0, dp(8), 0, 0);
+        int height = Math.max(135, Math.min(440, getResources().getConfiguration().screenHeightDp - 305));
         LinearLayout shelf = new LinearLayout(this);
+        shelf.setOrientation(LinearLayout.VERTICAL);
         movieShelf = shelf;
-        shelf.setPadding(dp(8), dp(10), dp(8), dp(20));
+        shelf.setPadding(dp(4), dp(4), dp(6), dp(8));
+        ScrollView results = new ScrollView(this);
+        results.setFillViewport(true);
+        results.setNestedScrollingEnabled(true);
+        results.addView(shelf);
+        content.addView(results, new LinearLayout.LayoutParams(0, dp(height), 1.15f));
+        movieDetails = panel();
+        ScrollView detailsScroll = new ScrollView(this);
+        detailsScroll.setFillViewport(true);
+        detailsScroll.setNestedScrollingEnabled(true);
+        detailsScroll.addView(movieDetails);
+        content.addView(detailsScroll, new LinearLayout.LayoutParams(0, dp(height), 1f));
+        movieRail.addView(content);
         growMovieShelf(creator);
-        HorizontalScrollView scroll = new HorizontalScrollView(this) {
-            @Override protected void onScrollChanged(int left, int top, int oldLeft, int oldTop) {
-                super.onScrollChanged(left, top, oldLeft, oldTop);
-                if (shelf == movieShelf && moreMovies == null && shelf.getChildCount() < vaultItems.size()
-                        && left + getWidth() + dp(640) >= shelf.getWidth()) growMovieShelf(creator);
-            }
-        };
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.addView(shelf);
-        movieRail.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        showMovieDetails(vaultItems.get(0));
+    }
+
+    private void showMovieDetails(VaultItem item) {
+        movieDetails.removeAllViews();
+        TextView label = sectionTitle("SELECTED CASSETTE", "#63EFFF");
+        label.setPadding(dp(4), 0, 0, dp(3));
+        movieDetails.addView(label);
+        TextView title = text(item.title + (item.year.isEmpty() ? "" : "  ·  " + item.year), 16, true);
+        title.setTextColor(color("#FFE275"));
+        title.setPadding(dp(4), 0, 0, dp(5));
+        movieDetails.addView(title);
+        insertMovie = focusButton("▶  INSERT MOVIE");
+        insertMovie.setOnClickListener(v -> playUrl(item.title, item.url));
+        movieDetails.addView(insertMovie);
+        if (!item.summary.isEmpty()) {
+            TextView summary = text(item.summary, 12, false);
+            summary.setPadding(dp(4), dp(5), dp(4), dp(4));
+            movieDetails.addView(summary);
+        }
     }
 
     private void growMovieShelf(Creator creator) {
@@ -671,61 +772,57 @@ public class MainActivity extends Activity {
         int start = movieShelf.getChildCount();
         int end = Math.min(start + 18, vaultItems.size());
         for (int i = start; i < end; i++) movieShelf.addView(vaultBox(vaultItems.get(i)));
-        if (nextMovieOffset >= 0 && end == vaultItems.size()) {
-            moreMovies = focusButton("LOAD MORE MOVIES");
-            moreMovies.setOnClickListener(v -> loadMoviePage(creator, nextMovieOffset));
-            movieShelf.addView(moreMovies, new LinearLayout.LayoutParams(-2, -1));
+        if (end < vaultItems.size() || nextMovieOffset >= 0) {
+            boolean buffered = end < vaultItems.size();
+            moreMovies = focusButton(buffered ? "MORE MOVIES" : "LOAD MORE MOVIES");
+            moreMovies.setOnClickListener(v -> {
+                if (buffered) growMovieShelf(creator);
+                else loadMoviePage(creator, nextMovieOffset);
+            });
+            movieShelf.addView(moreMovies, new LinearLayout.LayoutParams(-1, -2));
         }
         if (moveFocus && start < movieShelf.getChildCount()) movieShelf.getChildAt(start).requestFocus();
     }
 
     private View vaultBox(VaultItem item) {
         LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(12), dp(6), dp(6), dp(5));
+        box.setGravity(Gravity.CENTER_VERTICAL);
+        box.setPadding(dp(10), dp(5), dp(7), dp(5));
         box.setFocusable(true);
         box.setContentDescription(item.title + (item.year.isEmpty() ? "" : ", " + item.year));
         int[] sleeve = {color("#5D493B"), color("#151021"), color("#452044")};
         box.setBackground(surface(sleeve, color("#C9AE83"), 1, 6));
-        TextView brand = text("CHANNELFORGE TV", 8, true);
-        brand.setGravity(Gravity.CENTER);
-        brand.setTextColor(color("#FFE06A"));
-        brand.setPadding(0, 0, 0, dp(3));
-        box.addView(brand);
         ImageView poster = new ImageView(this);
         poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
         poster.setBackgroundColor(color("#201528"));
-        FrameLayout posterFrame = new FrameLayout(this);
-        posterFrame.setPadding(dp(1), dp(1), dp(1), dp(1));
-        posterFrame.setBackground(surface(new int[]{color("#E84998"), color("#A93772")}, 0, 0, 3));
-        posterFrame.addView(poster, new FrameLayout.LayoutParams(-1, -1));
-        box.addView(posterFrame, new LinearLayout.LayoutParams(-1, dp(119)));
-        TextView title = text(item.title, 12, true);
-        title.setGravity(Gravity.CENTER);
-        title.setTextColor(color("#F3D8AE"));
-        title.setMaxLines(2);
-        title.setPadding(0, dp(1), 0, dp(1));
-        box.addView(title, new LinearLayout.LayoutParams(-1, dp(35)));
-        TextView label = text("CF HOME VIDEO  •  VHS", 8, true);
-        label.setGravity(Gravity.CENTER);
-        label.setTextColor(color("#FFE0A7"));
-        label.setPadding(0, dp(2), 0, dp(2));
-        label.setBackground(surface(new int[]{color("#271730"), color("#17101F")}, color("#C8A473"), 1, 3));
-        box.addView(label);
-        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(dp(120), -2);
-        layout.setMargins(dp(5), dp(6), dp(5), dp(5));
+        FrameLayout frame = new FrameLayout(this);
+        frame.setPadding(dp(1), dp(1), dp(1), dp(1));
+        frame.setBackgroundColor(color("#E84998"));
+        frame.addView(poster, new FrameLayout.LayoutParams(-1, -1));
+        box.addView(frame, new LinearLayout.LayoutParams(dp(53), dp(37)));
+        TextView label = text(item.title, 13, true);
+        label.setMaxLines(2);
+        label.setTextColor(color("#F3D8AE"));
+        label.setPadding(dp(8), 0, dp(4), 0);
+        box.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView format = text("VHS", 10, true);
+        format.setPadding(dp(3), dp(3), dp(3), dp(3));
+        format.setTextColor(color("#FFAD82"));
+        box.addView(format);
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, dp(52));
+        layout.setMargins(0, 0, 0, dp(5));
         box.setLayoutParams(layout);
         box.setOnFocusChangeListener((view, focused) -> {
-            boolean reduceMotion = Settings.Global.getFloat(getContentResolver(),
-                    Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f;
-            float scale = focused && !reduceMotion ? 1.055f : 1f;
-            view.animate().scaleX(scale).scaleY(scale).translationY(focused && !reduceMotion ? -dp(3) : 0)
-                    .setDuration(reduceMotion ? 0 : 170).start();
+            boolean motion = motionEnabled();
+            view.animate().translationY(focused && motion ? -dp(2) : 0)
+                    .setDuration(motion ? 160 : 0).start();
             view.setBackground(surface(sleeve, color(focused ? "#FF68D7" : "#C9AE83"), focused ? 3 : 1, 6));
+            if (focused) showMovieDetails(item);
         });
-        box.setOnClickListener(view -> new AlertDialog.Builder(this).setTitle(item.title)
-                .setPositiveButton("Insert movie", (dialog, which) -> playUrl(item.title, item.url))
-                .setNegativeButton("Back", null).show());
+        box.setOnClickListener(view -> {
+            showMovieDetails(item);
+            insertMovie.requestFocus();
+        });
         if (!item.poster.isEmpty()) posterLoader.execute(() -> loadPoster(item.poster, poster));
         return box;
     }
@@ -754,9 +851,25 @@ public class MainActivity extends Activity {
 
     private void selectUpdate() {
         if (updateBusy) return;
-        if (pendingUpdate == null) {
+        if (latestUpdateNotes.isEmpty()) {
             checkUpdates(true);
-        } else if (canInstallUpdates()) {
+        } else showUpdateNotes();
+    }
+
+    private void showUpdateNotes() {
+        boolean available = pendingUpdate != null;
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this)
+                .setTitle("What's new in v" + (available ? pendingUpdate.version : BuildConfig.VERSION_NAME))
+                .setMessage(latestUpdateNotes.isEmpty() ? "Playback and reliability improvements." : latestUpdateNotes);
+        if (available) dialog.setNegativeButton("Later", null)
+                .setPositiveButton("Install update", (box, which) -> installSelectedUpdate());
+        else dialog.setPositiveButton("Done", null);
+        dialog.show();
+    }
+
+    private void installSelectedUpdate() {
+        if (updateBusy || pendingUpdate == null) return;
+        if (canInstallUpdates()) {
             downloadUpdate();
         } else {
             new AlertDialog.Builder(this)
@@ -794,12 +907,14 @@ public class MainActivity extends Activity {
         updateButton.setText("UPDATES  •  CHECKING…");
         updateLoader.execute(() -> {
             try {
-                FireTvUpdate release = FireTvUpdate.latest();
+                StringBuilder notes = new StringBuilder();
+                FireTvUpdate release = FireTvUpdate.latest(notes);
                 runOnUiThread(() -> {
                     if (isDestroyed()) return;
                     pendingUpdate = release;
-                    finishUpdate(requested ? (release == null ? "ChannelForge TV is up to date."
-                            : "Select Update to install version " + release.version + ".") : "");
+                    latestUpdateNotes = notes.toString();
+                    finishUpdate("");
+                    if (requested) showUpdateNotes();
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
@@ -1015,6 +1130,7 @@ public class MainActivity extends Activity {
         showBuffering("Connecting to the studio…", true);
         waitForPlayback();
         startStream(url, false);
+        animateCassette(true, title, () -> {});
         showBanner("REWIND CINEMA   •   " + title);
     }
     private String displayNumber(Channel channel, int index) {
@@ -1023,18 +1139,9 @@ public class MainActivity extends Activity {
 
     private void showChannelBanner(Channel channel) {
         String message = "CH " + displayNumber(channel, channelIndex) + "   " + channel.name;
-        long now = System.currentTimeMillis();
-        if (channel.programs != null) for (int i = 0; i < channel.programs.length(); i++) {
-            JSONObject program = channel.programs.optJSONObject(i);
-            if (program == null) continue;
-            long start = guideTimeMillis(program, "start");
-            long stop = guideTimeMillis(program, "stop");
-            if (start > now || stop <= now) continue;
-            message += "\nNOW  " + program.optString("title");
-            JSONObject next = channel.programs.optJSONObject(i + 1);
-            if (next != null) message += "\nCOMING UP NEXT  " + next.optString("title");
-            break;
-        }
+        String[] titles = currentAndNext(channel);
+        if (!titles[0].isEmpty()) message += "\nNOW  " + titles[0];
+        if (!titles[1].isEmpty()) message += "\nCOMING UP NEXT  " + titles[1];
         showBanner(message, channel.logo);
     }
 
@@ -1086,8 +1193,11 @@ public class MainActivity extends Activity {
                 return true;
             }
             if (key == KeyEvent.KEYCODE_BACK || (select && tunedChannel != null)) {
-                returnToGuide();
-                channelRail.requestFocus();
+                if (!activeMovieUrl.isEmpty()) ejectMovie();
+                else {
+                    returnToGuide();
+                    channelRail.requestFocus();
+                }
                 return true;
             }
             if (select) {
@@ -1122,7 +1232,49 @@ public class MainActivity extends Activity {
         super.onStop();
     }
 
+    private boolean motionEnabled() {
+        return Settings.Global.getFloat(getContentResolver(), Settings.Global.ANIMATOR_DURATION_SCALE, 1f) != 0f;
+    }
+
+    private void animateCassette(boolean inserting, String title, Runnable complete) {
+        if (cassetteMotion != null) activityRoot.removeView(cassetteMotion);
+        if (!motionEnabled()) { complete.run(); return; }
+        FrameLayout layer = new FrameLayout(this);
+        layer.setBackgroundColor(color("#100D22"));
+        TextView slot = text("", 13, true);
+        slot.setBackground(surface(new int[]{color("#08060C"), color("#211F33")}, color("#9F76AA"), 2, 6));
+        layer.addView(slot, new FrameLayout.LayoutParams(dp(310), dp(42), Gravity.CENTER));
+        TextView tape = text("VHS   •   " + title, 15, true);
+        tape.setGravity(Gravity.CENTER);
+        tape.setTextColor(color("#FFE2B2"));
+        tape.setBackground(surface(new int[]{color("#392540"), color("#171222")}, color("#C6A475"), 2, 8));
+        layer.addView(tape, new FrameLayout.LayoutParams(dp(275), dp(71), Gravity.CENTER));
+        activityRoot.addView(layer, new FrameLayout.LayoutParams(-1, -1));
+        cassetteMotion = layer;
+        tape.setTranslationY(inserting ? dp(90) : 0);
+        tape.setRotationX(inserting ? 18 : 75);
+        tape.animate().translationY(inserting ? 0 : dp(90)).rotationX(inserting ? 75 : 18)
+                .setDuration(310).withEndAction(() -> {
+                    if (cassetteMotion != layer) return;
+                    activityRoot.removeView(layer);
+                    cassetteMotion = null;
+                    complete.run();
+                }).start();
+    }
+
+    private void ejectMovie() {
+        if (ejectingTape) return;
+        ejectingTape = true;
+        player.pause();
+        animateCassette(false, streamTitle, () -> {
+            returnToGuide();
+            if (insertMovie != null) insertMovie.requestFocus();
+        });
+    }
+
     private void returnToGuide() {
+        ejectingTape = false;
+        if (cassetteMotion != null) {activityRoot.removeView(cassetteMotion); cassetteMotion = null;}
         tunedChannel = null;
         activeMovieUrl = "";
         playbackFailed = false;
@@ -1171,5 +1323,19 @@ public class MainActivity extends Activity {
         JSONArray programs;
         Channel(String name, String url) { this.name = name; this.url = url; }
     }
-    private static class VaultItem { final String title,year,summary,poster,url; VaultItem(String t,String y,String s,String p,String u){title=t;year=y;summary=s;poster=p;url=u;} }
+    private static class VaultItem {
+        final String title, year, summary, poster, url;
+        VaultItem(String title, String year, String summary, String poster, String url) {
+            this.title = title;
+            this.year = year;
+            this.summary = summary;
+            this.poster = poster;
+            this.url = url;
+        }
+        String releaseKey() {
+            String name = Normalizer.normalize(title, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT)
+                    .replaceAll("[^\\p{L}\\p{N}_]+", " ").trim();
+            return name.isEmpty() ? url : name + "\n" + year.trim();
+        }
+    }
 }

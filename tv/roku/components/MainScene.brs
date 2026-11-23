@@ -14,6 +14,13 @@ sub init()
   m.bufferPanel = m.top.findNode("buffering")
   m.bufferTitle = m.top.findNode("bufferTitle")
   m.bufferDetails = m.top.findNode("bufferDetails")
+  m.insertMovie = m.top.findNode("insertMovie")
+  m.insertMovie.observeField("buttonSelected", "insertSelectedMovie")
+  m.moreMovies = m.top.findNode("moreMovies")
+  m.moreMovies.observeField("buttonSelected", "loadMoreMovies")
+  m.tapeTimer = m.top.findNode("tapeTimer")
+  m.tapeTimer.observeField("fire", "tapeMotionDone")
+  m.ejectingMovie = false
   m.liveItem = invalid
   m.liveProgramStop = 0
   m.checkingOffline = false
@@ -113,6 +120,9 @@ sub loadCreator(index as integer)
   m.playlistTask = task
   task.control = "run"
   if switched or m.vault.content = invalid
+    m.selectedMovie = invalid
+    m.top.findNode("movieDetails").visible = false
+    m.moreMovies.visible = false
     if m.vaultTask <> invalid then m.vaultTask.unobserveField("content")
     vaultTask = CreateObject("roSGNode", "VaultTask") : vaultTask.url = creator.shortDescriptionLine2 : vaultTask.observeField("content", "vaultLoaded")
     m.vaultTask = vaultTask
@@ -120,15 +130,61 @@ sub loadCreator(index as integer)
   end if
 end sub
 sub vaultLoaded()
-  m.vault.content = m.vaultTask.content
+  if not m.vaultTask.loaded
+    m.moreMovies.text = "RETRY MOVIES"
+    m.moreMovies.visible = true
+    return
+  end if
+  if m.vaultTask.offset = 0 or m.vault.content = invalid
+    m.vault.content = m.vaultTask.content
+  else
+    current = m.vault.content
+    page = m.vaultTask.content
+    for index = 0 to page.GetChildCount() - 1
+      movie = page.GetChild(index)
+      entry = current.CreateChild("ContentNode")
+      entry.title = movie.title
+      entry.hdPosterUrl = movie.hdPosterUrl
+      entry.description = movie.description
+      entry.url = movie.url
+      entry.streamFormat = movie.streamFormat
+      entry.shortDescriptionLine1 = movie.shortDescriptionLine1
+    end for
+    m.vault.SetFocus(true)
+  end if
+  m.moreMovies.visible = m.vaultTask.nextOffset > 0
+  m.moreMovies.text = "MORE MOVIES"
+end sub
+sub loadMoreMovies()
+  if m.vaultTask = invalid then return
+  offset = m.vaultTask.offset
+  if m.vaultTask.loaded then offset = m.vaultTask.nextOffset
+  if offset < 0 then return
+  m.moreMovies.visible = false
+  task = CreateObject("roSGNode", "VaultTask")
+  task.url = m.vaultTask.url
+  task.offset = offset
+  task.observeField("content", "vaultLoaded")
+  m.vaultTask = task
+  task.control = "run"
 end sub
 sub playlistLoaded()
+  firstGuide = m.channels.content = invalid
   m.channels.content = m.playlistTask.content
   m.status.text = m.playlistTask.content.GetChildCount().ToStr() + " channels ready"
-  m.channels.SetFocus(true)
+  if firstGuide and m.guide.visible and not m.insertMovie.HasFocus() and not m.moreMovies.HasFocus() then m.channels.SetFocus(true)
 end sub
 sub vaultSelected()
   item = m.vault.content.GetChild(m.vault.itemSelected)
+  if item = invalid then return
+  m.selectedMovie = item
+  m.top.findNode("movieTitle").text = item.title
+  m.top.findNode("moviePoster").uri = item.hdPosterUrl
+  m.top.findNode("movieDetails").visible = true
+  m.insertMovie.SetFocus(true)
+end sub
+sub insertSelectedMovie()
+  item = m.selectedMovie
   if item = invalid then return
   m.liveItem = invalid
   m.liveRetryTimer.control = "stop"
@@ -137,6 +193,33 @@ sub vaultSelected()
   hideChannelBanner()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
   m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
+  animateTape(true)
+end sub
+sub animateTape(inserting as boolean)
+  if m.selectedMovie = invalid then return
+  m.ejectingMovie = not inserting
+  m.top.findNode("tapeTitle").text = "VHS  •  " + m.selectedMovie.title
+  m.top.findNode("tapeMotion").visible = true
+  m.top.findNode("insertTapeMotion").control = "stop"
+  m.top.findNode("ejectTapeMotion").control = "stop"
+  if inserting
+    m.top.findNode("insertTapeMotion").control = "start"
+  else
+    m.top.findNode("ejectTapeMotion").control = "start"
+  end if
+  m.tapeTimer.control = "stop"
+  m.tapeTimer.control = "start"
+end sub
+sub tapeMotionDone()
+  m.top.findNode("tapeMotion").visible = false
+  if m.ejectingMovie
+    m.ejectingMovie = false
+    m.video.control = "stop"
+    m.video.visible = false
+    m.guide.visible = true
+    m.bufferPanel.visible = false
+    m.insertMovie.SetFocus(true)
+  end if
 end sub
 sub checkUpdates()
   task = CreateObject("roSGNode", "UpdateTask") : task.observeField("result", "updateLoaded") : task.control = "run" : m.updateTask = task
@@ -144,6 +227,17 @@ sub checkUpdates()
 end sub
 sub updateLoaded()
   m.updates.text = m.updateTask.result
+  if m.updateTask.releaseTag = "" then return
+  dialog = CreateObject("roSGNode", "Dialog")
+  dialog.title = "What's new in " + m.updateTask.releaseTag
+  dialog.message = m.updateTask.notes
+  if dialog.message = "" then dialog.message = "Playback and reliability improvements."
+  dialog.buttons = ["DONE"]
+  dialog.observeField("buttonSelected", "dismissUpdateNotes")
+  m.top.dialog = dialog
+end sub
+sub dismissUpdateNotes()
+  if m.top.dialog <> invalid then m.top.dialog.close = true
 end sub
 sub channelSelected()
   playChannel(m.channels.itemSelected)
@@ -318,6 +412,10 @@ function onKeyEvent(key as string, press as boolean) as boolean
   if not press then return false
   if m.guide.visible = false
     if key = "back" or (key = "OK" and m.liveItem <> invalid)
+      if m.liveItem = invalid and m.selectedMovie <> invalid
+        if not m.ejectingMovie then animateTape(false)
+        return true
+      end if
       m.liveItem = invalid
       m.liveRetryTimer.control = "stop"
       m.upcomingTimer.control = "stop"
@@ -335,13 +433,18 @@ function onKeyEvent(key as string, press as boolean) as boolean
       if key = "down" then playChannel(m.channels.itemFocused - 1) : return true
     end if
   end if
+  if m.guide.visible and m.insertMovie.HasFocus() and key = "left" then m.vault.SetFocus(true) : return true
+  if m.guide.visible and m.moreMovies.HasFocus() and key = "up" then m.vault.SetFocus(true) : return true
+  if m.guide.visible and m.vault.HasFocus() and key = "down" and m.moreMovies.visible
+    if m.vault.itemFocused = m.vault.content.GetChildCount() - 1 then m.moreMovies.SetFocus(true) : return true
+  end if
+  if key = "right" and m.guide.visible and m.pair.HasFocus() then m.updates.SetFocus(true) : return true
+  if key = "left" and m.guide.visible and m.updates.HasFocus() then m.pair.SetFocus(true) : return true
   if key = "left" and m.guide.visible and not m.vault.HasFocus() then m.creators.SetFocus(true) : return true
   if key = "right" and m.guide.visible and not m.vault.HasFocus() then m.channels.SetFocus(true) : return true
   if key = "down" and m.guide.visible and m.channels.HasFocus() and m.channels.itemFocused >= m.channels.content.GetChildCount() - 1 then m.vault.SetFocus(true) : return true
   if key = "up" and m.guide.visible and m.vault.HasFocus() then m.channels.SetFocus(true) : return true
   if key = "up" and m.guide.visible and m.creators.HasFocus() then m.pair.SetFocus(true) : return true
-  if key = "right" and m.guide.visible and m.pair.HasFocus() then m.updates.SetFocus(true) : return true
-  if key = "left" and m.guide.visible and m.updates.HasFocus() then m.pair.SetFocus(true) : return true
   if key = "down" and m.guide.visible and m.updates.HasFocus() then m.channels.SetFocus(true) : return true
   if key = "down" and m.guide.visible and m.pair.HasFocus() then m.creators.SetFocus(true) : return true
   return false

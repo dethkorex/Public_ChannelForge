@@ -49,13 +49,21 @@ final class FireTvUpdate {
         void update(int percent);
     }
 
-    static FireTvUpdate latest() throws Exception {
+    static FireTvUpdate latest(StringBuilder notes) throws Exception {
         JSONObject release = new JSONObject(readText(new URL(BuildConfig.GITHUB_RELEASES_API), 1024 * 1024));
         String tag = release.getString("tag_name");
         if (!tag.startsWith("v") || !VERSION.matcher(tag.substring(1)).matches()) {
             throw new IOException("GitHub returned an invalid release version.");
         }
         String version = tag.substring(1);
+        for (String line : release.optString("body").split("\\r?\\n")) {
+            String text = line.trim();
+            if (text.isEmpty() || text.contains("http://") || text.contains("https://") || text.startsWith("##")) continue;
+            if (text.startsWith("- ")) text = "• " + text.substring(2);
+            if (notes.length() + text.length() > 1300) break;
+            if (notes.length() > 0) notes.append('\n');
+            notes.append(text);
+        }
         if (release.optBoolean("draft") || release.optBoolean("prerelease")
                 || !isNewer(version, BuildConfig.VERSION_NAME)) return null;
 

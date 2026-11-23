@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,7 +40,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.24"
+VERSION = "3.5.25"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -2166,12 +2167,16 @@ def vault_movies():
 
 
 def unique_vault_movies():
-    seen = set()
+    seen_ids, seen_titles = set(), set()
     for section, item in vault_movies():
         item_id = vault_item_id(item)
-        if item_id in seen:
+        title = unicodedata.normalize("NFKC", str(item.get("title", ""))).casefold()
+        key = (" ".join(re.findall(r"\w+", title)), str(item.get("year") or "").strip())
+        if item_id in seen_ids or (key[0] and key in seen_titles):
             continue
-        seen.add(item_id)
+        seen_ids.add(item_id)
+        if key[0]:
+            seen_titles.add(key)
         yield item_id, section, item
 
 

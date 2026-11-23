@@ -120,6 +120,14 @@ class CoreTests(unittest.TestCase):
         self.assertEqual([item["title"] for item in first["items"] + second["items"]], ["Forest", "Valley"])
         self.assertIsNone(second["next_offset"])
 
+    def test_vault_hides_duplicate_releases_from_shared_plex_libraries(self):
+        app.atomic_json(app.VAULT_CATALOG_FILE, {"items": [
+            {"id": "7", "plex_server_id": "a", "type": "movie", "title": "Rewind!", "year": 1985},
+            {"id": "8", "plex_server_id": "b", "type": "movie", "title": "REWIND", "year": "1985"},
+            {"id": "9", "plex_server_id": "c", "type": "movie", "title": "Rewind", "year": 2004},
+        ]})
+        self.assertEqual([item["year"] for item in app.vault_items()], [1985, 2004])
+
     def test_local_movie_catalog_uses_loopback_even_when_studio_is_public(self):
         app.atomic_json(app.CONFIG_FILE, {"public_url": "https://public-studio.example"})
         app.atomic_json(app.VAULT_CATALOG_FILE, {"items": [

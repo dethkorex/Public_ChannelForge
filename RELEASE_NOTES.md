@@ -1,0 +1,5 @@
+- Rewind Cinema scrolls through VHS cases. Select a case and choose Insert Movie to open fullscreen playback.
+- Movies animate into the player and eject when you close them. The same movie appears once per studio.
+- Creator has a redesigned dashboard with quicker access to sources, channel editing, and worldwide sharing.
+- Fire TV loads the guide and movie catalog separately and uses adaptive playback.
+- Live TV continues into the next program and shows when a channel is offline.

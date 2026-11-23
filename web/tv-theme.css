@@ -29,3 +29,23 @@ button:focus-visible,a:focus-visible,[tabindex]:focus-visible{outline:0;z-index:
 .source-dashboard p{min-height:2.5em}
 #setup details summary{cursor:pointer;font-weight:700}
 #setup details > form{margin-top:15px}
+.creator-launch{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,28%);gap:22px;align-items:center;padding:clamp(22px,4vw,55px);border:1px solid #56407c;border-radius:20px;background:radial-gradient(ellipse at 90% 20%,#4b1c6070,transparent 58%),linear-gradient(125deg,#141833,#0c1022 58%,#160b32);box-shadow:0 12px 34px #04040c9c}
+.creator-launch h2{max-width:720px;margin:0;color:#f8f3ff;font-size:clamp(27px,4vw,59px);line-height:1.08;overflow-wrap:anywhere}
+.creator-launch p{color:#c6cce7;font-size:clamp(14px,1.24vw,18px);margin:15px 0 22px}
+.creator-launch .actions,.creator-workbench .actions{display:flex;flex-wrap:wrap;gap:9px;margin:0}
+.creator-on-air{display:grid;justify-items:start;gap:12px;padding:21px;border:1px solid #71568b;border-radius:14px;background:#100f27}
+.creator-on-air span{display:flex;align-items:center;gap:7px;color:#d7d3ec;font-size:14px}
+.creator-on-air span::before{width:8px;height:8px;border-radius:50%;background:#a6a4bf;content:""}
+.creator-on-air span[data-sharing="live"]{color:#a6ffc8}
+.creator-on-air span[data-sharing="live"]::before{background:#5bffaf;box-shadow:0 0 10px #5affaa6e}
+.creator-on-air span:is([data-sharing="connecting"],[data-sharing="retrying"])::before{background:#ffcb68}
+.creator-on-air b{font-size:24px}
+.creator-workbench{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:14px;margin:18px 0}
+.creator-workbench-card{display:grid;align-content:start;gap:8px;padding:21px;border:1px solid #353d72;border-radius:14px;background:linear-gradient(120deg,#151a34,#0c101f)}
+.creator-workbench-card h3,.creator-workbench-card p{margin:0}
+.creator-workbench-card small{color:#9bb4cf}
+.creator-workbench-card .actions{margin-top:8px}
+.creator-lineup-heading{margin:20px 0 10px}
+.creator-lineup .actions{display:flex;flex-wrap:wrap;gap:8px}
+#setup-plex-signin-status:not(:empty){margin-top:9px}
+@media(max-width:830px){.creator-launch{grid-template-columns:minmax(0,1fr)}}

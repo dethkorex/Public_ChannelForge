@@ -8,12 +8,20 @@
       <Rectangle width="1920" height="1080" color="0x050a11ee"/>
       <Label text="CHANNELFORGE  /  REWIND CINEMA  /  LIVE TV" translation="[55,35]" width="1300" height="48" color="0x67f0c2ff" font="font:LargeBoldSystemFont"/>
       <Button id="pair" text="OPTIONAL PAIR" translation="[1270,28]" width="225" height="58"/>
-      <Button id="updates" text="UPDATES  •  v3.5.24" translation="[1510,28]" width="350" height="58"/>
+      <Button id="updates" text="UPDATES  •  v3.5.25" translation="[1510,28]" width="350" height="58"/>
       <Label id="status" text="Finding creator studios…" translation="[58,88]" width="1500" height="35" color="0xa9b7c8ff"/>
       <MarkupList id="creators" translation="[55,145]" itemComponentName="CreatorCard" itemSize="[570,92]" itemSpacing="[0,10]"/>
       <MarkupList id="channels" translation="[680,145]" width="760" height="390" itemComponentName="ChannelCard" itemSize="[760,88]" itemSpacing="[0,10]"/>
-      <Label text="REWIND CINEMA  •  BROWSE LEFT / RIGHT THROUGH MOVIES" translation="[680,565]" width="1120" height="38" color="0xff3eb8ff" font="font:MediumBoldSystemFont"/>
-      <MarkupGrid id="vault" translation="[680,615]" itemComponentName="VaultCard" itemSize="[220,340]" itemSpacing="[18,0]" numRows="1" numColumns="5"/>
+      <Label text="REWIND CINEMA" translation="[680,565]" width="1120" height="38" color="0xff3eb8ff" font="font:MediumBoldSystemFont"/>
+      <MarkupList id="vault" translation="[680,615]" itemComponentName="VaultCard" itemSize="[555,74]" itemSpacing="[0,8]" numRows="4"/>
+      <Group id="movieDetails" translation="[1270,615]" visible="false">
+        <Rectangle width="590" height="312" color="0x19152fff"/>
+        <Poster id="moviePoster" translation="[18,18]" width="150" height="230" loadDisplayMode="scaleToFill"/>
+        <Label text="SELECTED CASSETTE" translation="[185,18]" width="390" height="36" color="0x66eaffff"/>
+        <Label id="movieTitle" translation="[185,65]" width="385" height="94" wrap="true" numLines="2" color="0xffe27dff" font="font:MediumBoldSystemFont"/>
+        <Button id="insertMovie" text="INSERT MOVIE" translation="[185,171]" width="359" height="64"/>
+      </Group>
+      <Button id="moreMovies" text="MORE MOVIES" translation="[680,948]" width="300" height="52" visible="false"/>
       <Label text="LEFT creators  •  RIGHT live channels  •  DOWN Rewind Cinema  •  UP Pair / Updates" translation="[55,1015]" width="1750" height="35" color="0x718096ff"/>
     </Group>
     <Group id="buffering" visible="false">
@@ -29,5 +37,22 @@
     <Timer id="liveRetryTimer" duration="1" repeat="false"/>
     <Timer id="upcomingTimer" duration="1" repeat="false"/>
     <Timer id="programBoundaryTimer" duration="1" repeat="false"/>
+    <Group id="tapeMotion" visible="false">
+      <Rectangle width="1920" height="1080" color="0x100d22ff"/>
+      <Rectangle translation="[635,480]" width="650" height="84" color="0x768099ff"/>
+      <Rectangle translation="[648,492]" width="624" height="60" color="0x0b0711ff"/>
+      <Group id="tapeProp">
+        <Rectangle width="540" height="116" color="0xbe9b71ff"/>
+        <Rectangle translation="[4,4]" width="532" height="108" color="0x382644ff"/>
+        <Label id="tapeTitle" translation="[12,35]" width="516" height="48" color="0xffe1abff" horizAlign="center" font="font:MediumBoldSystemFont"/>
+      </Group>
+    </Group>
+    <Animation id="insertTapeMotion" duration="0.32" repeat="false">
+      <Vector2DFieldInterpolator key="[0,1]" keyValue="[[690,650],[690,480]]" fieldToInterp="tapeProp.translation"/>
+    </Animation>
+    <Animation id="ejectTapeMotion" duration="0.32" repeat="false">
+      <Vector2DFieldInterpolator key="[0,1]" keyValue="[[690,480],[690,650]]" fieldToInterp="tapeProp.translation"/>
+    </Animation>
+    <Timer id="tapeTimer" duration="0.34" repeat="false"/>
   </children>
 </component>
