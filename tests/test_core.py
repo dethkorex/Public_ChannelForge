@@ -25,6 +25,15 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(value["plex_token"], "")
         self.assertTrue(value["token_saved"])
 
+    def test_creator_prefers_hls_js_when_chromium_claims_native_hls(self):
+        script = (app.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        hls_branch = 'if(window.Hls&&Hls.isSupported())'
+        native_fallback = 'else if(video.canPlayType("application/vnd.apple.mpegurl"))'
+        self.assertIn(hls_branch, script)
+        self.assertIn(native_fallback, script)
+        self.assertLess(script.index(hls_branch), script.index(native_fallback))
+        self.assertIn('video.removeAttribute("src")', script)
+
     def test_channel_validation_and_exports(self):
         channel = app.save_channel({"name": "My Channel", "number": "101", "section": "1", "items": [{"id": "9", "title": "Example", "type": "movie", "duration_ms": 3600000, "key": "/library/metadata/9"}]})
         self.assertEqual(channel["name"], "My Channel")

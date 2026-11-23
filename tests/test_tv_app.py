@@ -30,6 +30,15 @@ class TvAppTests(unittest.TestCase):
     def test_version_comparison_handles_double_digit_minor(self):
         self.assertGreater(tv.version_tuple("v3.10.0"), tv.version_tuple("3.9.9"))
 
+    def test_tv_prefers_hls_js_and_batches_large_movie_shelves(self):
+        hls_branch = "if(window.Hls&&Hls.isSupported())"
+        native_fallback = "else if(v.canPlayType('application/vnd.apple.mpegurl'))"
+        self.assertIn(hls_branch, tv.HTML)
+        self.assertIn(native_fallback, tv.HTML)
+        self.assertLess(tv.HTML.index(hls_branch), tv.HTML.index(native_fallback))
+        self.assertIn("function renderVaultBatch(count=80)", tv.HTML)
+        self.assertIn("renderVaultBatch()", tv.HTML)
+
     def test_local_creator_is_discovered_on_default_port(self):
         payload = json.dumps({
             "channels": [{"id": "anime"}],

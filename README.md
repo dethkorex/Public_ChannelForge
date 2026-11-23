@@ -36,7 +36,7 @@ Every installation includes 60 coordinated starter assets: a logo, guide/player 
 
 All ChannelForge apps expose an update control backed by the official GitHub Releases feed. Creator and desktop TV check on launch, notify immediately, show download progress, and verify the published SHA-256 checksum before offering the installer or executable. Fire TV detects the release and opens the exact official APK download; Android still requires the user to approve its package-installer prompt. Roku reports release availability in-app; Roku Store installs update automatically when distributed through the Store, while developer/sideload builds must be replaced through Roku's developer installer. Windows Creator opens the verified setup wizard; Linux users receive the verified Debian, Arch/Omarchy, or portable package and a copyable install command. ChannelForge never silently installs or launches an update without confirmation.
 
-ChannelForge TV v3.4.4 uses a collapsible hamburger sidebar. Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and Updates are separate workspaces instead of one long scrolling page. The sidebar collapses to an icon rail on desktop and becomes an overlay on smaller screens.
+ChannelForge TV v3.4.5 uses a collapsible hamburger sidebar. Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and Updates are separate workspaces instead of one long scrolling page. The sidebar collapses to an icon rail on desktop and becomes an overlay on smaller screens.
 
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
