@@ -1,36 +1,49 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-test("publishing updates the catalog even while the KV key listing is stale", async (t) => {
+test("simultaneous publications remain independently discoverable and removable", async (t) => {
   const {default: worker} = await import("../src/index.js");
-  const records = new Map([["catalog:v1", JSON.stringify({version: 1, creators: []})]]);
+  const records = new Map();
+  const metadata = new Map();
   const env = {CREATORS: {
-    get: async (key, type) => type === "json" ? JSON.parse(records.get(key) || "null") : records.get(key),
-    put: async (key, value) => records.set(key, value),
-    list: async () => ({keys: []}),
+    get: async (key, type) => Array.isArray(key)
+      ? new Map(key.map(name => [name, JSON.parse(records.get(name) || "null")]))
+      : type === "json" ? JSON.parse(records.get(key) || "null") : records.get(key),
+    put: async (key, value, options) => {
+      assert.notEqual(key, "catalog:v1");
+      records.set(key, value);
+      metadata.set(key, options?.metadata);
+    },
+    list: async ({prefix, cursor}) => {
+      const keys = [...records.keys()].filter(name => name.startsWith(prefix));
+      const index = cursor ? Number(cursor) : 0;
+      return {keys: keys.slice(index, index + 1).map(name => ({name, metadata: metadata.get(name)})),
+        list_complete: keys.length <= index + 1, cursor: String(index + 1)};
+    },
     delete: async key => records.delete(key),
   }};
   t.mock.method(globalThis, "fetch", async url => new Response(
     url.endsWith(".xml") ? "<tv></tv>" : url.endsWith(".m3u") ? "#EXTM3U" : '{"items":[]}'
   ));
   const directory = "https://example.com";
-  const origin = "https://studio.example.com";
   const catalog = async () => (await (await worker.fetch(new Request(directory + "/v1/catalog"), env)).json()).creators;
-  const publication = await worker.fetch(new Request(directory + "/v1/creators", {
-    method: "POST",
-    body: JSON.stringify({
-      name: "Test studio",
-      guide_url: origin + "/exports/guide.xml",
-      playlist_url: origin + "/exports/channels.m3u",
-      vault_url: origin + "/api/public/vault",
-    }),
-  }), env);
-  assert.equal(publication.status, 201);
-  const {creator, api_key: key} = await publication.json();
-  assert.deepEqual(await catalog(), [creator]);
+  async function publish(name, origin) {
+    const response = await worker.fetch(new Request(directory + "/v1/creators", {
+      method: "POST",
+      body: JSON.stringify({name, guide_url: origin + "/exports/guide.xml",
+        playlist_url: origin + "/exports/channels.m3u", vault_url: origin + "/api/public/vault"}),
+    }), env);
+    assert.equal(response.status, 201);
+    return response.json();
+  }
+  const [{creator, api_key: key}, rival] = await Promise.all([
+    publish("Test studio 1", "https://first.example.com"),
+    publish("Test studio 2", "https://second.example.com"),
+  ]);
+  assert.deepEqual(await catalog(), [creator, rival.creator]);
   const removal = await worker.fetch(new Request(directory + "/v1/creators/" + creator.id, {
     method: "DELETE", headers: {Authorization: "Bearer " + key},
   }), env);
   assert.equal(removal.status, 200);
-  assert.deepEqual(await catalog(), []);
+  assert.deepEqual(await catalog(), [rival.creator]);
 });

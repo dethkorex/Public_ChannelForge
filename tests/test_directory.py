@@ -16,7 +16,8 @@ class DirectoryTests(unittest.TestCase):
         worker = (Path(__file__).resolve().parents[1] / "directory/worker/src/index.js").read_text(encoding="utf-8")
         self.assertIn("Math.min(8,keys.length)", worker)
         self.assertIn("An already-offline creator causes no further writes", worker)
-        self.assertRegex(worker, r'env\.CREATORS\.get\("catalog:v1",\s*"json"\)')
+        self.assertIn("listCreatorKeys(env)", worker)
+        self.assertIn("keys.slice(offset, offset + 100)", worker)
 
     def setUp(self):
         server.DB_PATH = Path(tempfile.mkdtemp(prefix="channel-forge-directory-")) / "directory.db"

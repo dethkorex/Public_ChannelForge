@@ -63,24 +63,19 @@ async function endpointOk(url, content) {
   }
 }
 
-async function catalogSnapshot(env) {
-  const snapshot = await env.CREATORS.get("catalog:v1", "json");
-  return snapshot || {version: 1, generated_at: 0, creators: []};
+function saveCreator(env, creator) {
+  return env.CREATORS.put(`creator:${creator.id}`, JSON.stringify(creator), {metadata: {online: creator.online}});
 }
 
-async function refreshCatalog(env, changes, snapshot) {
-  snapshot ||= await catalogSnapshot(env);
-  const studios = new Map(snapshot.creators.map(creator => [creator.id, creator]));
-  for (const creator of changes) {
-    if (creator.online) studios.set(creator.id, publicCreator(creator));
-    else studios.delete(creator.id);
-  }
-  const creators = [...studios.values()].sort((a,b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  if (JSON.stringify(creators) !== JSON.stringify(snapshot.creators)) {
-    await env.CREATORS.put("catalog:v1", JSON.stringify({
-      version: 1, generated_at: Math.floor(Date.now()/1000), creators,
-    }));
-  }
+async function listCreatorKeys(env) {
+  const keys = [];
+  let cursor;
+  do {
+    const page = await env.CREATORS.list({prefix: "creator:", ...(cursor ? {cursor} : {})});
+    keys.push(...page.keys);
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return keys;
 }
 
 async function publishable(value) {
@@ -100,11 +95,9 @@ async function register(request, env) {
   const id = crypto.randomUUID(), apiKey = token(), now = Math.floor(Date.now()/1000);
   const creator = {id, ...value, key_hash: await hash(apiKey), online: true, last_ok: now, updated_at: now, failures: 0};
   await Promise.all([
-    env.CREATORS.put(`creator:${id}`, JSON.stringify(creator)),
+    saveCreator(env, creator),
     env.CREATORS.put(`slug:${value.slug}`, id),
   ]);
-  // KV may return a stale key list immediately after a write. Use this request's record.
-  await refreshCatalog(env, [creator]);
   return json({creator: publicCreator(creator), api_key: apiKey}, 201);
 }
 
@@ -113,7 +106,6 @@ async function update(request, env, id) {
   if (!creator) return json({error: "Invalid creator key."}, 403);
   if (request.method === "DELETE") {
     await Promise.all([env.CREATORS.delete(`creator:${id}`), env.CREATORS.delete(`slug:${creator.slug}`)]);
-    await refreshCatalog(env, [{id, online: false}]);
     return json({ok: true});
   }
   const value = validate(await readBody(request));
@@ -125,13 +117,25 @@ async function update(request, env, id) {
   }
   const now = Math.floor(Date.now()/1000);
   const saved = {...creator, ...value, online: true, last_ok: now, failures: 0, updated_at: now};
-  await env.CREATORS.put(`creator:${id}`, JSON.stringify(saved));
-  await refreshCatalog(env, [saved]);
+  await saveCreator(env, saved);
   return json({creator: publicCreator(saved)});
 }
 
 async function catalog(env) {
-  return json({...await catalogSnapshot(env), generated_at: Math.floor(Date.now()/1000)});
+  // Each studio has an independent record. Simultaneous registrations never
+  // overwrite one another in a shared snapshot or compete for its write limit.
+  const keys = (await listCreatorKeys(env))
+    .filter(key => key.metadata?.online !== false)
+    .map(key => key.name);
+  const creators = [];
+  for (let offset = 0; offset < keys.length; offset += 100) {
+    const rows = await env.CREATORS.get(keys.slice(offset, offset + 100), {type: "json"});
+    for (const creator of rows.values()) {
+      if (creator?.online) creators.push(publicCreator(creator));
+    }
+  }
+  creators.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  return json({version: 1, generated_at: Math.floor(Date.now()/1000), creators});
 }
 
 export default {
@@ -161,15 +165,7 @@ export default {
     // Workers Free permits 50 outbound subrequests per invocation. Check at most
     // eight creators (four endpoints each) in a rotating batch so the public
     // directory remains usable as the community grows without paid services.
-    const list=await env.CREATORS.list({prefix:"creator:"}),keys=list.keys.sort((a,b)=>a.name.localeCompare(b.name));
-    const snapshot=await catalogSnapshot(env),catalogChanges=[];
-    if(list.list_complete){
-      const knownIds=new Set(keys.map(key=>key.name.slice("creator:".length)));
-      const cutoff=Math.floor(Date.now()/1000)-180;
-      for(const studio of snapshot.creators){
-        if(studio.updated_at<cutoff&&!knownIds.has(studio.id))catalogChanges.push({id:studio.id,online:false});
-      }
-    }
+    const {keys}=await env.CREATORS.list({prefix:"creator:"});
     const batchSize=Math.min(8,keys.length),slot=Math.floor(Date.now()/120000),start=(slot*batchSize)%keys.length;
     const selected=Array.from({length:batchSize},(_,index)=>keys[(start+index)%keys.length]);
     for(const key of selected){
@@ -181,17 +177,15 @@ export default {
       if(healthy){
         // Healthy creators cause no recurring KV writes. Only recovery or a
         // cleared failure counter is persisted.
-        if(!wasOnline||previousFailures){creator.failures=0;creator.online=true;creator.last_ok=now;await env.CREATORS.put(key.name,JSON.stringify(creator))}
+        if(!wasOnline||previousFailures){creator.failures=0;creator.online=true;creator.last_ok=now;await saveCreator(env,creator)}
       }else if(wasOnline&&previousFailures<1){
         // One missed probe is tolerated so a transient network hiccup does not
         // make a channel vanish from every TV guide.
-        creator.failures=1;await env.CREATORS.put(key.name,JSON.stringify(creator));
+        creator.failures=1;await saveCreator(env,creator);
       }else if(wasOnline){
-        creator.failures=2;creator.online=false;await env.CREATORS.put(key.name,JSON.stringify(creator));
+        creator.failures=2;creator.online=false;await saveCreator(env,creator);
       }
       // An already-offline creator causes no further writes until it recovers.
-      catalogChanges.push(creator);
     }
-    if(catalogChanges.length)await refreshCatalog(env,catalogChanges,snapshot);
   })())}
 };
