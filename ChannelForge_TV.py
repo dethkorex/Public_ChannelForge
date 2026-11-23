@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-VERSION = "3.5.0"
+VERSION = "3.5.1"
 DIRECTORY = "https://directory.channelforge.tv/v1/catalog"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
 GITHUB = "https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"

@@ -38,9 +38,12 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("showPairingDialog", activity)
         self.assertIn("RETRY PUBLIC DIRECTORY", activity)
         self.assertIn("DIRECTORY_FALLBACK_URL", activity)
-        self.assertIn("android:icon=\"@drawable/channel_forge_tv_icon\"", manifest)
+        self.assertIn("android:icon=\"@mipmap/channel_forge_tv_icon\"", manifest)
+        self.assertIn("android:banner=\"@drawable/channel_forge_tv_banner\"", manifest)
         self.assertIn("DIRECTORY_FALLBACK_URL", gradle)
-        self.assertTrue((root / "tv/firetv/app/src/main/res/drawable/channel_forge_tv_icon.png").is_file())
+        for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi"):
+            self.assertTrue((root / f"tv/firetv/app/src/main/res/mipmap-{density}/channel_forge_tv_icon.png").is_file())
+        self.assertTrue((root / "tv/firetv/app/src/main/res/drawable-nodpi/channel_forge_tv_banner.png").is_file())
 
     def test_roku_is_viewer_only_with_fallback_pairing_and_branding(self):
         root = Path(__file__).resolve().parents[1]
