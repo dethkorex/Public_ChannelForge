@@ -1,6 +1,7 @@
 name = "channelforge-directory"
 main = "src/index.js"
 compatibility_date = "2026-11-01"
+routes = [{ pattern = "directory.channelforge.tv", custom_domain = true }]
 
 [[kv_namespaces]]
 binding = "CREATORS"

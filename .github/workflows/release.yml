@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install FFmpeg
-        run: choco install ffmpeg -y --no-progress
+        run: choco install ffmpeg cloudflared -y --no-progress
       - shell: powershell
         run: ./scripts/build_windows.ps1
       - shell: powershell

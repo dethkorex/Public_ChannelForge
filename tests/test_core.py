@@ -137,6 +137,7 @@ class CoreTests(unittest.TestCase):
 
     def test_hls_manifest_urls_are_rewritten_to_same_origin_proxy(self):
         app.HLS_PROXY.clear()
+        app.HLS_PROXY_CHANNELS.clear()
         manifest = b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\nsegment000.ts?token=private\n'
         rewritten = app.rewrite_hls_manifest(manifest, "http://plex.local:32400/session/master.m3u8").decode()
         self.assertNotIn("plex.local", rewritten)
@@ -144,6 +145,22 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(rewritten.count("/hls-proxy/"), 2)
         registered = [url for url, _expires in app.HLS_PROXY.values()]
         self.assertIn("http://plex.local:32400/session/segment000.ts?token=private", registered)
+
+    def test_plex_channel_uses_authenticated_plex_hls_instead_of_local_ffmpeg(self):
+        channel = app.clean_channel({"name": "Plex TV", "number": "11", "items": [
+            {"id": "44", "title": "Show", "duration_ms": 3600000, "key": "/library/metadata/44"},
+        ]})
+        with mock.patch.object(app, "plex_live_url", return_value="https://plex.example/live.m3u8") as plex_url, mock.patch.object(app, "register_hls_url", return_value="/hls-proxy/session") as proxy, mock.patch.object(app, "start_ffmpeg_session") as ffmpeg:
+            route = app.start_playback_route(channel)
+        self.assertEqual(route, "/hls-proxy/session")
+        plex_url.assert_called_once_with(channel)
+        proxy.assert_called_once_with("https://plex.example/live.m3u8", channel["id"])
+        ffmpeg.assert_not_called()
+
+    def test_playback_errors_remove_plex_token(self):
+        error = app.sanitized_playback_error("failed https://plex/video?X-Plex-Token=test&part=1")
+        self.assertNotIn("X-Plex-Token=test", error)
+        self.assertNotIn("test&", error)
 
     def test_extracts_token_from_pasted_plex_url(self):
         url, token = app.normalize_plex_connection("http://plex.local:32400/web/index.html?foo=bar&X-Plex-Token=secret-token")
@@ -263,11 +280,11 @@ class CoreTests(unittest.TestCase):
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
             self.assertIn(f"/live/{channel['id']}.m3u8".encode(), response.read())
-            with mock.patch.object(app, "start_ffmpeg_session", return_value="local-session"):
+            with mock.patch.object(app, "start_playback_route", return_value="/hls-proxy/plex-session"):
                 connection.request("GET", f"/live/{channel['id']}.m3u8")
                 response = connection.getresponse()
                 self.assertEqual(response.status, 302)
-                self.assertEqual(response.getheader("Location"), "/ffmpeg-stream/local-session/index.m3u8")
+                self.assertEqual(response.getheader("Location"), "/hls-proxy/plex-session")
                 response.read()
         finally:
             connection.close()

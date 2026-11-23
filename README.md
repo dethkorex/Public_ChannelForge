@@ -10,9 +10,9 @@ Version 3.2 adds three public components without changing the owner's private Ch
 - **ChannelForge TV for Fire TV / Android TV** — downloadable remote-first APK with creator browsing, channel surfing, HLS playback, and a full-screen guide HUD.
 - **ChannelForge TV for Roku** — native SceneGraph/BrightScript channel with the same directory, channel surfing, guide, and HLS playback model.
 
-Publishing remains opt-in because channel names and stream endpoints may be private. The directory never receives Plex credentials, local filesystem paths, media databases, or video files. A creator's ChannelForge server must have a public HTTPS URL while viewers watch; the hosted directory removes the need for the project owner to run a separate discovery server, but it is not a video relay or CDN.
+Publishing is activated with **Go live worldwide** in Creator. The Windows build opens an outbound encrypted Cloudflare tunnel automatically, registers the temporary HTTPS address with the global directory, and refreshes it after Creator restarts. Viewers never enter an IP address or configure the creator's router. The directory never receives Plex credentials, local filesystem paths, media databases, or video files; it stores only public studio metadata and ChannelForge endpoints.
 
-Viewers never need Plex: ChannelForge TV talks only to the creator's published ChannelForge HTTPS endpoint. Plex is an optional source used privately by ChannelForge Creator. The public endpoint should be supplied by a privacy-preserving HTTPS tunnel or relay so viewers are not given the creator's home IP address. A tunnel/relay and the hosted directory must be deployed before worldwide playback is available; installing the desktop apps alone cannot create a global video CDN.
+Viewers never need Plex: ChannelForge TV talks only to the creator's published ChannelForge HTTPS endpoint. Plex is an optional source used privately by ChannelForge Creator. The Creator application must remain running while its channels are online. The hosted directory at `directory.channelforge.tv` must be deployed once by the project owner before cross-house discovery is available; the repository includes a manual GitHub Actions deployment workflow for that service.
 
 Source and deployment instructions are in [`directory/`](directory/), [`tv/firetv/`](tv/firetv/), and [`tv/roku/`](tv/roku/). Tagged releases build the installable Fire TV APK and Roku ZIP automatically.
 
@@ -20,7 +20,7 @@ Version 3 introduces the studio workspace inspired by the private ChannelForge m
 
 The built-in **Watch TV** screen includes an embedded HLS player, channel rail, now-playing progress, and six-hour visual guide. Viewers click a channel and watch immediately in ChannelForge without adding it to Plex DVR.
 
-Playback uses a standalone FFmpeg pipeline. ChannelForge reads either an approved local-library file or an authenticated Plex media part, converts it to browser-compatible H.264/AAC HLS, and serves the playlist and segments from its own origin. Local-only users do not need a Plex account or server.
+Playback is source-aware. Approved local-library files use the bundled FFmpeg pipeline. Plex titles use Plex's authenticated universal HLS transcoder through ChannelForge's same-origin proxy, avoiding the rejected double-transcode path while keeping the Plex token server-side. Local-only users do not need a Plex account or server.
 
 The **Get Started** screen walks new users through adding a local folder or connecting Plex, creating a channel, testing it in the player, and copying the hosted stream URLs.
 
@@ -34,7 +34,7 @@ Every installation also includes 24 coordinated starter assets: logos, guide/pla
 
 All ChannelForge apps expose an update control backed by the official GitHub Releases feed. Creator and desktop TV check on launch, notify immediately, show download progress, and verify the published SHA-256 checksum before offering the installer or executable. Fire TV detects the release and opens the exact official APK download; Android still requires the user to approve its package-installer prompt. Roku reports release availability in-app; Roku Store installs update automatically when distributed through the Store, while developer/sideload builds must be replaced through Roku's developer installer. Windows Creator opens the verified setup wizard; Linux users receive the verified Debian, Arch/Omarchy, or portable package and a copyable install command. ChannelForge never silently installs or launches an update without confirmation.
 
-ChannelForge TV v3.4.1 uses a collapsible hamburger sidebar. Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and Updates are separate workspaces instead of one long scrolling page. The sidebar collapses to an icon rail on desktop and becomes an overlay on smaller screens.
+ChannelForge TV v3.4.2 uses a collapsible hamburger sidebar. Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and Updates are separate workspaces instead of one long scrolling page. The sidebar collapses to an icon rail on desktop and becomes an overlay on smaller screens.
 
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
@@ -54,8 +54,11 @@ The interface and asset workflow remain part of ChannelForge. Only the original 
 4. On first launch, choose **Add a local media folder**, **Sign in with Plex**, or configure both.
 5. Open **Channels**, create a channel, choose any configured library, and select movies or entire TV shows. Selecting a show adds every playable episode in season/episode order.
 6. Open **Guide exports** to copy the hosted XMLTV and M3U URLs into your DVR, tuner client, or IPTV player.
+7. Open **Setup** and select **Go live worldwide** to make the studio appear in every ChannelForge TV app. Creator must remain open while viewers watch.
 
 Leave ChannelForge Creator running while viewers use its channels. It hosts the XMLTV guide, M3U playlist, artwork, and on-demand HLS streams. `ChannelForge_TV.exe` is a separate native-window viewer for watching published studios and does not open the default browser.
+
+To install the viewer, download `ChannelForge_TV_Setup.exe`, choose its install folder and Desktop-shortcut preference, and finish the wizard. `ChannelForge_TV.exe` remains available as a portable alternative. Both installed applications place their dedicated icon beside the executable and explicitly use it for Desktop, Start Menu, and Creator startup shortcuts, avoiding stale Windows icon-cache artwork.
 
 On Windows, closing the Creator window minimizes it to the notification area so hosting continues. The first close displays a reminder. Use the tray icon to reopen ChannelForge Creator or choose **Exit and stop channels** to shut down XMLTV, M3U, and playback hosting.
 
@@ -146,7 +149,7 @@ Wayland compositors used by Omarchy do not need special configuration because th
 
 ChannelForge owns the channel clock and guide. Every channel has a stable schedule anchor; restarting the application does not reset the lineup to its first title. The XMLTV includes current and upcoming programs using probed local-file or Plex duration metadata. The M3U points to ChannelForge's `/live/<channel>.m3u8` URLs. When a player opens one, ChannelForge resolves the current program and offset, then creates an HLS session for that exact live position.
 
-Local folders and Plex can be used independently or together. ChannelForge performs browser-compatible live transcoding locally with FFmpeg and hosts the guide, playlist, channel clock, web manager, artwork, encoder, and live entry points.
+Local folders and Plex can be used independently or together. Local files use the bundled FFmpeg encoder. Plex titles use Plex's authenticated universal HLS endpoint through ChannelForge's same-origin proxy, preventing browser CORS failures and avoiding an unnecessary second transcode on the Creator computer. Playback errors shown in the player are retrieved from the server and scrubbed of Plex tokens.
 
 ## Channel playback modes
 
@@ -170,7 +173,7 @@ From PowerShell on Windows:
 ./scripts/build_windows.ps1
 ```
 
-The script installs the pinned build dependencies and creates `release/ChannelForge_Creator_Setup.exe` and `release/ChannelForge_TV.exe` plus SHA-256 checksums. The installer is per-user and does not require administrator rights.
+The script installs the pinned build dependencies and creates `release/ChannelForge_Creator_Setup.exe`, `release/ChannelForge_TV_Setup.exe`, and the portable `release/ChannelForge_TV.exe` plus SHA-256 checksums. Both installers are per-user, allow the destination folder to be selected, and do not require administrator rights.
 
 ## Developer run and tests
 

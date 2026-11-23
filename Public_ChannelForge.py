@@ -11,6 +11,7 @@ import importlib.util
 import json
 import mimetypes
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -28,7 +29,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.4.1"
+VERSION = "3.4.2"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -59,11 +60,15 @@ WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web
 CREATOR_ICON = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets" / "channel-forge-creator.png"
 LOCK = threading.RLock()
 HLS_PROXY: dict[str, tuple[str, float]] = {}
+HLS_PROXY_CHANNELS: dict[str, str] = {}
 UPDATE_JOBS: dict[str, dict] = {}
 PLAYBACK_ERRORS: dict[str, str] = {}
 FFMPEG_SESSIONS: dict[str, dict] = {}
 LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
 STREAM_DIR = DATA_DIR / "streams"
+TUNNEL_LOCK = threading.RLock()
+TUNNEL_PROCESS: subprocess.Popen | None = None
+TUNNEL_URL = ""
 DEFAULT_ASSET_THEMES = {
     "classic": ("Classic TV", "#f4c95d", "#d66b4d"),
     "neon": ("Neon Night", "#42f5e9", "#9b5cff"),
@@ -243,6 +248,7 @@ def config(public: bool = False) -> dict:
         "port": max(1024, min(65535, int(value.get("port", DEFAULT_PORT)))),
         "bind_host": str(value.get("bind_host", HOST)).strip() or HOST,
         "public_url": str(value.get("public_url", "")).strip().rstrip("/"),
+        "public_tunnel": bool(value.get("public_tunnel", False)),
         "plex_profile": value.get("plex_profile", {}) if isinstance(value.get("plex_profile", {}), dict) else {},
         "client_identifier": str(value.get("client_identifier", "")) or secrets.token_hex(16),
         "local_libraries": value.get("local_libraries", []) if isinstance(value.get("local_libraries", []), list) else [],
@@ -256,6 +262,7 @@ def config(public: bool = False) -> dict:
         result["token_saved"] = bool(value.get("plex_token"))
         result["creator_key"] = ""
         result["creator_published"] = bool(value.get("creator_id") and value.get("creator_key"))
+        result["tunnel_active"] = bool(TUNNEL_PROCESS and TUNNEL_PROCESS.poll() is None and TUNNEL_URL)
         result.pop("client_identifier", None)
     return result
 
@@ -1088,6 +1095,75 @@ def server_base(settings: dict | None = None) -> str:
     return f"http://{host}:{settings['port']}"
 
 
+def cloudflared_path() -> str:
+    executable = "cloudflared.exe" if sys.platform == "win32" else "cloudflared"
+    roots = [Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)), Path(sys.executable).resolve().parent, Path(__file__).resolve().parent]
+    found = next((str(root / executable) for root in roots if (root / executable).is_file()), None) or shutil.which("cloudflared")
+    if not found or not Path(found).is_file():
+        raise ValueError("Secure public sharing requires cloudflared. Reinstall the latest Windows Creator build or install cloudflared on this computer.")
+    return found
+
+
+def start_public_tunnel() -> str:
+    global TUNNEL_PROCESS, TUNNEL_URL
+    with TUNNEL_LOCK:
+        if TUNNEL_PROCESS and TUNNEL_PROCESS.poll() is None and TUNNEL_URL:
+            return TUNNEL_URL
+        command = [cloudflared_path(), "tunnel", "--url", f"http://127.0.0.1:{config()['port']}", "--no-autoupdate"]
+        TUNNEL_PROCESS = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+            creationflags=0x08000000 if sys.platform == "win32" else 0,
+        )
+        messages: queue.Queue[str] = queue.Queue(maxsize=200)
+
+        def read_output() -> None:
+            assert TUNNEL_PROCESS and TUNNEL_PROCESS.stdout
+            for line in TUNNEL_PROCESS.stdout:
+                try:
+                    messages.put_nowait(line)
+                except queue.Full:
+                    try:
+                        messages.get_nowait()
+                        messages.put_nowait(line)
+                    except queue.Empty:
+                        pass
+
+        threading.Thread(target=read_output, daemon=True, name="channel-forge-tunnel-log").start()
+        deadline, recent = time.time() + 35, []
+        while time.time() < deadline:
+            if TUNNEL_PROCESS.poll() is not None:
+                break
+            try:
+                line = messages.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            recent.append(line.strip())
+            match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line, re.IGNORECASE)
+            if match:
+                TUNNEL_URL = match.group(0).rstrip("/")
+                raw = load_json(CONFIG_FILE, {})
+                if not isinstance(raw, dict):
+                    raw = {}
+                raw["public_url"] = TUNNEL_URL
+                raw["public_tunnel"] = True
+                atomic_json(CONFIG_FILE, raw)
+                generate_exports()
+                return TUNNEL_URL
+        if TUNNEL_PROCESS.poll() is None:
+            TUNNEL_PROCESS.terminate()
+        TUNNEL_PROCESS = None
+        detail = next((line for line in reversed(recent) if line), "The secure tunnel did not become ready.")
+        raise ValueError(f"Could not start public sharing: {detail[:300]}")
+
+
+def stop_public_tunnel() -> None:
+    global TUNNEL_PROCESS
+    with TUNNEL_LOCK:
+        if TUNNEL_PROCESS and TUNNEL_PROCESS.poll() is None:
+            TUNNEL_PROCESS.terminate()
+        TUNNEL_PROCESS = None
+
+
 def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
     """Create a Plex universal-transcoder HLS session for the live schedule point."""
     settings = config()
@@ -1115,11 +1191,37 @@ def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
 
 
 def ffmpeg_path() -> str:
-    bundled = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
-    found = str(bundled) if bundled.is_file() else shutil.which("ffmpeg")
-    if not found:
+    executable = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    roots = [
+        Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)),
+        Path(sys.executable).resolve().parent,
+        Path(__file__).resolve().parent,
+    ]
+    found = next((str(root / executable) for root in roots if (root / executable).is_file()), None) or shutil.which("ffmpeg")
+    if not found or not Path(found).is_file():
         raise ValueError("FFmpeg is required for standalone playback but was not found. Reinstall ChannelForge using the latest package.")
     return found
+
+
+def ffmpeg_status() -> dict:
+    try:
+        path = Path(ffmpeg_path()).resolve()
+        bundled = path.parent in {
+            Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve(),
+            Path(sys.executable).resolve().parent,
+        }
+        return {"available": True, "source": "Bundled encoder" if bundled else "System FFmpeg"}
+    except ValueError as exc:
+        return {"available": False, "source": str(exc)}
+
+
+def sanitized_playback_error(error: object) -> str:
+    message = str(error).strip() or "Playback could not start."
+    message = re.sub(r"(?i)(X-Plex-Token(?:=|%3D))[^&\s\"']+", r"\1REDACTED", message)
+    token = str(config().get("plex_token", ""))
+    if token:
+        message = message.replace(token, "REDACTED")
+    return message[:800]
 
 
 def plex_part_key(item: dict) -> str:
@@ -1200,6 +1302,14 @@ def start_ffmpeg_session(channel: dict) -> str:
     raise ValueError("Local FFmpeg playback did not start within 25 seconds.")
 
 
+def start_playback_route(channel: dict) -> str:
+    """Use Plex's authenticated HLS transcoder for Plex media and local FFmpeg for files."""
+    position = schedule_position(channel)
+    if position["item"].get("source") != "local":
+        return register_hls_url(plex_live_url(channel), str(channel.get("id", "")))
+    return f"/ffmpeg-stream/{start_ffmpeg_session(channel)}/index.m3u8"
+
+
 def stop_ffmpeg_sessions() -> None:
     with LOCK:
         sessions = list(FFMPEG_SESSIONS.values())
@@ -1229,9 +1339,10 @@ def reap_idle_sessions() -> None:
 
 
 atexit.register(stop_ffmpeg_sessions)
+atexit.register(stop_public_tunnel)
 
 
-def register_hls_url(url: str) -> str:
+def register_hls_url(url: str, channel_id: str = "") -> str:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Plex returned an invalid stream URL.")
@@ -1240,25 +1351,28 @@ def register_hls_url(url: str) -> str:
         now = time.time()
         for stale in [item for item, (_url, expires) in HLS_PROXY.items() if expires < now]:
             HLS_PROXY.pop(stale, None)
+            HLS_PROXY_CHANNELS.pop(stale, None)
         HLS_PROXY[key] = (url, now + 7200)
+        if channel_id:
+            HLS_PROXY_CHANNELS[key] = channel_id
     return f"/hls-proxy/{key}"
 
 
-def rewrite_hls_manifest(data: bytes, base_url: str) -> bytes:
+def rewrite_hls_manifest(data: bytes, base_url: str, channel_id: str = "") -> bytes:
     """Keep every HLS request same-origin so Linux browsers avoid Plex CORS failures."""
     text = data.decode("utf-8-sig")
     output = []
     for line in text.splitlines():
         stripped = line.strip()
         if stripped and not stripped.startswith("#"):
-            line = register_hls_url(urllib.parse.urljoin(base_url, stripped))
+            line = register_hls_url(urllib.parse.urljoin(base_url, stripped), channel_id)
         elif "URI=\"" in line:
-            line = re.sub(r'URI="([^"]+)"', lambda match: f'URI="{register_hls_url(urllib.parse.urljoin(base_url, match.group(1)))}"', line)
+            line = re.sub(r'URI="([^"]+)"', lambda match: f'URI="{register_hls_url(urllib.parse.urljoin(base_url, match.group(1)), channel_id)}"', line)
         output.append(line)
     return ("\n".join(output) + "\n").encode("utf-8")
 
 
-def fetch_plex_stream(url: str, range_header: str = "") -> tuple[bytes, str, str, int, str]:
+def fetch_plex_stream(url: str, range_header: str = "", channel_id: str = "") -> tuple[bytes, str, str, int, str]:
     headers = {"Accept": "*/*", "User-Agent": f"{APP_NAME}/{VERSION}"}
     if range_header:
         headers["Range"] = range_header
@@ -1280,7 +1394,7 @@ def fetch_plex_stream(url: str, range_header: str = "") -> tuple[bytes, str, str
     except (urllib.error.URLError, TimeoutError) as exc:
         raise ValueError(f"ChannelForge could not reach the Plex stream: {getattr(exc, 'reason', exc)}") from exc
     if data.lstrip().startswith(b"#EXTM3U") or "mpegurl" in content_type:
-        data = rewrite_hls_manifest(data, final_url)
+        data = rewrite_hls_manifest(data, final_url, channel_id)
         content_type = "application/vnd.apple.mpegurl"
     return data, content_type or "application/octet-stream", final_url, status, content_range
 
@@ -1376,7 +1490,7 @@ def start_vault_session(item_id: str) -> str:
     item = vault_source(item_id)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     channel = {"id": f"vault-{item_id}", "items": [item], "schedule_anchor": now.isoformat(), "playback_mode": "ordered"}
-    return start_ffmpeg_session(channel)
+    return start_playback_route(channel)
 
 
 def plugin_tools() -> list[dict]:
@@ -1464,7 +1578,7 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     except ValueError:
                         pass
-                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": values, "now_playing": now_playing, "assets": asset_manifest(), "tools": plugin_tools(), "backup_count": len(list(BACKUP_DIR.glob("*.json"))), "data_dir": str(DATA_DIR), "server_base": server_base()})
+                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": values, "now_playing": now_playing, "assets": asset_manifest(), "tools": plugin_tools(), "backup_count": len(list(BACKUP_DIR.glob("*.json"))), "data_dir": str(DATA_DIR), "server_base": server_base(), "playback_engine": ffmpeg_status()})
             elif parsed.path == "/api/plex/libraries":
                 self.send_json(200, {"libraries": plex_libraries()})
             elif parsed.path == "/api/plex/items":
@@ -1526,20 +1640,19 @@ class Handler(BaseHTTPRequestHandler):
                 if not channel:
                     raise FileNotFoundError
                 try:
-                    session_id = start_ffmpeg_session(channel)
+                    route = start_playback_route(channel)
                     with LOCK:
                         PLAYBACK_ERRORS.pop(channel_id, None)
                 except Exception as exc:
                     with LOCK:
-                        PLAYBACK_ERRORS[channel_id] = str(exc)
+                        PLAYBACK_ERRORS[channel_id] = sanitized_playback_error(exc)
                     raise
-                self.redirect(f"/ffmpeg-stream/{session_id}/index.m3u8")
+                self.redirect(route)
             elif parsed.path.startswith("/vault/") and parsed.path.endswith(".m3u8"):
                 item_id = Path(parsed.path).stem
                 if not re.fullmatch(r"[a-f0-9]{24}", item_id):
                     raise FileNotFoundError
-                session_id = start_vault_session(item_id)
-                self.redirect(f"/ffmpeg-stream/{session_id}/index.m3u8")
+                self.redirect(start_vault_session(item_id))
             elif parsed.path.startswith("/ffmpeg-stream/"):
                 parts = parsed.path.strip("/").split("/")
                 if len(parts) != 3 or not re.fullmatch(r"(?:index\.m3u8|segment\d+\.ts)", parts[2]):
@@ -1558,9 +1671,19 @@ class Handler(BaseHTTPRequestHandler):
                 proxy_id = parsed.path.rsplit("/", 1)[-1]
                 with LOCK:
                     target = HLS_PROXY.get(proxy_id)
+                    channel_id = HLS_PROXY_CHANNELS.get(proxy_id, "")
                 if not target or target[1] < time.time():
                     raise FileNotFoundError
-                data, content_type, _url, status, content_range = fetch_plex_stream(target[0], self.headers.get("Range", ""))
+                try:
+                    data, content_type, _url, status, content_range = fetch_plex_stream(target[0], self.headers.get("Range", ""), channel_id)
+                    if channel_id:
+                        with LOCK:
+                            PLAYBACK_ERRORS.pop(channel_id, None)
+                except Exception as exc:
+                    if channel_id:
+                        with LOCK:
+                            PLAYBACK_ERRORS[channel_id] = sanitized_playback_error(exc)
+                    raise
                 self.send_bytes(status, data, content_type, {"Content-Range": content_range, "Accept-Ranges": "bytes"})
             elif parsed.path.startswith("/user-assets/"):
                 filename = Path(parsed.path).name
@@ -1598,6 +1721,7 @@ class Handler(BaseHTTPRequestHandler):
                     "port": old["port"],
                     "bind_host": str(payload.get("bind_host", old["bind_host"])).strip() or HOST,
                     "public_url": str(payload.get("public_url", old["public_url"])).strip().rstrip("/"),
+                    "public_tunnel": old.get("public_tunnel", False),
                     "client_identifier": old["client_identifier"],
                     "local_libraries": old["local_libraries"],
                     "directory_url": str(payload.get("directory_url", old["directory_url"])).strip().rstrip("/"),
@@ -1631,8 +1755,12 @@ class Handler(BaseHTTPRequestHandler):
                     raw = {}
                 if payload.get("directory_url"):
                     raw["directory_url"] = str(payload["directory_url"]).strip().rstrip("/")
-                if payload.get("public_url"):
+                if payload.get("auto_tunnel"):
+                    raw["public_url"] = start_public_tunnel()
+                    raw["public_tunnel"] = True
+                elif payload.get("public_url"):
                     raw["public_url"] = str(payload["public_url"]).strip().rstrip("/")
+                    raw["public_tunnel"] = False
                 atomic_json(CONFIG_FILE, raw)
                 generate_exports()
                 self.send_json(200, {"creator": publish_creator(payload)})
@@ -1735,6 +1863,19 @@ def open_data_folder() -> None:
         subprocess.Popen(["xdg-open", str(DATA_DIR)])
 
 
+def restore_public_sharing() -> None:
+    time.sleep(1)
+    settings = config()
+    if not settings.get("public_tunnel") or not settings.get("creator_profile"):
+        return
+    try:
+        start_public_tunnel()
+        publish_creator(settings["creator_profile"])
+        print("ChannelForge public sharing is online.")
+    except Exception as exc:
+        print(f"ChannelForge public sharing could not start: {sanitized_playback_error(exc)}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Public_ChannelForge standalone TV server")
     parser.add_argument("--port", type=int, default=0)
@@ -1752,6 +1893,7 @@ def main() -> None:
     print(f"{APP_NAME} {VERSION} is running at {url}")
     print(f"Data directory: {DATA_DIR}")
     threading.Thread(target=reap_idle_sessions, daemon=True, name="channel-forge-idle-reaper").start()
+    threading.Thread(target=restore_public_sharing, daemon=True, name="channel-forge-public-sharing").start()
     if not args.no_browser and sys.platform == "win32":
         import webview
         import ctypes

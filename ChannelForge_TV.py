@@ -5,6 +5,7 @@ import http.server
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -13,8 +14,9 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-VERSION = "3.4.1"
+VERSION = "3.4.2"
 DIRECTORY = "https://directory.channelforge.tv/v1/catalog"
+LOCAL_CREATOR = "http://127.0.0.1:8787"
 GITHUB = "https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"
 UPDATE_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "ChannelForge_TV" / "updates"
 UPDATE_JOBS: dict[str, dict] = {}
@@ -50,6 +52,49 @@ def approved_download(url: str) -> str:
     return url
 
 
+def approved_content_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "https" and parsed.hostname:
+        return url
+    if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port == 8787:
+        return url
+    raise ValueError("ChannelForge TV only opens HTTPS creator media or the local Creator on port 8787.")
+
+
+def local_creator() -> dict:
+    request = urllib.request.Request(f"{LOCAL_CREATOR}/api/status", headers={"Accept": "application/json", "User-Agent": f"ChannelForge-TV/{VERSION}"})
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            status = json.load(response)
+    except Exception:
+        return {"available": False}
+    channels = status.get("channels", []) if isinstance(status, dict) else []
+    config = status.get("config", {}) if isinstance(status, dict) else {}
+    profile = config.get("creator_profile", {}) if isinstance(config, dict) else {}
+    plex_profile = config.get("plex_profile", {}) if isinstance(config, dict) else {}
+    name = profile.get("name") or plex_profile.get("server_name") or "My ChannelForge Studio"
+    return {"available": True, "creator": {
+        "id": "local-creator", "name": str(name),
+        "description": f"{len(channels)} local channel{'s' if len(channels) != 1 else ''} • Creator connected",
+        "playlist_url": f"{LOCAL_CREATOR}/exports/channels.m3u",
+        "vault_url": f"{LOCAL_CREATOR}/api/public/vault",
+        "logo_url": "", "local": True,
+    }}
+
+
+def rewrite_stream_manifest(data: bytes, base_url: str) -> bytes:
+    output = []
+    for line in data.decode("utf-8-sig").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            target = urllib.parse.urljoin(base_url, stripped)
+            line = "/stream?url=" + urllib.parse.quote(target, safe="")
+        elif 'URI="' in line:
+            line = re.sub(r'URI="([^"]+)"', lambda match: 'URI="/stream?url=' + urllib.parse.quote(urllib.parse.urljoin(base_url, match.group(1)), safe="") + '"', line)
+        output.append(line)
+    return ("\n".join(output) + "\n").encode()
+
+
 def start_tv_update() -> str:
     job_id = uuid.uuid4().hex
     with UPDATE_LOCK:
@@ -65,7 +110,8 @@ def start_tv_update() -> str:
             if not release["update_available"]:
                 raise ValueError("ChannelForge TV is already up to date.")
             assets = release["assets"]
-            asset_name, checksum_name = "ChannelForge_TV.exe", "SHA256SUMS.txt"
+            asset_name = "ChannelForge_TV_Setup.exe" if "ChannelForge_TV_Setup.exe" in assets else "ChannelForge_TV.exe"
+            checksum_name = "SHA256SUMS.txt"
             if asset_name not in assets or checksum_name not in assets:
                 raise ValueError("The GitHub release is missing the TV app or its checksum.")
             report("checksum")
@@ -76,7 +122,8 @@ def start_tv_update() -> str:
             if len(expected) != 64:
                 raise ValueError("The TV app checksum was not published correctly.")
             UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-            destination = UPDATE_DIR / f"ChannelForge_TV-v{release['latest_version']}.exe"
+            suffix = "Setup" if asset_name.endswith("_Setup.exe") else "Portable"
+            destination = UPDATE_DIR / f"ChannelForge_TV-{suffix}-v{release['latest_version']}.exe"
             temporary = destination.with_suffix(".downloading")
             request = urllib.request.Request(approved_download(assets[asset_name]), headers={"User-Agent": f"ChannelForge-TV/{VERSION}"})
             digest, downloaded = hashlib.sha256(), 0
@@ -123,10 +170,10 @@ async function json(url){let r=await fetch('/proxy?url='+encodeURIComponent(url)
 async function localJson(path,options={}){let r=await fetch(path,options),value=await r.json();if(!r.ok)throw Error(value.error||'Request failed');return value}
 async function checkUpdate(onLaunch=false){try{let r=await localJson('/api/update');if(!r.update_available){$('#update').textContent='UP TO DATE ✓ • v__VERSION__';return}$('#update').textContent='UPDATE v'+r.latest_version+' AVAILABLE';if(!onLaunch||confirm('ChannelForge TV v'+r.latest_version+' is available. Download and verify it now?'))downloadUpdate()}catch(e){$('#update').textContent='UPDATE CHECK FAILED • v__VERSION__'}}
 async function downloadUpdate(){let panel=$('#update-panel'),message=$('#update-message'),bar=$('#update-progress'),bytes=$('#update-bytes');panel.hidden=false;message.textContent='Preparing verified GitHub download…';bar.value=0;$('#restart-update').hidden=true;try{let started=await localJson('/api/update/start',{method:'POST'});panel.dataset.job=started.job_id;while(true){let job=await localJson('/api/update/progress?id='+encodeURIComponent(started.job_id));bar.value=job.percent||0;message.textContent={checking:'Checking official release…',checksum:'Downloading checksum…',downloading:'Downloading ChannelForge TV…',verifying:'Verifying SHA-256…',complete:'Update verified and ready ✓',error:'Update failed'}[job.stage]||job.stage;bytes.textContent=job.total?Math.round(job.downloaded/1048576)+' MB of '+Math.round(job.total/1048576)+' MB':'';if(job.status==='error')throw Error(job.error||'Update failed');if(job.status==='complete'){$('#restart-update').hidden=false;return}await new Promise(resolve=>setTimeout(resolve,400))}}catch(e){message.textContent=e.message;bytes.textContent='The existing app was not changed.'}}
-async function load(){try{let data=await json('__DIRECTORY__');$('#creators').innerHTML='';for(const c of data.creators){let b=document.createElement('button');b.className='creator';b.innerHTML=(c.logo_url?'<img src="'+esc(c.logo_url)+'" style="width:46px;height:46px;object-fit:contain;float:left;margin-right:12px">':'')+'<b>'+esc(c.name)+'</b><br><small>'+esc(c.description)+'</small>';b.onclick=()=>studio(c);$('#creators').append(b)}if(data.creators.length)studio(data.creators[0]);else $('#creators').innerHTML='<span class="empty">No creator studios are online right now.</span>'}catch(e){$('#creators').innerHTML='<span class="empty">Directory unavailable: '+esc(e.message)+'</span>'}}
-async function studio(c){$('#live').innerHTML='<span class="empty">Loading live channels…</span>';$('#vault').innerHTML='<span class="empty">Loading movies and posters…</span>';try{let m=await fetch('/proxy?url='+encodeURIComponent(c.playlist_url)).then(r=>r.text()),lines=m.split(/\r?\n/),name='';$('#live').innerHTML='';for(const line of lines){if(line.startsWith('#EXTINF:'))name=line.slice(line.lastIndexOf(',')+1);else if(line&&!line.startsWith('#')&&name){let b=document.createElement('button');b.className='channel';b.textContent='LIVE • '+name;b.onclick=()=>play(line);$('#live').append(b);name=''}}let v=await json(c.vault_url);$('#vault').innerHTML='';for(const x of v.items){let b=document.createElement('button');b.className='tape';b.innerHTML='<img loading="lazy" src="'+esc(x.poster_url)+'"><b>'+esc(x.title)+'</b><small>'+esc(x.year)+' • '+esc(x.type)+'</small><i>PLAY ▶</i>';b.onfocus=()=>selectTape(x);b.onmouseenter=()=>selectTape(x);b.onclick=()=>play(x.stream_url);$('#vault').append(b)}if(v.items.length){selectTape(v.items[0]);$('#vault').firstElementChild.focus()}else $('#vault').innerHTML='<span class="empty">This creator has not added movies to Rewind Cinema yet.</span>'}catch(e){$('#vault').innerHTML='<span class="empty">Could not load this studio: '+esc(e.message)+'</span>'}}
+async function load(){let creators=[],directoryError='';try{let local=await localJson('/api/local-creator');if(local.available&&local.creator)creators.push(local.creator)}catch(_error){}try{let data=await json('__DIRECTORY__');for(const c of data.creators||[])if(!creators.some(existing=>existing.playlist_url===c.playlist_url))creators.push(c)}catch(error){directoryError=error.message}$('#creators').innerHTML='';for(const c of creators){let b=document.createElement('button');b.className='creator';b.innerHTML=(c.logo_url?'<img src="'+esc(c.logo_url)+'" style="width:46px;height:46px;object-fit:contain;float:left;margin-right:12px">':'')+'<b>'+esc(c.name)+'</b><br><small>'+esc(c.description)+(c.local?' • THIS PC':'')+'</small>';b.onclick=()=>studio(c);$('#creators').append(b)}if(creators.length)studio(creators[0]);else{$('#creators').innerHTML='<span class="empty">No Creator is connected. Open ChannelForge Creator on this PC to load your channels.'+(directoryError?'<br><small>Public directory is currently unavailable.</small>':'')+'</span>';$('#live').innerHTML='<span class="empty">Waiting for ChannelForge Creator…</span>'}}
+async function studio(c){$('#live').innerHTML='<span class="empty">Loading live channels…</span>';$('#vault').innerHTML='<span class="empty">Loading movies and posters…</span>';try{let response=await fetch('/proxy?url='+encodeURIComponent(c.playlist_url));if(!response.ok)throw Error('The channel playlist could not be loaded.');let m=await response.text(),lines=m.split(/\r?\n/),name='',channelCount=0;$('#live').innerHTML='';for(const line of lines){if(line.startsWith('#EXTINF:'))name=line.slice(line.lastIndexOf(',')+1);else if(line&&!line.startsWith('#')&&name){let b=document.createElement('button');b.className='channel';b.textContent='LIVE • '+name;b.onclick=()=>play(line);$('#live').append(b);name='';channelCount++}}if(!channelCount)$('#live').innerHTML='<span class="empty">This Creator has no published channels yet.</span>';let v=await json(c.vault_url);$('#vault').innerHTML='';for(const x of v.items){let b=document.createElement('button');b.className='tape';b.innerHTML='<img loading="lazy" src="'+esc(x.poster_url)+'"><b>'+esc(x.title)+'</b><small>'+esc(x.year)+' • '+esc(x.type)+'</small><i>PLAY ▶</i>';b.onfocus=()=>selectTape(x);b.onmouseenter=()=>selectTape(x);b.onclick=()=>play(x.stream_url);$('#vault').append(b)}if(v.items.length){selectTape(v.items[0]);$('#vault').firstElementChild.focus()}else $('#vault').innerHTML='<span class="empty">This creator has not added movies to Rewind Cinema yet.</span>'}catch(e){$('#live').innerHTML='<span class="empty">Could not load channels: '+esc(e.message)+'</span>';$('#vault').innerHTML='<span class="empty">Could not load this studio: '+esc(e.message)+'</span>'}}
 function selectTape(x){$('#selection').innerHTML='<img src="'+esc(x.poster_url)+'"><div><h2>'+esc(x.title)+'</h2><b class="pink">'+esc(x.year)+'</b> • '+esc(x.type)+'<p>'+esc(x.summary||'No description supplied.')+'</p><button id="selected-play">▶ PLAY MOVIE</button><small>Poster and movie data supplied automatically by the creator library.</small></div>';$('#selected-play').onclick=()=>play(x.stream_url)}
-function play(url){let v=$('#player');if(hls)hls.destroy();if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=url;else if(Hls.isSupported()){hls=new Hls();hls.loadSource(url);hls.attachMedia(v)}v.classList.add('playing');$('#close').classList.add('show');v.play()}
+function play(url){let v=$('#player'),source='/stream?url='+encodeURIComponent(url);if(hls)hls.destroy();if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=source;else if(Hls.isSupported()){hls=new Hls();hls.loadSource(source);hls.attachMedia(v)}v.classList.add('playing');$('#close').classList.add('show');v.play()}
 $('#close').onclick=()=>{$('#player').pause();$('#player').classList.remove('playing');$('#close').classList.remove('show')};$('#update').onclick=()=>checkUpdate(false);$('#dismiss-update').onclick=()=>$('#update-panel').hidden=true;$('#restart-update').onclick=async()=>{await localJson('/api/update/launch?id='+encodeURIComponent($('#update-panel').dataset.job),{method:'POST'});$('#update-message').textContent='Opening the verified update…'};
 function demo(){let titles=['Neon Nights','The Last Arcade','Galaxy Rangers','Video Dreams','Summer Quest'],colors=['#bd205c','#a9560c','#069e9a','#792091','#d64a16'];$('#creators').innerHTML='<button class="creator"><b>RETRO WAVE STUDIO</b><br><small>Custom creator branding • online</small></button>';$('#live').innerHTML='<button class="channel">LIVE • SATURDAY MORNING</button><button class="channel">LIVE • SCI-FI AFTER DARK</button>';$('#vault').innerHTML='';titles.forEach((title,i)=>{let svg='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><defs><linearGradient id="g" x2="1" y2="1"><stop stop-color="'+colors[i]+'"/><stop offset="1" stop-color="#09142d"/></linearGradient></defs><rect width="400" height="600" fill="url(#g)"/><circle cx="90" cy="120" r="55" fill="#ffe43b" opacity=".8"/><text x="200" y="310" fill="white" font-size="38" font-family="sans-serif" font-weight="bold" text-anchor="middle">'+title+'</text></svg>');let x={title,year:1984+i,type:'movie',summary:'A creator-curated retro favorite with poster art and movie details loaded automatically from the connected library.',poster_url:svg,stream_url:''},b=document.createElement('button');b.className='tape';b.innerHTML='<img src="'+svg+'"><b>'+title+'</b><small>'+x.year+' • movie</small><i>PLAY ▶</i>';b.onfocus=()=>selectTape(x);b.onmouseenter=()=>selectTape(x);$('#vault').append(b);if(i===0)selectTape(x)});$('#vault').firstElementChild.focus()}if(location.search.includes('demo=1'))demo();else load();checkUpdate(true);</script></body></html>'''.replace("__VERSION__", VERSION).replace("__DIRECTORY__", DIRECTORY).replace("__GITHUB__", GITHUB)
 
@@ -167,6 +214,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if parsed.path == "/api/update":
                 value = latest_tv_release(); value.pop("assets", None)
                 return self.send(200, json.dumps(value).encode(), "application/json")
+            if parsed.path == "/api/local-creator":
+                return self.send(200, json.dumps(local_creator()).encode(), "application/json")
             if parsed.path == "/api/update/progress":
                 job_id = parse_qs(parsed.query).get("id", [""])[0]
                 with UPDATE_LOCK:
@@ -175,12 +224,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ValueError("Update job was not found.")
                 return self.send(200, json.dumps(value).encode(), "application/json")
             if parsed.path == "/proxy":
-                url = parse_qs(parsed.query).get("url", [""])[0]
-                if not url.startswith("https://"):
-                    raise ValueError("Only public HTTPS endpoints are allowed.")
+                url = approved_content_url(parse_qs(parsed.query).get("url", [""])[0])
                 request = urllib.request.Request(url, headers={"User-Agent": f"ChannelForge-TV/{VERSION}"})
                 with urllib.request.urlopen(request, timeout=20) as response:
                     return self.send(response.status, response.read(64 * 1024 * 1024), response.headers.get_content_type())
+            if parsed.path == "/stream":
+                url = approved_content_url(parse_qs(parsed.query).get("url", [""])[0])
+                headers = {"Accept": "*/*", "User-Agent": f"ChannelForge-TV/{VERSION}"}
+                if self.headers.get("Range"):
+                    headers["Range"] = self.headers["Range"]
+                request = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(request, timeout=45) as response:
+                    data = response.read(64 * 1024 * 1024 + 1)
+                    if len(data) > 64 * 1024 * 1024:
+                        raise ValueError("The media segment exceeded the 64 MB safety limit.")
+                    content_type = response.headers.get_content_type()
+                    final_url = response.geturl()
+                    if data.lstrip().startswith(b"#EXTM3U") or "mpegurl" in content_type:
+                        data = rewrite_stream_manifest(data, final_url)
+                        content_type = "application/vnd.apple.mpegurl"
+                    extra = {"Accept-Ranges": response.headers.get("Accept-Ranges", "bytes")}
+                    if response.headers.get("Content-Range"):
+                        extra["Content-Range"] = response.headers["Content-Range"]
+                    return self.send(getattr(response, "status", 200), data, content_type, extra)
             self.send_error(404)
         except Exception as exc:
             self.send(502, json.dumps({"error": str(exc)}).encode(), "application/json")
@@ -199,8 +265,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as exc:
             self.send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
 
-    def send(self, status, body, content_type):
-        self.send_response(status); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(body)
+    def send(self, status, body, content_type, extra_headers=None):
+        self.send_response(status); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store")
+        for name, value in (extra_headers or {}).items():
+            if value:
+                self.send_header(name, value)
+        self.end_headers(); self.wfile.write(body)
 
     def log_message(self, *_args):
         pass
