@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 import ChannelForge_TV as tv
+import linux_runtime
 
 
 class FakeResponse:
@@ -31,6 +32,33 @@ class FakeResponse:
 
 
 class TvAppTests(unittest.TestCase):
+    def test_linux_archive_update_replaces_bundles_in_same_folder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "new"
+            installed = root / "my ChannelForge"
+            source.mkdir()
+            installed.mkdir()
+            for name in linux_runtime.LINUX_APP_FILES:
+                if name in ("web", "plugins", "assets"):
+                    (source / name).mkdir()
+                    (source / name / "new.txt").write_text("new")
+                    (installed / name).mkdir()
+                    (installed / name / "obsolete.txt").write_text("old")
+                else:
+                    (source / name).write_text("new")
+                    (installed / name).write_text("old")
+            (installed / "personal.txt").write_text("keep")
+            linux_runtime.install_linux_files(source, installed)
+            self.assertEqual((installed / "ChannelForge_TV.py").read_text(), "new")
+            self.assertEqual((installed / "Public_ChannelForge.py").read_text(), "new")
+            self.assertEqual((installed / "personal.txt").read_text(), "keep")
+            self.assertFalse((installed / "web" / "obsolete.txt").exists())
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["my ChannelForge", "new"])
+            command = linux_runtime.linux_install_command(root / "update.tar.gz", installed)
+            self.assertIn("--replace", command)
+            self.assertIn("trap", command)
+
     def test_version_comparison_handles_double_digit_minor(self):
         self.assertGreater(tv.version_tuple("v3.10.0"), tv.version_tuple("3.9.9"))
 
@@ -125,7 +153,7 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("async function scanChannels", tv.HTML)
         self.assertIn("filter(channel=>channel.online)", tv.HTML)
         self.assertIn('id="home-changelog"', tv.HTML)
-        self.assertIn('data-section-block="cinema" hidden><h2>CREATOR STUDIOS', tv.HTML)
+        self.assertIn('data-section-block="cinema" hidden><h2>Creator studios', tv.HTML)
         self.assertIn("if(name==='cinema'&&selectedCreator)studio(selectedCreator)", tv.HTML)
         self.assertIn("channelsByStudio.set(creator.playlist_url,channels)", tv.HTML)
         self.assertIn("directoryScan=refreshDirectory()", tv.HTML)

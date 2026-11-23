@@ -41,7 +41,7 @@ $sshArguments = @(
 )
 Write-Host "Bundling FFmpeg from $($ffmpeg.FullName) ($([math]::Round($ffmpeg.Length / 1MB, 1)) MB)"
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Creator --icon "assets\channel-forge-creator.ico" --add-data "assets;assets" --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.FullName);." --add-binary "$($ffprobe.FullName);." @sshArguments Public_ChannelForge.py
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_TV --icon "assets\channel-forge-tv.ico" --add-data "web\hls.min.js;web" --add-data "assets\channel-forge-tv.png;assets" ChannelForge_TV.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_TV --icon "assets\channel-forge-tv.ico" --add-data "web\hls.min.js;web" --add-data "web\cinema.css;web" --add-data "assets\channel-forge-tv.png;assets" --add-data "assets\cinema-hero.webp;assets" --add-data "assets\cinema-tapes.webp;assets" ChannelForge_TV.py
 
 $payload = Join-Path $root "installer\payload"
 New-Item -ItemType Directory -Force -Path $payload | Out-Null

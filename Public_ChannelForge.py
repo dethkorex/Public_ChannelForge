@@ -36,7 +36,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.19"
+VERSION = "3.5.20"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -256,7 +256,7 @@ def download_verified_update(progress=None) -> dict:
     if actual != expected:
         raise ValueError("The downloaded installer failed SHA-256 verification.")
     temporary.replace(destination)
-    command = linux_install_command(destination)
+    command = linux_install_command(destination, Path(__file__).resolve().parent)
     progress("complete", destination.stat().st_size, destination.stat().st_size)
     return {"version": release["latest_version"], "asset": asset_name, "path": str(destination), "sha256": actual, "command": command, "can_launch": sys.platform == "win32"}
 

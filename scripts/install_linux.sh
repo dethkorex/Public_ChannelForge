@@ -25,12 +25,12 @@ install_dependencies() {
   if command -v pacman >/dev/null 2>&1; then
     echo "Installing ChannelForge dependencies for Arch/Omarchy…"
     "${elevate[@]}" pacman -S --needed python ffmpeg openssh python-pywebview python-pillow python-urllib3 python-gobject webkit2gtk-4.1 \
-      gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
+      gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav mpv
   elif command -v apt-get >/dev/null 2>&1; then
     echo "Installing ChannelForge dependencies for Debian/Ubuntu…"
     "${elevate[@]}" apt-get update
     "${elevate[@]}" apt-get install -y python3 ffmpeg openssh-client python3-webview python3-pil python3-urllib3 gir1.2-webkit2-4.1 \
-      gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
+      gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav mpv
   else
     echo "Unsupported package manager. Install Python 3, FFmpeg, PyWebView, GTK and WebKitGTK, then rerun install.sh."
     exit 1
@@ -40,6 +40,7 @@ install_dependencies() {
 has_desktop_runtime() {
   /usr/bin/python3 -Es -c 'import webview, gi, PIL, urllib3; gi.require_version("Gtk", "3.0"); gi.require_version("WebKit2", "4.1"); from gi.repository import Gtk, WebKit2' >/dev/null 2>&1 \
     && command -v ffmpeg >/dev/null 2>&1 \
+    && command -v mpv >/dev/null 2>&1 \
     && command -v ssh >/dev/null 2>&1 \
     && gst-inspect-1.0 avdec_h264 >/dev/null 2>&1 \
     && gst-inspect-1.0 avdec_aac >/dev/null 2>&1 \
@@ -52,11 +53,31 @@ fi
 has_desktop_runtime || { echo "The system Python, GTK/WebKit, FFmpeg, SSH, or H.264/AAC playback dependencies failed to load." >&2; exit 1; }
 
 APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/public-channelforge/app"
+if [[ ${1:-} == --replace ]]; then
+  APP_DIR="$(realpath -e -- "${2:?Missing existing application folder}")"
+  if [[ ! -f "$APP_DIR/Public_ChannelForge.py" || ! -f "$APP_DIR/ChannelForge_TV.py" ||
+        ! -f "$APP_DIR/install.sh" || ! -f "$APP_DIR/uninstall.sh" || -e "$APP_DIR/.git" ]]; then
+    echo "The selected directory is not an installed ChannelForge archive." >&2
+    exit 1
+  fi
+fi
 BIN_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$SYSTEMD_DIR"
-cp -R "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/linux_runtime.py" "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$ROOT/PLUGIN_DEVELOPMENT.md" "$APP_DIR/"
+/usr/bin/python3 -Es - "$ROOT" "$APP_DIR" <<'PY'
+import fcntl
+import sys
+from pathlib import Path
+
+source, destination = (Path(path).resolve() for path in sys.argv[1:])
+sys.path.insert(0, str(source))
+from linux_runtime import install_linux_files
+
+with (destination.parent / ".channelforge-install.lock").open("a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    install_linux_files(source, destination)
+PY
 cat > "$BIN_DIR/public-channelforge" <<EOF
 #!/usr/bin/env bash
 exec /usr/bin/python3 -Es "$APP_DIR/Public_ChannelForge.py" "\$@"

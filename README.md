@@ -60,6 +60,8 @@ ChannelForge v3.5.18 keeps Fire TV remote focus on the guide so the Updates butt
 
 ChannelForge v3.5.19 loads the Fire TV guide and movie shelf independently. Update Creator as well to serve Rewind Cinema in small pages with a Load More button on Fire TV.
 
+ChannelForge v3.5.20 opens the desktop TV app full screen, with **F11** to toggle the window mode. Rewind Cinema has a new shelf and a docked movie player. Linux archive updates replace the bundled files in the existing installation and remove their temporary files. The Linux installer includes a fallback player for systems where WebKit cannot decode video.
+
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
 ![ChannelForge TV home hub](preview/channel-forge-tv-v346-home.png)
@@ -112,7 +114,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.19-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.5.20-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation

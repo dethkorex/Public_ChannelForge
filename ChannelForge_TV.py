@@ -7,6 +7,7 @@ import http.server
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -19,7 +20,7 @@ from pathlib import Path
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.19"
+VERSION = "3.5.20"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -209,7 +210,8 @@ def start_tv_update() -> str:
 
             if linux:
                 destination = verified_download(UPDATE_DIR / asset_name, expected, download_package, report)
-                result = {"version": version, "path": str(destination), "command": linux_install_command(destination)}
+                result = {"version": version, "path": str(destination),
+                          "command": linux_install_command(destination, Path(__file__).resolve().parent)}
             else:
                 destination = verified_windows_setup(UPDATE_DIR, version, expected, download_package, report)
                 result = {"version": version, "path": str(destination)}
@@ -473,17 +475,38 @@ function adoptCreators(creators){
             const b=document.createElement('button');
             b.className='creator';
             b.innerHTML=(c.logo_url?'<img loading="lazy" src="'+esc(c.logo_url)+'" style="width:46px;height:46px;object-fit:contain;float:left;margin-right:12px">':'')+'<b>'+esc(c.name)+'</b><br><small>'+esc(c.description)+(c.local?' • THIS PC':'')+'</small>';
-            b.onclick=()=>{selectedCreator=c;showScreen('cinema');studio(c,true)};
+            b.dataset.playlist=c.playlist_url;
+            b.onclick=()=>selectCinemaStudio(c);
             fragment.append(b);
         }
         if(!creators.length)list.innerHTML='<span class="empty">No public creator studios are online right now.</span>';
         else list.append(fragment);
     }
+    updateCinemaStudios();
     if(!selectedCreator){
         $('#vault').innerHTML='<span class="empty">No movie libraries are online right now.</span>';
         $('#selection').textContent='';
     }else if(!document.querySelector('.vault-layout').hidden&&!vaultItems.length)studio(selectedCreator);
     refreshGuideFromStudios();
+}
+function updateCinemaStudios(){
+    const select=$('#cinema-studio-select');
+    if(select){
+        select.replaceChildren(...allCreators.map(creator=>new Option(creator.name,creator.playlist_url)));
+        select.disabled=!allCreators.length;
+        select.value=selectedCreator?.playlist_url||'';
+    }
+    for(const button of $('#creators').querySelectorAll('[data-playlist]')){
+        if(button.dataset.playlist===selectedCreator?.playlist_url)button.setAttribute('aria-current','true');
+        else button.removeAttribute('aria-current');
+    }
+}
+function selectCinemaStudio(creator){
+    if(!creator)return;
+    selectedCreator=creator;
+    updateCinemaStudios();
+    showScreen('cinema');
+    studio(creator,true);
 }
 async function discoverDirectory(url){
     const controller=new AbortController();
@@ -617,10 +640,10 @@ function appendVaultBatch(amount=24){
         const b=document.createElement('button');
         b.className='tape';
         const thumbnail=x.thumbnail_url||x.poster_url;
-        b.innerHTML='<span class="tape-ridge"></span>'+(thumbnail?'<img loading="lazy" decoding="async" src="'+esc(thumbnail)+'" alt="">':'<span class="empty">&nbsp;</span>')+'<span class="tape-label"><b>'+esc(x.title)+'</b><small><span>CF HOME VIDEO • VHS / HI-FI</span><mark>'+esc(x.year||'N/A')+'</mark></small></span><i>INSERT ▷</i>';
+        b.innerHTML='<span class="tape-ridge"></span>'+(thumbnail?'<img loading="lazy" decoding="async" src="'+esc(thumbnail)+'" alt="">':'<span class="tape-thumbnail" aria-hidden="true"></span>')+'<span class="tape-label"><b>'+esc(x.title)+'</b><small>CHANNELFORGE HOME VIDEO</small></span><mark class="tape-year">'+esc(x.year||'N/A')+'</mark><i>INSERT ▷</i>';
         b.querySelector('img')?.addEventListener('error',event=>hideFailedPoster(event.currentTarget,x.poster_url));
-        b.onfocus=b.onmouseenter=()=>selectTape(x);
-        b.onclick=()=>play(x.stream_url,{kind:'movie',title:x.title,movie:x});
+        b.onfocus=b.onmouseenter=()=>selectTape(x,b);
+        b.onclick=()=>playCinemaMovie(x);
         fragment.append(b);
     }
     box.append(fragment);
@@ -634,11 +657,12 @@ function renderVaultPage(focusFirst=false){
     if(!vaultVisible.length){
         box.innerHTML='<span class="empty">'+(vaultItems.length?'No movies match these filters.':'No movies are available in this studio.')+'</span>';
         selectedTape=null;
+        updateCinemaMonitor();
         $('#selection').textContent='';
         return;
     }
     appendVaultBatch();
-    selectTape(vaultVisible[0]);
+    selectTape(vaultVisible[0],box.firstElementChild);
     if(focusFirst)box.firstElementChild?.focus({preventScroll:true});
 }
 function renderVaultBatch(){renderVaultPage(false)}
@@ -655,6 +679,7 @@ async function studio(c, force=false){
         vaultItems=[];
         indexVault(vaultItems);
         selectedTape=null;
+        updateCinemaMonitor();
         $('#movie-count').textContent='';
         $('#selection').textContent='';
         $('#vault').innerHTML='<span class="empty">Loading movies and posters…</span>';
@@ -693,7 +718,30 @@ function hideFailedPoster(image,fallback=''){
     if(fallback&&image.getAttribute('src')!==fallback){image.src=fallback;return}
     image.style.visibility='hidden';
 }
-function selectTape(x){if(selectedTape===x)return;selectedTape=x;$('#selection').innerHTML='<div class="vhs-box">'+(x.poster_url?'<img decoding="async" src="'+esc(x.poster_url)+'" alt="'+esc(x.title)+' poster">':'<img alt="" style="visibility:hidden">')+'<span>CHANNELFORGE HOME VIDEO</span></div><div><span class="eyebrow">SELECTED CASSETTE</span><h2>'+esc(x.title)+'</h2><b class="pink">'+esc(x.year)+'</b> • '+esc(x.type)+'<p>'+esc(x.summary||'No description supplied.')+'</p><button id="selected-play">▷ INSERT MOVIE</button><small>Insert this movie to begin playback. Poster and details come from the connected creator library.</small></div>';$('#selection img')?.addEventListener('error',event=>hideFailedPoster(event.currentTarget));$('#selected-play').onclick=()=>play(x.stream_url,{kind:'movie',title:x.title,movie:x})}
+function selectTape(movie,tape){
+    const previous=$('#vault [aria-current]');
+    if(previous!==tape){previous?.removeAttribute('aria-current');tape?.setAttribute('aria-current','true')}
+    if(selectedTape===movie&&$('#selected-play'))return;
+    selectedTape=movie;
+    const poster=movie.poster_url?'<img decoding="async" src="'+esc(movie.poster_url)+'" alt="'+esc(movie.title)+' poster">':'';
+    const tags=[movie.year,movie.content_rating,...(movie.genres||[]).slice(0,2)].filter(Boolean)
+        .map(label=>'<span>'+esc(label)+'</span>').join('');
+    $('#selection').innerHTML='<div class="vhs-box">'+poster+'<span>CHANNELFORGE HOME VIDEO</span></div>'
+        +'<div class="cinema-details"><span class="eyebrow">SELECTED CASSETTE</span><h2>'+esc(movie.title)
+        +'</h2><div class="cinema-tags">'+tags+'</div><p>'+esc(movie.summary||'No description supplied.')
+        +'</p><button id="selected-play">▶ INSERT MOVIE</button></div>';
+    $('#selection img')?.addEventListener('error',event=>hideFailedPoster(event.currentTarget));
+    $('#selected-play').onclick=()=>playCinemaMovie(movie);
+    updateCinemaMonitor();
+}
+function updateCinemaMonitor(){
+    const playButton=$('#cinema-insert');
+    playButton.disabled=!selectedTape;
+    $('#cinema-monitor-title').textContent=selectedTape?.title||'Select a movie';
+}
+function playCinemaMovie(movie){
+    play(movie.stream_url,{kind:'movie',title:movie.title,movie,cinema:true});
+}
 function liveEdge(v){
     if(!liveMode||hls||!v.buffered.length)return;
     const edge=v.buffered.end(v.buffered.length-1);
@@ -713,6 +761,7 @@ function setPlayerState(message,error=false,canRetry=error){
     state.textContent=message;
     state.classList.toggle('error',error);
     if(!error)return;
+    clearTimeout(playbackTimer);playbackTimer=null;
     setBuffering(true,message,false);
     clearTimeout(playerControlsTimer);
     document.body.classList.remove('player-controls-hidden');
@@ -725,10 +774,40 @@ function setPlayerState(message,error=false,canRetry=error){
         state.append(' ',retry);
     }
 }
-let playbackGeneration=0, liveRetryTimer, liveRetries=0;
+let playbackGeneration=0, liveRetryTimer, liveRetries=0, playbackTimer;
+function armPlaybackDeadline(generation, delay){
+    if(playbackTimer)return;
+    playbackTimer=setTimeout(()=>{
+        playbackTimer=null;
+        if(generation!==playbackGeneration||!activeStreamUrl)return;
+        ++playbackGeneration;
+        clearTimeout(liveRetryTimer);liveRetryTimer=null;
+        const video=$('#player');
+        if(hls){hls.destroy();hls=null}
+        video.removeAttribute('src');video.load();
+        setPlayerState('The studio did not deliver video in time.',true);
+    },delay);
+}
+function showNativePlayback(){
+    setPlayerState('Video decoding is unavailable in this window.',true,false);
+    if(!/Linux/i.test(navigator.platform)||!window.pywebview?.api?.play_in_linux_player)return;
+    const button=document.createElement('button');
+    button.className='retry-stream';
+    button.type='button';
+    button.textContent='Open in Linux player';
+    button.onclick=async()=>{
+        button.disabled=true;
+        try{
+            const result=await window.pywebview.api.play_in_linux_player(activeStreamUrl,liveMode);
+            if(result.error){button.disabled=false;button.textContent=result.error}
+            else stopPlayer();
+        }catch(_error){button.disabled=false;button.textContent='Try Linux player again'}
+    };
+    $('#player-state').append(' ',button);
+}
 function advanceLive(failed=false, failureMessage='COULD NOT PLAY THIS CHANNEL'){
     if(!liveMode||!activeStreamUrl||liveRetryTimer)return;
-    if(failed&&++liveRetries>3){setPlayerState(failureMessage,true);return}
+    if(failed&&++liveRetries>2){setPlayerState(failureMessage,true);return}
     const generation=playbackGeneration;
     const channel=liveChannels.find(item=>item.stream_url===activeStreamUrl)||activeMedia.channel;
     const current=programAt(channel,Date.now());
@@ -744,11 +823,14 @@ function advanceLive(failed=false, failureMessage='COULD NOT PLAY THIS CHANNEL')
 }
 function play(url,media=null,continuing=false){
     clearTimeout(liveRetryTimer);liveRetryTimer=null;
+    clearTimeout(playbackTimer);playbackTimer=null;
     const generation=++playbackGeneration,v=$('#player'),shell=ensurePlayerShell();
     const source='/stream?url='+encodeURIComponent(url);
     if(!continuing){
         liveRetries=0;playerMini=false;document.body.classList.remove('has-mini-player','player-controls-hidden');
         document.body.append(shell);shell.className='mini-player-shell';v.classList.remove('mini');
+        $('#cinema-expand').hidden=true;
+        if(media?.cinema)dockCinemaMovie();
     }
     activeStreamUrl=url;activeMedia=media||{kind:/\/live\//.test(url)?'live':'movie',title:'ChannelForge'};
     liveMode=activeMedia.kind==='live';
@@ -757,10 +839,11 @@ function play(url,media=null,continuing=false){
         activeMedia.programStart=current?.start;
         activeMedia.title=current?.title||activeMedia.title;
     }
-    $('#close').textContent=playerMini?'✕ CLOSE PLAYER':liveMode?'⌄ MINIMIZE TO GUIDE':'✕ CLOSE MOVIE';
+    $('#close').textContent=playerMini?'✕ CLOSE PLAYER':liveMode?'⌄ MINIMIZE TO GUIDE':media?.cinema?'✕ STOP MOVIE':'✕ CLOSE MOVIE';
     v.controls=!liveMode;updateTunedIndicator(activeMedia,'CONNECTING…');setBuffering(true,'Connecting to the studio…');showPlayerControls();renderLiveGuide();
     if(hls){hls.destroy();hls=null}
     v.removeAttribute('src');v.load();
+    armPlaybackDeadline(generation,24000);
     const start=()=>{if(generation===playbackGeneration)v.play().catch(error=>{
         if(generation===playbackGeneration)setPlayerState(error.message||'PRESS PLAY TO START',true);
     })};
@@ -779,7 +862,8 @@ function play(url,media=null,continuing=false){
             if(!data.fatal||generation!==playbackGeneration)return;
             if(liveMode){
                 const stalled=data.details===Hls.ErrorDetails.FRAG_LOAD_TIMEOUT;
-                advanceLive(true,stalled?'VIDEO DOWNLOAD TIMED OUT · TRY AGAIN SHORTLY':undefined);
+                const upstream=Number(data.response?.code)>=500;
+                advanceLive(true,upstream?'THE STUDIO COULD NOT START THIS CHANNEL':stalled?'VIDEO DOWNLOAD TIMED OUT · TRY AGAIN SHORTLY':undefined);
                 return;
             }
             if(data.type===Hls.ErrorTypes.MEDIA_ERROR&&!movieRecovery){movieRecovery=true;player.recoverMediaError();return}
@@ -787,16 +871,16 @@ function play(url,media=null,continuing=false){
         });
         player.loadSource(source);player.attachMedia(v);
     }else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=source;start()}
-    else setPlayerState('VIDEO ENGINE UNAVAILABLE. ON LINUX, INSTALL THE CURRENT CHANNELFORGE PACKAGE.',true,false);
+    else showNativePlayback();
     v.classList.add('playing');$('#close').classList.add('show');
 }
 function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}
 function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeMedia=null;let v=$('#player');v.classList.remove('playing','mini');v.pause();if(hls){hls.destroy();hls=null}v.removeAttribute('src');v.load();setBuffering(false);document.body.classList.remove('has-mini-player');$('#close').classList.remove('show');$('#close').textContent='⌄ MINIMIZE TO GUIDE';updateTunedIndicator(null);renderLiveGuide()}
 $('#player').addEventListener('seeking',event=>liveEdge(event.currentTarget));
-$('#player').addEventListener('playing',()=>{setBuffering(false);showPlayerControls();liveRetries=0;setPlayerState(liveMode?'● LIVE · NO PAUSE OR REWIND':'PLAYING')});
+$('#player').addEventListener('playing',()=>{clearTimeout(playbackTimer);playbackTimer=null;setBuffering(false);showPlayerControls();liveRetries=0;setPlayerState(liveMode?'● LIVE · NO PAUSE OR REWIND':'PLAYING')});
 $('#player').addEventListener('ended',()=>advanceLive());
 $('#player').addEventListener('error',()=>{if(!hls&&activeStreamUrl){if(liveMode)advanceLive(true);else setPlayerState('COULD NOT PLAY THIS MOVIE',true)}});
-$('#player').addEventListener('waiting',()=>{if(activeStreamUrl){setPlayerState('BUFFERING…');setBuffering(true)}});
+$('#player').addEventListener('waiting',()=>{if(activeStreamUrl&&(hls||$('#player').hasAttribute('src'))){setPlayerState('BUFFERING…');setBuffering(true);armPlaybackDeadline(playbackGeneration,20000)}});
 $('#player').addEventListener('pause',event=>{const video=event.currentTarget;if(liveMode&&!video.ended&&video.readyState>=2&&video.classList.contains('playing'))video.play().catch(()=>{})});
 $('#scan-channels').onclick=()=>scanChannels();
 $('#guide-search').oninput=event=>{guideSearch=event.target.value;renderLiveGuide()};
@@ -809,7 +893,19 @@ $('#movie-rating').onchange=event=>{vaultRating=event.target.value;applyVaultFil
 $('#movie-sort').onchange=event=>{vaultSort=event.target.value;applyVaultFilters(true)};
 document.querySelectorAll('[data-movie-filter]').forEach(button=>button.onclick=()=>{vaultFilter=button.dataset.movieFilter;applyVaultFilters(true)});
 setInterval(()=>{if(!document.hidden)scanChannels()},60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)scanChannels()});
-$('#close').onclick=()=>playerMini?stopPlayer():minimizePlayer();
+$('#close').onclick=closeVideoView;
+$('#cinema-insert').onclick=()=>{if(selectedTape)playCinemaMovie(selectedTape)};
+$('#cinema-expand').onclick=expandCinemaMovie;
+$('#cinema-studio-select').onchange=event=>selectCinemaStudio(allCreators.find(creator=>creator.playlist_url===event.target.value));
+function toggleApplicationFullscreen(){
+    if(window.pywebview?.api?.toggle_tv_fullscreen)window.pywebview.api.toggle_tv_fullscreen();
+    else if(document.fullscreenElement)document.exitFullscreen?.();
+    else document.documentElement.requestFullscreen?.();
+}
+$('#desktop-fullscreen').onclick=toggleApplicationFullscreen;
+document.addEventListener('keydown',event=>{
+    if(event.key==='F11'){event.preventDefault();toggleApplicationFullscreen()}
+});
 $('#update').onclick=()=>checkUpdate(false);
 $('#dismiss-update').onclick=()=>$('#update-panel').hidden=true;
 $('#restart-update').onclick=async()=>{
@@ -948,18 +1044,65 @@ function updateTunedIndicator(media,status='PLAYING'){
 }
 function ensurePlayerShell(){if(playerShell)return playerShell;playerShell=document.createElement('section');playerShell.id='mini-player-shell';playerShell.className='mini-player-shell';let player=$('#player');player.parentNode.insertBefore(playerShell,player);playerShell.append(player,$('#player-buffer'),$('#player-bug'),$('#player-hud'),$('#close'));return playerShell}
 function dockMiniPlayer(screen='live'){let shell=ensurePlayerShell(),slot=$('#mini-player-slot');document.body.classList.remove('player-controls-hidden');if(screen==='live'&&slot){slot.append(shell);shell.className='mini-player-shell guide-dock'}else{document.querySelector('main.wrap')?.prepend(shell);shell.className='mini-player-shell section-dock'}}
+function dockCinemaMovie(){
+    const shell=ensurePlayerShell();
+    $('#cinema-monitor').append(shell);
+    shell.className='mini-player-shell section-dock cinema-dock';
+    $('#cinema-expand').hidden=false;
+    $('#close').textContent='✕ STOP MOVIE';
+}
+function expandCinemaMovie(){
+    const shell=ensurePlayerShell();
+    if(!shell.classList.contains('cinema-dock'))return;
+    document.body.append(shell);
+    shell.className='mini-player-shell';
+    $('#close').textContent='⌄ BACK TO CINEMA';
+    showPlayerControls();
+}
+function closeVideoView(){
+    if(activeMedia?.cinema&&!ensurePlayerShell().classList.contains('cinema-dock'))dockCinemaMovie();
+    else if(playerMini||!liveMode)stopPlayer();
+    else minimizePlayer();
+}
 function showPlayerControls(){document.body.classList.remove('player-controls-hidden');clearTimeout(playerControlsTimer);if(!playerMini&&!$('#player-state.error')&&$('#player-buffer')?.hidden)playerControlsTimer=setTimeout(()=>document.body.classList.add('player-controls-hidden'),3200)}
 function surfChannel(direction){if(!liveChannels.length)return;let index=liveChannels.findIndex(channel=>channel.stream_url===activeStreamUrl);index=index<0?0:(index+direction+liveChannels.length)%liveChannels.length;let channel=liveChannels[index],program=programAt(channel);play(channel.stream_url,{kind:'live',channel,title:program?.title||channel.name})}
 document.addEventListener('mousemove',showPlayerControls,{passive:true});document.addEventListener('keydown',showPlayerControls);document.addEventListener('click',event=>{let surf=event.target.closest('[data-player-surf]');if(surf)surfChannel(Number(surf.dataset.playerSurf)||1);if(event.target.closest('[data-player-guide]'))minimizePlayer()});
 '''
 CONTROLLER_JS = r'''
 function tvFocusTargets(){let dialog=document.querySelector('dialog[open]'),scope=dialog||document;return[...scope.querySelectorAll('button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(element=>!element.hidden&&element.offsetParent!==null&&getComputedStyle(element).visibility!=='hidden')}
-function tvMoveFocus(direction){if($('#player').classList.contains('playing')&&!playerMini&&(direction==='up'||direction==='down')){surfChannel(direction==='up'?-1:1);return}let targets=tvFocusTargets(),current=targets.includes(document.activeElement)?document.activeElement:null;if(!targets.length)return;if(!current){targets[0].focus();return}let origin=current.getBoundingClientRect(),ox=origin.left+origin.width/2,oy=origin.top+origin.height/2,best=null,score=Infinity;for(let target of targets){if(target===current)continue;let rect=target.getBoundingClientRect(),dx=rect.left+rect.width/2-ox,dy=rect.top+rect.height/2-oy,primary=direction==='left'?-dx:direction==='right'?dx:direction==='up'?-dy:dy,secondary=direction==='left'||direction==='right'?Math.abs(dy):Math.abs(dx);if(primary<=4)continue;let candidate=primary+secondary*2.25;if(candidate<score){score=candidate;best=target}}if(best){best.focus({preventScroll:true});best.scrollIntoView({behavior:'smooth',block:'nearest',inline:'nearest'})}}
-function tvBack(){let dialog=document.querySelector('dialog[open]');if(dialog){dialog.close();return}if($('#player').classList.contains('playing')){playerMini?stopPlayer():minimizePlayer();return}showScreen('home');document.querySelector('[data-screen="home"]')?.focus()}
+function tvMoveFocus(direction){if(liveMode&&$('#player').classList.contains('playing')&&!playerMini&&(direction==='up'||direction==='down')){surfChannel(direction==='up'?-1:1);return}let targets=tvFocusTargets(),current=targets.includes(document.activeElement)?document.activeElement:null;if(!targets.length)return;if(!current){targets[0].focus();return}let origin=current.getBoundingClientRect(),ox=origin.left+origin.width/2,oy=origin.top+origin.height/2,best=null,score=Infinity;for(let target of targets){if(target===current)continue;let rect=target.getBoundingClientRect(),dx=rect.left+rect.width/2-ox,dy=rect.top+rect.height/2-oy,primary=direction==='left'?-dx:direction==='right'?dx:direction==='up'?-dy:dy,secondary=direction==='left'||direction==='right'?Math.abs(dy):Math.abs(dx);if(primary<=4)continue;let candidate=primary+secondary*2.25;if(candidate<score){score=candidate;best=target}}if(best){best.focus({preventScroll:true});best.scrollIntoView({behavior:'smooth',block:'nearest',inline:'nearest'})}}
+function tvBack(){let dialog=document.querySelector('dialog[open]');if(dialog){dialog.close();return}if($('#player').classList.contains('playing')){closeVideoView();return}showScreen('home');document.querySelector('[data-screen="home"]')?.focus()}
 document.addEventListener('keydown',event=>{let editable=event.target.matches?.('input,textarea,select,[contenteditable="true"]');if(editable&&event.key!=='Escape')return;let direction={ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down'}[event.key];if(direction){event.preventDefault();tvMoveFocus(direction)}else if(event.key==='Escape'){event.preventDefault();tvBack()}});
 let tvGamepadState={},tvGamepadRepeat=0;function pollTvGamepads(now){let pad=[...(navigator.getGamepads?.()||[])].find(Boolean);if(pad){let state={up:pad.buttons[12]?.pressed||pad.axes[1]<-.55,down:pad.buttons[13]?.pressed||pad.axes[1]>.55,left:pad.buttons[14]?.pressed||pad.axes[0]<-.55,right:pad.buttons[15]?.pressed||pad.axes[0]>.55,activate:pad.buttons[0]?.pressed,back:pad.buttons[1]?.pressed};for(let action of Object.keys(state)){let repeatable=['up','down','left','right'].includes(action),repeat=repeatable&&state[action]&&tvGamepadState[action]&&now-tvGamepadRepeat>190;if(state[action]&&(!tvGamepadState[action]||repeat)){showPlayerControls();if(repeatable){tvMoveFocus(action);tvGamepadRepeat=now}else if(action==='activate')document.activeElement?.click();else tvBack()}}tvGamepadState=state}else tvGamepadState={};requestAnimationFrame(pollTvGamepads)}requestAnimationFrame(pollTvGamepads);
 '''
 HOME_DETAILS = r'''<section class="home-panels" data-section-block="home"><article class="home-card"><span class="eyebrow">WELCOME</span><h3>Your community television hub</h3><p>ChannelForge TV brings creator-made live channels and shared movie shelves into one remote-friendly application. Open Live TV to browse the automatic channel guide, or Rewind Cinema to explore movies from connected studios.</p></article><article class="home-card"><div class="release-heading"><div><span class="eyebrow">LATEST UPDATE</span><h3>Release notes</h3></div><strong id="home-release-version">v__VERSION__</strong></div><p id="home-update-state">Checking the official release…</p><pre id="home-changelog" class="home-changelog">Loading changelog…</pre></article></section>'''.replace("__VERSION__", VERSION)
+CINEMA_STAGE_HTML = r'''<section class="cinema-stage" data-section-block="cinema" hidden>
+  <div class="cinema-hero"><h2><span>REWIND</span> <em>CINEMA</em></h2></div>
+  <div class="cinema-monitor" id="cinema-monitor">
+    <div class="cinema-monitor-idle">
+      <button type="button" id="cinema-insert" aria-label="Play selected movie" disabled>▶</button>
+      <span id="cinema-monitor-title">Select a movie</span>
+    </div>
+    <button type="button" id="cinema-expand" aria-label="Expand movie" title="Expand movie" hidden>⛶</button>
+  </div>
+</section>'''
+CINEMA_STUDIOS_HTML = r'''<section class="cinema-studios" data-section-block="cinema" hidden><h2>Creator studios</h2><div id="creators" class="creators"><span class="empty">Scanning studios…</span></div></section>'''
+SCREEN_NAV_JS = r'''
+function showScreen(name){
+    if(name!=='cinema'&&activeMedia?.cinema)stopPlayer();
+    document.querySelectorAll('[data-section-block]').forEach(block=>block.hidden=block.dataset.sectionBlock!==name);
+    document.querySelectorAll('[data-screen]').forEach(button=>button.classList.toggle('active',button.dataset.screen===name));
+    document.body.classList.toggle('guide-mode',name==='live');
+    document.body.classList.toggle('cinema-mode',name==='cinema');
+    if(name==='live'&&innerWidth>900)document.body.classList.add('menu-collapsed');
+    if(name==='cinema'&&innerWidth>900)document.body.classList.remove('menu-collapsed');
+    if(name==='live')renderLiveGuide();
+    if(name==='cinema'&&selectedCreator)studio(selectedCreator);
+    if(innerWidth<=900)document.body.classList.remove('menu-open');
+    window.scrollTo(0,0);
+}
+'''
+
 HTML = HTML.replace("</style><header>", f"</style><style>{SIDEBAR_CSS}{GUIDE_CSS}{GUIDE_STAGE_CSS}{HOME_CSS}{VAULT_CSS}{TAPE_DETAIL_CSS}{TV_OVERHAUL_CSS}{LIVE_ARTWORK_CSS}{FILTER_CSS}{CINEMA_FIX_CSS}{PLAYER_DOCK_CSS}</style><header>")
 HTML = HTML.replace('<small id="update-bytes"></small>', '<small id="update-bytes"></small><textarea id="update-command" aria-label="Install command" rows="4" style="width:100%;margin-top:10px" readonly hidden></textarea>', 1)
 HTML = HTML.replace('<header><div class="brand-lockup">', '<header><button id="menu-toggle" class="hamburger" aria-label="Open navigation">☰</button><div class="brand-lockup">')
@@ -974,14 +1117,19 @@ HTML = HTML.replace('<div id="creators" class="creators">', '<div id="creators" 
 HTML = HTML.replace('<div class="section-heading"><h2 class="cyan">LIVE CHANNELS', '<div class="section-heading" data-section-block="live" hidden><h2 class="cyan">LIVE CHANNELS', 1)
 HTML = HTML.replace('<div id="live" class="live"></div>', '<section id="live-stage" class="live-stage" data-section-block="live" hidden><div id="mini-player-slot" class="mini-player-slot"><div id="mini-player-poster" class="mini-player-poster"><span>SELECT A CHANNEL FROM THE GUIDE</span></div></div><div id="live" class="live"></div></section><div class="guide-toolbar" data-section-block="live" hidden><button id="scan-channels">↻ SCAN CHANNELS</button><span id="scan-status">Channels scan automatically.</span><div class="guide-window-controls"><button id="guide-earlier">‹ EARLIER</button><button id="guide-now">NOW</button><button id="guide-later">LATER ›</button><b id="guide-window-label">ON NOW</b></div><label>⌕ <input id="guide-search" type="search" placeholder="Search guide"></label></div><div id="studio-filters" class="studio-filters" data-section-block="live" hidden></div><div id="guide-board" data-section-block="live" hidden><div id="guide-times" class="guide-times"></div><div id="tv-guide" class="tv-guide"></div></div>', 1)
 HTML = HTML.replace('<div class="section-heading"><h2 class="pink">REWIND CINEMA', '<div class="section-heading" data-section-block="cinema" hidden><h2 class="pink">REWIND CINEMA', 1)
+HTML = HTML.replace('<div class="section-heading" data-section-block="cinema" hidden><h2>CREATOR STUDIOS</h2><small>Choose a studio to tune its channels and movies</small></div><div id="creators" class="creators" data-section-block="cinema" hidden><span class="empty">Connecting to the public directory…</span></div>', '', 1)
+HTML = HTML.replace('<section id="tuned-channel"', f'{CINEMA_STUDIOS_HTML}<section id="tuned-channel"', 1)
+HTML = HTML.replace('<div class="section-heading" data-section-block="cinema" hidden><h2 class="pink">REWIND CINEMA</h2><small>BROWSE THE MOVIE SHELF</small></div>', CINEMA_STAGE_HTML, 1)
 HTML = HTML.replace('<nav class="categories">', '<nav class="categories" data-section-block="cinema" hidden>', 1)
 HTML = HTML.replace('<div class="vault-layout">', '<div class="vault-layout" data-section-block="cinema" hidden>', 1)
 HTML = HTML.replace('<nav class="categories" data-section-block="cinema" hidden><span>CONTINUE WATCHING</span><span>80S BLOCKBUSTERS</span><span>90S ESSENTIALS</span><span>CREATOR PICKS</span></nav>', '<nav class="movie-tools" data-section-block="cinema" hidden><div class="movie-decades"><button class="active" data-movie-filter="all">ALL</button><button data-movie-filter="80s">80S</button><button data-movie-filter="90s">90S</button><button data-movie-filter="2000s">2000S</button><button data-movie-filter="recent">2010+</button></div><label class="movie-search-wrap">⌕<input id="movie-search" class="movie-search" type="search" placeholder="Search title, genre, description…"></label><select id="movie-genre" aria-label="Filter by genre"><option value="all">ALL GENRES</option></select><select id="movie-rating" aria-label="Filter by rating"><option value="all">ALL RATINGS</option></select><select id="movie-sort" aria-label="Sort movies"><option value="title">A–Z</option><option value="newest">NEWEST</option><option value="oldest">OLDEST</option></select><span id="movie-count"></span></nav>', 1)
+HTML = HTML.replace('<div class="movie-decades">', '<select id="cinema-studio-select" aria-label="Creator studio" disabled></select><div class="movie-decades">', 1)
+HTML = HTML.replace('<button id="update" class="update">', '<button id="desktop-fullscreen" type="button" aria-label="Toggle app fullscreen (F11)" title="Toggle app fullscreen (F11)">⛶</button><button id="update" class="update">', 1)
 HTML = HTML.replace('</main><video id="player"', f'{EXTRA_SCREENS}</main><aside id="player-hud" class="player-hud" hidden></aside><aside id="player-bug" class="player-bug" hidden></aside><div id="player-buffer" class="player-buffer" role="status" aria-live="polite" hidden><span class="buffer-spinner" aria-hidden="true"></span><b></b><small></small></div><dialog id="program-dialog" class="program-dialog"><button class="program-close" onclick="this.closest(\'dialog\').close()">×</button><div id="program-dialog-body" class="program-dialog-body"></div></dialog><video id="player"', 1)
 HTML = HTML.replace("let playbackGeneration=0", PLAYER_DOCK_JS + "\nlet playbackGeneration=0", 1)
 HTML = HTML.replace("function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}", "function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');dockMiniPlayer('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}", 1)
-HTML = HTML.replace("function stopPlayer(){liveMode=false;", "function stopPlayer(){++playbackGeneration;clearTimeout(liveRetryTimer);liveRetryTimer=null;let shell=ensurePlayerShell();document.body.append(shell);shell.className='mini-player-shell';document.body.classList.remove('player-controls-hidden');liveMode=false;", 1)
-HTML = HTML.replace("async function checkUpdate(onLaunch=false)", "function showScreen(name){document.querySelectorAll('[data-section-block]').forEach(block=>block.hidden=block.dataset.sectionBlock!==name);document.querySelectorAll('[data-screen]').forEach(button=>button.classList.toggle('active',button.dataset.screen===name));document.body.classList.toggle('guide-mode',name==='live');if(name==='live'&&innerWidth>900)document.body.classList.add('menu-collapsed');if(name==='live')renderLiveGuide();if(name==='cinema'&&selectedCreator)studio(selectedCreator);if(innerWidth<=900)document.body.classList.remove('menu-open');window.scrollTo(0,0)}\nasync function checkUpdate(onLaunch=false)", 1)
+HTML = HTML.replace("function stopPlayer(){liveMode=false;", "function stopPlayer(){++playbackGeneration;clearTimeout(liveRetryTimer);liveRetryTimer=null;clearTimeout(playbackTimer);playbackTimer=null;$('#cinema-expand').hidden=true;let shell=ensurePlayerShell();document.body.append(shell);shell.className='mini-player-shell';document.body.classList.remove('player-controls-hidden');liveMode=false;", 1)
+HTML = HTML.replace("async function checkUpdate(onLaunch=false)", SCREEN_NAV_JS + "\nasync function checkUpdate(onLaunch=false)", 1)
 HTML = HTML.replace("b.onclick=()=>studio(c)", "b.onclick=()=>{studio(c);showScreen('cinema')}", 1)
 HTML = HTML.replace("$('#close').onclick", "ensurePlayerShell();$('#vault').addEventListener('scroll',event=>{let box=event.currentTarget;if(box.scrollTop+box.clientHeight>box.scrollHeight-500&&vaultRenderCount<vaultVisible.length)appendVaultBatch()},{passive:true});$('#menu-toggle').onclick=()=>{if(innerWidth<=900)document.body.classList.toggle('menu-open');else document.body.classList.toggle('menu-collapsed')};document.querySelectorAll('[data-screen]').forEach(button=>button.onclick=event=>{event.preventDefault();const screen=button.dataset.screen;showScreen(screen);if(playerMini)dockMiniPlayer(screen);if(screen==='updates')checkUpdate(false)});$('#screen-check-update').onclick=()=>checkUpdate(false);$('#close').onclick", 1)
 HTML = HTML.replace("$('#update').onclick=()=>checkUpdate(false)", "$('#update').onclick=()=>{showScreen('updates');checkUpdate(false)}", 1)
@@ -990,6 +1138,7 @@ HTML = HTML.replace("if(location.search.includes('demo=1'))", CONTROLLER_JS + "\
 HTML = HTML.replace('</head>', '<style>.retry-stream{margin-left:7px;padding:4px 9px;color:#fff;background:#131838;border:1px solid #26dffa;border-radius:5px;cursor:pointer}</style></head>', 1)
 HTML = HTML.replace("OPEN VERIFIED UPDATE", "RESTART & INSTALL UPDATE").replace("Opening the verified update…", "Restarting to install the verified update in place…")
 HTML = HTML.replace("</head>", f"<style>{GUIDE_LAYOUT_CSS}</style></head>", 1)
+HTML = HTML.replace("</head>", '<link rel="stylesheet" href="/cinema.css"></head>', 1)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -1001,6 +1150,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, HTML.encode(), "text/html; charset=utf-8")
             if parsed.path == "/hls.js":
                 return self.send(200, resource("web/hls.min.js").read_bytes(), "text/javascript")
+            if parsed.path == "/cinema.css":
+                return self.send(200, resource("web/cinema.css").read_bytes(), "text/css; charset=utf-8")
+            if parsed.path in {"/cinema-hero.webp", "/cinema-tapes.webp"}:
+                return self.send(200, resource("assets" + parsed.path).read_bytes(), "image/webp")
             if parsed.path == "/app-icon.png":
                 return self.send(200, resource("assets/channel-forge-tv.png").read_bytes(), "image/png")
             if parsed.path == "/api/update":
@@ -1111,6 +1264,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class DesktopControls:
+    def __init__(self, port: int):
+        self._port = port
+        self._player = None
+        self._lock = threading.Lock()
+
+    def toggle_tv_fullscreen(self):
+        if APP_WINDOW is not None:
+            APP_WINDOW.toggle_fullscreen()
+
+    def play_in_linux_player(self, url: str, live: bool) -> dict:
+        player = shutil.which("mpv") if sys.platform.startswith("linux") else None
+        if not player:
+            return {"error": "Install the current Linux package"}
+        try:
+            url = approved_content_url(url)
+            if not re.fullmatch(r"/(?:live|vault)/[a-zA-Z0-9_-]+\.m3u8", urllib.parse.urlsplit(url).path):
+                raise ValueError("The selection is not a ChannelForge stream.")
+            args = [player, "--no-config", "--no-terminal", "--ytdl=no", "--network-timeout=12",
+                    "--force-window=yes", "--title=ChannelForge TV"]
+            if live:
+                args.extend(["--input-default-bindings=no", "--osc=no"])
+            source = f"http://127.0.0.1:{self._port}/stream?" + urllib.parse.urlencode({"url": url})
+            with self._lock:
+                self._stop_player()
+                self._player = subprocess.Popen([*args, "--", source], stdin=subprocess.DEVNULL,
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, TypeError, ValueError) as exc:
+            return {"error": str(exc)}
+        return {"ok": True}
+
+    def _stop_player(self):
+        if self._player is not None and self._player.poll() is None:
+            self._player.terminate()
+
+
 def main():
     global APP_WINDOW
     import webview
@@ -1121,10 +1310,13 @@ def main():
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-tv-server")
     thread.start()
     minimum = (760, 480) if sys.platform.startswith("linux") else (1100, 700)
-    APP_WINDOW = webview.create_window("ChannelForge TV", url=url, width=1500, height=900, min_size=minimum, background_color="#080414")
+    controls = DesktopControls(server.server_port)
+    APP_WINDOW = webview.create_window("ChannelForge TV", url=url, js_api=controls, fullscreen=True,
+                                      width=1500, height=900, min_size=minimum, background_color="#080414")
     try:
         start_webview(webview)
     finally:
+        controls._stop_player()
         server.shutdown()
         server.server_close()
 

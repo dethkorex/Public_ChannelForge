@@ -49,9 +49,20 @@ public class MainActivity extends Activity {
     private boolean guideVisible = true;
     private Channel tunedChannel;
     private int liveRetries;
+    private boolean playbackWaiting, playbackFailed;
+    private String activeMovieUrl = "";
+    private final Runnable playbackDeadline = () -> {
+        playbackWaiting = false;
+        if (!guideVisible) {
+            video.removeCallbacks(this.continueLive);
+            video.stopPlayback();
+            failPlayback();
+        }
+    };
     private final Runnable continueLive = () -> {
         if (tunedChannel != null && !guideVisible) {
             showBuffering("Connecting to the studio…", true);
+            waitForPlayback();
             video.setVideoURI(Uri.parse(tunedChannel.url));
             video.start();
         }
@@ -201,8 +212,12 @@ public class MainActivity extends Activity {
         });
         video.setOnInfoListener((player, event, extra) -> {
             if (guideVisible) return false;
-            if (event == MediaPlayer.MEDIA_INFO_BUFFERING_START) showBuffering("Buffering video…", true);
+            if (event == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                showBuffering("Buffering video…", true);
+                waitForPlayback();
+            }
             if (event == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START || event == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                clearPlaybackDeadline();
                 bufferPanel.setVisibility(View.GONE);
                 liveRetries = 0;
                 if (tunedChannel != null) showChannelBanner(tunedChannel);
@@ -217,11 +232,12 @@ public class MainActivity extends Activity {
             else if (!guideVisible) returnToGuide();
         });
         video.setOnErrorListener((player, what, extra) -> {
-            if (tunedChannel != null && !guideVisible && liveRetries < 3) {
+            clearPlaybackDeadline();
+            if (tunedChannel != null && !guideVisible && liveRetries < 2) {
                 showBuffering("Reconnecting to the studio…", true);
                 scheduleLive(1200L * ++liveRetries);
             } else {
-                showBuffering("Stream unavailable. Press Back to return to the guide.", false);
+                failPlayback();
             }
             return true;
         });
@@ -757,12 +773,31 @@ public class MainActivity extends Activity {
         video.postDelayed(continueLive, delay);
     }
 
+    private void waitForPlayback() {
+        playbackFailed = false;
+        if (playbackWaiting) return;
+        playbackWaiting = true;
+        video.postDelayed(playbackDeadline, 24_000L);
+    }
+
+    private void clearPlaybackDeadline() {
+        playbackWaiting = false;
+        video.removeCallbacks(playbackDeadline);
+    }
+
+    private void failPlayback() {
+        playbackFailed = true;
+        showBuffering("The studio could not deliver video. Press OK to retry or Back for the guide.", false);
+    }
+
     private void play(int index) {
         if (channels.isEmpty()) return;
         channelIndex = (index + channels.size()) % channels.size();
         tunedChannel = channels.get(channelIndex);
         streamTitle = tunedChannel.name;
         liveRetries = 0;
+        clearPlaybackDeadline();
+        activeMovieUrl = "";
         guide.setVisibility(View.GONE);
         guideVisible = false;
         movieControls.hide();
@@ -777,6 +812,8 @@ public class MainActivity extends Activity {
     private void playUrl(String title, String url) {
         tunedChannel = null;
         streamTitle = title;
+        activeMovieUrl = url;
+        clearPlaybackDeadline();
         video.removeCallbacks(continueLive);
         guide.setVisibility(View.GONE);
         guideVisible = false;
@@ -784,6 +821,7 @@ public class MainActivity extends Activity {
         video.setFocusable(true);
         video.requestFocus();
         showBuffering("Connecting to the studio…", true);
+        waitForPlayback();
         video.setVideoURI(Uri.parse(url));
         video.start();
         showBanner("REWIND CINEMA   •   " + title);
@@ -851,6 +889,11 @@ public class MainActivity extends Activity {
     @Override public boolean onKeyDown(int key, KeyEvent event) {
         if (!guideVisible) {
             boolean select = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER;
+            if (select && playbackFailed) {
+                if (tunedChannel != null) play(channelIndex);
+                else if (!activeMovieUrl.isEmpty()) playUrl(streamTitle, activeMovieUrl);
+                return true;
+            }
             if (key == KeyEvent.KEYCODE_BACK || (select && tunedChannel != null)) {
                 returnToGuide();
                 channelRail.requestFocus();
@@ -890,6 +933,9 @@ public class MainActivity extends Activity {
 
     private void returnToGuide() {
         tunedChannel = null;
+        activeMovieUrl = "";
+        playbackFailed = false;
+        clearPlaybackDeadline();
         movieControls.hide();
         video.removeCallbacks(continueLive);
         video.stopPlayback();
@@ -910,6 +956,7 @@ public class MainActivity extends Activity {
         }
         posterLoader.shutdownNow();
         studioLoader.shutdownNow();
+        clearPlaybackDeadline();
         video.stopPlayback();
         super.onDestroy();
     }
