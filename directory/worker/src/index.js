@@ -18,10 +18,11 @@ function isSupportedCreator(version) {
 }
 
 function publicCreator(value) {
-  const {key_hash, failures, ...visible} = value;
+  const {key_hash, failures, cinema_protocol, ...visible} = value;
   const version = text(visible.creator_version);
-  return {...visible, cinema_supported: Boolean(/^v?\d+\.\d+\.\d+$/.test(version)
-    && isSupportedCreator(version) && visible.vault_url)};
+  const verified = /^v?\d+\.\d+\.\d+$/.test(version)
+    ? isSupportedCreator(version) : cinema_protocol === "paged";
+  return {...visible, cinema_supported: Boolean(verified && visible.vault_url)};
 }
 
 async function readBody(request){const value=await request.json();if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("Expected an object.");return value}
@@ -72,13 +73,21 @@ async function endpointOk(url, content, observed) {
     if (!isSupportedCreator(installed)) return false;
     const decoder = new TextDecoder();
     let sample = "";
-    while (sample.length < 2000) {
+    const limit = content === "vault" ? 8192 : 2000;
+    while (sample.length < limit) {
       const {value, done} = await reader.read();
       if (done) break;
-      sample += decoder.decode(value.subarray(0, 2000 - sample.length), {stream: true});
+      sample += decoder.decode(value.subarray(0, limit - sample.length), {stream: true});
       if (content === "xml" && sample.includes("<tv")) return true;
       if (content === "json" && (sample.includes('"items"') || sample.includes('"channels"'))) return true;
       if (content === "m3u" && sample.includes("#EXTM3U")) return true;
+    }
+    if (content === "vault") {
+      const vault = JSON.parse(sample);
+      if (!Array.isArray(vault.items)) return false;
+      observed.cinemaProtocol = Object.hasOwn(vault, "next_offset")
+        && (vault.next_offset === null || Number.isInteger(vault.next_offset)) ? "paged" : "legacy";
+      return true;
     }
     return false;
   } catch {
@@ -188,9 +197,9 @@ export default {
   },
   async scheduled(_event,env,ctx){ctx.waitUntil((async()=>{
     // Workers Free permits 50 outbound subrequests per invocation. Check at most
-    // eight creators (at most two origin requests each) in a rotating batch so the public
+    // eight creators (at most three origin requests each) in a rotating batch so the public
     // directory remains usable as the community grows without paid services.
-    const {keys}=await env.CREATORS.list({prefix:"creator:"});
+    const keys = await listCreatorKeys(env);
     const batchSize=Math.min(8,keys.length),slot=Math.floor(Date.now()/120000),start=(slot*batchSize)%keys.length;
     const selected=Array.from({length:batchSize},(_,index)=>keys[(start+index)%keys.length]);
     for(const key of selected){
@@ -205,7 +214,14 @@ export default {
         // cleared failure counter is persisted.
         const changedVersion = observed.version && observed.version !== creator.creator_version;
         if (changedVersion) creator.creator_version = observed.version;
-        if(!wasOnline||previousFailures||changedVersion){creator.failures=0;creator.online=true;creator.last_ok=now;await saveCreator(env,creator)}
+        // A reverse proxy may replace Server headers. The paged vault response
+        // confirms the minimum supported Cinema protocol in that case.
+        if (!creator.creator_version && creator.vault_url) {
+          await endpointOk(creator.vault_url + "?limit=1", "vault", observed);
+        }
+        const changedCinema = observed.cinemaProtocol && observed.cinemaProtocol !== creator.cinema_protocol;
+        if (changedCinema) creator.cinema_protocol = observed.cinemaProtocol;
+        if(!wasOnline||previousFailures||changedVersion||changedCinema){creator.failures=0;creator.online=true;creator.last_ok=now;await saveCreator(env,creator)}
       }else if(wasOnline&&previousFailures<1){
         // One missed probe is tolerated so a transient network hiccup does not
         // make a channel vanish from every TV guide.

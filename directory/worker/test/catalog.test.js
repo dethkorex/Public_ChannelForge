@@ -25,13 +25,15 @@ test("simultaneous publications remain independently discoverable and removable"
   let vaultAvailable = true;
   let originAvailable = true;
   let originVersion = "";
+  let pagedVault = false;
   t.mock.method(globalThis, "fetch", async url => {
     const path = new URL(url).pathname;
     if (!originAvailable || (!vaultAvailable && path === "/api/public/vault")) {
       return new Response(null, {status: 504});
     }
     return new Response(path.endsWith(".xml") ? "<tv></tv>" : path.endsWith(".m3u") ? "#EXTM3U" :
-      path === "/api/public/channels" ? '{"channels":[]}' : '{"items":[]}', {
+      path === "/api/public/channels" ? '{"channels":[]}' :
+        pagedVault ? '{"items":[],"next_offset":null}' : '{"items":[]}', {
         headers: originVersion ? {"Server": "Public_ChannelForge/" + originVersion} : {},
       });
   });
@@ -82,4 +84,15 @@ test("simultaneous publications remain independently discoverable and removable"
   const [recovered] = await catalog();
   assert.equal(recovered.id, rival.creator.id);
   assert.equal(recovered.cinema_supported, true);
+
+  originVersion = "";
+  vaultAvailable = true;
+  pagedVault = true;
+  const {creator: proxied} = await publish("Proxied studio", "https://proxied.example.com");
+  assert.equal(proxied.cinema_supported, false);
+  await probe();
+  assert.equal((await catalog()).find(studio => studio.id === proxied.id).cinema_supported, true);
+  pagedVault = false;
+  await probe();
+  assert.equal((await catalog()).find(studio => studio.id === proxied.id).cinema_supported, false);
 });
