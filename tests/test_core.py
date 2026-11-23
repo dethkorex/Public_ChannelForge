@@ -26,6 +26,33 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(value["plex_token"], "")
         self.assertTrue(value["token_saved"])
 
+    def test_public_media_origin_does_not_publish_creator_controls(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.PublicMediaHandler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        try:
+            for method, path, expected in [
+                ("GET", "/api/public/channels", 200),
+                ("GET", "/api/public/vault", 200),
+                ("GET", "/api/status", 404),
+                ("GET", "/api/plex/image?path=/library/sections", 404),
+                ("POST", "/api/setup", 405),
+                ("POST", "/api/update/prepare", 405),
+                ("PUT", "/api/channels/channel-id", 405),
+                ("DELETE", "/api/directory/publish", 405),
+            ]:
+                with self.subTest(method=method, path=path):
+                    client.request(method, path)
+                    response = client.getresponse()
+                    self.assertEqual(response.status, expected)
+                    response.read()
+        finally:
+            client.close()
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=5)
+
     def test_creator_prefers_hls_js_when_chromium_claims_native_hls(self):
         script = (app.WEB_DIR / "app.js").read_text(encoding="utf-8")
         hls_branch = 'if(window.Hls&&Hls.isSupported())'
@@ -110,6 +137,28 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(all(left["series"] != right["series"] for left, right in zip(lineup, lineup[1:])))
         for series in {item["series"] for item in lineup}:
             self.assertEqual([item["episode"] for item in lineup if item["series"] == series], [1, 2])
+
+    def test_smart_franchise_places_complete_show_between_movies(self):
+        items = [
+            {"id": "aliens", "title": "Aliens", "type": "movie", "year": "1986"},
+            {"id": "earth-2", "title": "Alien: Earth · S01E02", "series": "Alien: Earth", "season": 1, "episode": 2, "year": "2025"},
+            {"id": "alien", "title": "Alien", "type": "movie", "year": "1979"},
+            {"id": "earth-1", "title": "Alien: Earth · S01E01", "series": "Alien: Earth", "season": 1, "episode": 1, "year": "2025"},
+        ]
+        channel = app.clean_channel({"name": "Alien Timeline", "number": "7", "playback_mode": "franchise", "items": items})
+        lineup = app.scheduled_items(channel)
+        self.assertEqual([item["id"] for item in lineup], ["alien", "earth-1", "earth-2", "aliens"])
+
+    def test_smart_franchise_places_welcome_to_derry_before_it_movies(self):
+        items = [
+            {"id": "it-2", "title": "It Chapter Two", "type": "movie", "year": "2019"},
+            {"id": "derry-2", "title": "Welcome to Derry · S01E02", "series": "Welcome to Derry", "season": 1, "episode": 2, "year": "2025"},
+            {"id": "it-1", "title": "It", "type": "movie", "year": "2017"},
+            {"id": "derry-1", "title": "Welcome to Derry · S01E01", "series": "Welcome to Derry", "season": 1, "episode": 1, "year": "2025"},
+        ]
+        channel = app.clean_channel({"name": "Derry Timeline", "number": "8", "playback_mode": "franchise", "items": items})
+        lineup = app.scheduled_items(channel)
+        self.assertEqual([item["id"] for item in lineup], ["derry-1", "derry-2", "it-1", "it-2"])
 
     def test_tv_library_returns_playable_episodes(self):
         libraries = [{"key": "2", "title": "TV", "type": "show"}]
@@ -388,15 +437,30 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(app.vault_source(items[0]["id"])["id"], "99")
 
     def test_rewind_cinema_automatically_indexes_all_plex_movies(self):
-        libraries = [{"key": "1", "title": "Movies", "type": "movie"}, {"key": "2", "title": "TV", "type": "show"}]
+        libraries = [{"key": "1", "title": "Movies", "type": "movie", "source": "plex"}, {"key": "2", "title": "TV", "type": "show", "source": "plex"}]
         movies = [{"id": "10", "title": "Movie One", "type": "movie", "thumb": "/library/metadata/10/thumb/1", "key": "/library/metadata/10"}]
-        with mock.patch.object(app, "plex_libraries", return_value=libraries), mock.patch.object(app, "plex_items", return_value=movies) as plex_items:
+        with mock.patch.object(app, "all_libraries", return_value=libraries), mock.patch.object(app, "plex_items", return_value=movies) as plex_items:
             result = app.refresh_plex_movie_catalog()
         self.assertEqual(result["movies"], 1)
         plex_items.assert_called_once_with("1")
         catalog = app.vault_items()
         self.assertEqual(catalog[0]["title"], "Movie One")
         self.assertEqual(app.vault_source(catalog[0]["id"])["id"], "10")
+
+    def test_rewind_cinema_indexes_movies_shared_with_the_plex_account(self):
+        libraries = [
+            {"key": "1", "title": "My Movies", "type": "movie", "source": "plex"},
+            {"key": "plex:dad-server:7", "title": "Dad Movies", "type": "movie", "source": "plex-shared", "shared": True},
+        ]
+        def items(section):
+            return [{"id": section, "title": "Shared Movie" if section.startswith("plex:") else "My Movie", "type": "movie", "thumb": "/thumb", "plex_server_id": "dad-server" if section.startswith("plex:") else ""}]
+        with mock.patch.object(app, "all_libraries", return_value=libraries), mock.patch.object(app, "plex_items", side_effect=items):
+            result = app.refresh_plex_movie_catalog()
+        self.assertEqual(result["movies"], 2)
+        self.assertEqual(result["shared_movies"], 1)
+        shared = next(item for item in app.cached_plex_movies() if item["source"] == "plex-shared")
+        self.assertEqual(shared["section"], "plex:dad-server:7")
+        self.assertEqual(shared["plex_server_id"], "dad-server")
 
     def test_idle_playback_session_is_stopped(self):
         process = mock.Mock()

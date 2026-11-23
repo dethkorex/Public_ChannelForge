@@ -8,7 +8,7 @@
       <Rectangle width="1920" height="1080" color="0x050a11ee"/>
       <Label text="CHANNELFORGE  /  REWIND CINEMA  /  LIVE TV" translation="[55,35]" width="1300" height="48" color="0x67f0c2ff" font="font:LargeBoldSystemFont"/>
       <Button id="pair" text="OPTIONAL PAIR" translation="[1270,28]" width="225" height="58"/>
-      <Button id="updates" text="UPDATES  •  v3.5.4" translation="[1510,28]" width="350" height="58"/>
+      <Button id="updates" text="UPDATES  •  v3.5.5" translation="[1510,28]" width="350" height="58"/>
       <Label id="status" text="Finding creator studios…" translation="[58,88]" width="1500" height="35" color="0xa9b7c8ff"/>
       <MarkupList id="creators" translation="[55,145]" itemComponentName="CreatorCard" itemSize="[570,92]" itemSpacing="[0,10]"/>
       <MarkupList id="channels" translation="[680,145]" width="760" height="390" itemComponentName="ChannelCard" itemSize="[760,88]" itemSpacing="[0,10]"/>
@@ -19,5 +19,6 @@
     <Rectangle id="bannerBg" translation="[55,920]" width="1810" height="92" color="0x09121de8" visible="false"/>
     <Label id="banner" translation="[85,940]" width="1700" height="55" font="font:LargeBoldSystemFont" visible="false"/>
     <Timer id="directoryTimer" duration="60" repeat="true"/>
+    <Timer id="liveRetryTimer" duration="1" repeat="false"/>
   </children>
 </component>

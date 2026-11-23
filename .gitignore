@@ -11,5 +11,6 @@ installer/payload/
 tv/firetv/.gradle/
 tv/firetv/app/build/
 directory/worker/node_modules/
+directory/worker/.wrangler/
 directory/*.db
 

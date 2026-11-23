@@ -24,15 +24,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import zlib
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.4"
+VERSION = "3.5.5"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
+DEFAULT_PUBLIC_MEDIA_PORT = 8790
+RELAY_HOST_KEY = "localhost.run ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9"
+DEFAULT_DIRECTORY_URL = "https://channelforge-directory.fresh-anorak.workers.dev"
+OLD_DIRECTORY_URL = "https://directory.channelforge.tv"
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
 POSTER_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 
@@ -60,6 +65,8 @@ POSTER_CACHE_DIR = DATA_DIR / "poster-cache"
 WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
 CREATOR_ICON = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets" / "channel-forge-creator.png"
 LOCK = threading.RLock()
+# Bound the lock pool while allowing different channels to start in parallel.
+ENCODER_START_LOCKS = tuple(threading.Lock() for _ in range(32))
 HLS_PROXY: dict[str, tuple[str, float]] = {}
 HLS_PROXY_CHANNELS: dict[str, str] = {}
 UPDATE_JOBS: dict[str, dict] = {}
@@ -72,6 +79,11 @@ STREAM_DIR = DATA_DIR / "streams"
 TUNNEL_LOCK = threading.RLock()
 TUNNEL_PROCESS: subprocess.Popen | None = None
 TUNNEL_URL = ""
+TUNNEL_URLS: queue.Queue[str] = queue.Queue()
+PUBLISH_LOCK = threading.RLock()
+PUBLIC_MEDIA_SERVER: ThreadingHTTPServer | None = None
+PUBLIC_MEDIA_PORT = DEFAULT_PUBLIC_MEDIA_PORT
+PUBLIC_MEDIA_LOCK = threading.RLock()
 APP_WINDOW = None
 UPDATE_EXITING = False
 DEFAULT_ASSET_THEMES = {
@@ -275,6 +287,10 @@ def config(public: bool = False) -> dict:
     value = load_json(CONFIG_FILE, {})
     if not isinstance(value, dict):
         value = {}
+    directory_url = str(value.get("directory_url", "")).strip().rstrip("/")
+    legacy_directory = directory_url == OLD_DIRECTORY_URL
+    if legacy_directory or not directory_url:
+        directory_url = DEFAULT_DIRECTORY_URL
     result = {
         "plex_url": str(value.get("plex_url", "http://127.0.0.1:32400")).rstrip("/"),
         "plex_token": str(value.get("plex_token", "")),
@@ -286,16 +302,16 @@ def config(public: bool = False) -> dict:
         "plex_profile": value.get("plex_profile", {}) if isinstance(value.get("plex_profile", {}), dict) else {},
         "client_identifier": str(value.get("client_identifier", "")) or secrets.token_hex(16),
         "local_libraries": value.get("local_libraries", []) if isinstance(value.get("local_libraries", []), list) else [],
-        "directory_url": str(value.get("directory_url", "https://directory.channelforge.tv")).strip().rstrip("/"),
-        "creator_id": str(value.get("creator_id", "")),
-        "creator_key": str(value.get("creator_key", "")),
+        "directory_url": directory_url,
+        "creator_id": "" if legacy_directory else str(value.get("creator_id", "")),
+        "creator_key": "" if legacy_directory else str(value.get("creator_key", "")),
         "creator_profile": value.get("creator_profile", {}) if isinstance(value.get("creator_profile", {}), dict) else {},
     }
     if public:
         result["plex_token"] = ""
         result["token_saved"] = bool(value.get("plex_token"))
+        result["creator_published"] = bool(result["creator_id"] and result["creator_key"])
         result["creator_key"] = ""
-        result["creator_published"] = bool(value.get("creator_id") and value.get("creator_key"))
         result["tunnel_active"] = bool(TUNNEL_PROCESS and TUNNEL_PROCESS.poll() is None and TUNNEL_URL)
         result.pop("client_identifier", None)
     return result
@@ -378,8 +394,11 @@ def directory_request(method: str, path: str, payload: dict | None = None, key: 
 def publish_creator(payload: dict) -> dict:
     settings = config()
     public_url = settings["public_url"]
-    if not public_url.startswith("https://"):
-        raise ValueError("Publishing requires a public HTTPS base URL for this ChannelForge server.")
+    origin = urllib.parse.urlsplit(public_url)
+    if origin.scheme != "https" or not origin.hostname or origin.username or origin.password or origin.path or origin.query or origin.fragment:
+        raise ValueError("Enter the public HTTPS origin for ChannelForge's read-only media server.")
+    if origin.hostname == "trycloudflare.com" or origin.hostname.endswith(".trycloudflare.com"):
+        raise ValueError("Cloudflare Quick Tunnels are for development. Use a public HTTPS host that supports video delivery.")
     logo_asset_id = str(payload.get("logo_asset_id", "")).strip()
     selected_logo = next((asset for asset in asset_manifest() if asset.get("id") == logo_asset_id), None)
     logo_url = public_url + "/user-assets/" + urllib.parse.quote(selected_logo["filename"]) if selected_logo else str(payload.get("logo_url", "")).strip()[:1000]
@@ -407,7 +426,8 @@ def publish_creator(payload: dict) -> dict:
     raw = load_json(CONFIG_FILE, {})
     if not isinstance(raw, dict):
         raw = {}
-    raw.update({"creator_id": creator_id, "creator_key": creator_key, "creator_profile": profile})
+    raw.update({"directory_url": settings["directory_url"], "creator_id": creator_id,
+                "creator_key": creator_key, "creator_profile": profile})
     atomic_json(CONFIG_FILE, raw)
     return result.get("creator", {"id": creator_id, **profile})
 
@@ -422,16 +442,40 @@ def unpublish_creator() -> None:
         atomic_json(CONFIG_FILE, raw)
 
 
-def sync_creator_async() -> None:
-    settings = config()
-    if not settings["creator_id"] or not settings["creator_key"] or not settings["creator_profile"]:
-        return
-    def worker() -> None:
+def publish_studio(payload: dict) -> dict:
+    if not str(payload.get("name", "")).strip():
+        raise ValueError("Enter a creator or studio name.")
+    with PUBLISH_LOCK:
+        previous = load_json(CONFIG_FILE, {})
+        if not isinstance(previous, dict):
+            previous = {}
+        raw = previous.copy()
+        if payload.get("directory_url"):
+            new_directory = str(payload["directory_url"]).strip().rstrip("/")
+            if new_directory != str(previous.get("directory_url", DEFAULT_DIRECTORY_URL)).rstrip("/"):
+                raw.update({"creator_id": "", "creator_key": ""})
+            raw["directory_url"] = new_directory
+        manual_origin = str(payload.get("public_url", "")).strip().rstrip("/")
+        already_serving = PUBLIC_MEDIA_SERVER is not None
+        already_relaying = TUNNEL_PROCESS is not None
+        start_public_media_server()
         try:
-            publish_creator(settings["creator_profile"])
-        except Exception as exc:
-            print(f"Creator Directory sync failed: {exc}")
-    threading.Thread(target=worker, daemon=True, name="channel-forge-directory-sync").start()
+            origin = manual_origin or start_public_tunnel()
+            raw.update({"public_url": origin, "public_tunnel": not manual_origin})
+            atomic_json(CONFIG_FILE, raw)
+            generate_exports()
+            creator = publish_creator(payload)
+        except Exception:
+            atomic_json(CONFIG_FILE, previous)
+            generate_exports()
+            if not already_relaying:
+                stop_public_tunnel()
+            if not already_serving:
+                stop_public_media_server()
+            raise
+        if manual_origin:
+            stop_public_tunnel()
+        return creator
 
 
 def channels() -> list[dict]:
@@ -995,16 +1039,41 @@ def plex_items(section: str) -> list[dict]:
 
 
 def refresh_plex_movie_catalog() -> dict:
-    """Cache every playable Plex movie for Rewind Cinema."""
-    movies = []
-    for library in plex_libraries():
-        if library.get("type") != "movie":
-            continue
-        for item in plex_items(str(library["key"])):
-            movies.append({**item, "source": "plex", "section": str(library["key"]), "library": library.get("title", "Movies")})
+    """Cache every movie library visible to the signed-in Plex account.
+
+    Plex Home/shared-library grants are account scoped, so Rewind Cinema uses
+    the same aggregate library discovery as Channel Builder. A temporarily
+    offline shared server is skipped without hiding movies from healthy
+    servers, and its credentials are never exposed in the public vault feed.
+    """
+    libraries = [library for library in all_libraries() if library.get("source") != "local" and library.get("type") == "movie"]
+    movies, failed = [], []
+
+    def load_library(library: dict) -> tuple[dict, list[dict]]:
+        return library, plex_items(str(library["key"]))
+
+    if libraries:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(libraries)), thread_name_prefix="plex-rewind-library") as pool:
+            jobs = {pool.submit(load_library, library): library for library in libraries}
+            for job in concurrent.futures.as_completed(jobs):
+                library = jobs[job]
+                try:
+                    loaded_library, items = job.result()
+                    source = "plex-shared" if loaded_library.get("shared") or loaded_library.get("source") == "plex-shared" else "plex"
+                    movies.extend({
+                        **item, "source": source, "section": str(loaded_library["key"]),
+                        "library": loaded_library.get("title", "Movies"),
+                    } for item in items)
+                except (OSError, ValueError) as exc:
+                    failed.append({"library": library.get("title", "Movies"), "error": str(exc)})
+    movies.sort(key=lambda item: (str(item.get("title", "")).casefold(), str(item.get("year", ""))))
     payload = {"updated_at": datetime.now(timezone.utc).isoformat(), "items": movies}
     atomic_json(VAULT_CATALOG_FILE, payload)
-    return {"movies": len(movies), "updated_at": payload["updated_at"]}
+    return {
+        "movies": len(movies), "libraries": len(libraries),
+        "shared_movies": sum(1 for item in movies if item.get("source") == "plex-shared"),
+        "failed_libraries": failed, "updated_at": payload["updated_at"],
+    }
 
 
 def cached_plex_movies() -> list[dict]:
@@ -1089,7 +1158,7 @@ def local_duration_ms(path: Path) -> int:
             [executable, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
             capture_output=True, text=True, timeout=12, creationflags=0x08000000 if sys.platform == "win32" else 0,
         )
-        return max(60_000, min(86_400_000, int(float(completed.stdout.strip()) * 1000)))
+        return max(1000, min(86_400_000, int(float(completed.stdout.strip()) * 1000)))
     except (OSError, ValueError, subprocess.SubprocessError):
         return 1_800_000
 
@@ -1191,14 +1260,16 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
     items = payload.get("items", [])
     if not isinstance(items, list) or not items:
         raise ValueError("Select at least one media title.")
+    section = str(payload.get("section", ""))[:700]
     normalized = []
     for item in items:
         if not isinstance(item, dict) or not str(item.get("id", "")).strip():
             continue
         normalized.append({
             "id": str(item["id"]), "title": str(item.get("title", "Untitled"))[:300],
+            "section": str(item.get("section") or section)[:700],
             "year": str(item.get("year", ""))[:10], "type": str(item.get("type", "video"))[:30],
-            "duration_ms": max(60000, min(86400000, int(item.get("duration_ms", 1800000)))),
+            "duration_ms": max(1000, min(86400000, int(item.get("duration_ms", 1800000)))),
             "key": str(item.get("key", f"/library/metadata/{item['id']}"))[:500],
             "thumb": str(item.get("thumb", ""))[:500], "art": str(item.get("art", ""))[:500], "summary": str(item.get("summary", ""))[:600],
             "content_rating": str(item.get("content_rating", ""))[:40], "rating": str(item.get("rating", ""))[:20],
@@ -1217,7 +1288,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         raise ValueError("The selected titles were invalid.")
     return {
         "id": existing_id or secrets.token_hex(8), "name": name[:100], "number": number[:12],
-        "section": str(payload.get("section", ""))[:700], "items": normalized,
+        "section": section, "items": normalized,
         "logo_asset_id": str(payload.get("logo_asset_id", ""))[:80],
         "background_asset_id": str(payload.get("background_asset_id", ""))[:80],
         "corner_bug_asset_id": str(payload.get("corner_bug_asset_id", ""))[:80],
@@ -1299,7 +1370,7 @@ def schedule_position(channel: dict, moment: datetime | None = None) -> dict:
     items = scheduled_items(channel)
     if not items:
         raise ValueError("This channel has no scheduled titles.")
-    durations = [max(60_000, int(item.get("duration_ms", 1_800_000))) for item in items]
+    durations = [max(1000, int(item.get("duration_ms", 1_800_000))) for item in items]
     cycle_ms = sum(durations)
     anchor = parse_timestamp(str(channel.get("schedule_anchor", "")))
     elapsed_ms = int((moment - anchor).total_seconds() * 1000)
@@ -1323,10 +1394,45 @@ def schedule_window(channel: dict, start: datetime, end: datetime) -> list[dict]
     result = []
     while cursor < end:
         item = items[index]
-        stop = cursor + timedelta(milliseconds=max(60_000, int(item.get("duration_ms", 1_800_000))))
+        stop = cursor + timedelta(milliseconds=max(1000, int(item.get("duration_ms", 1_800_000))))
         result.append({"item": item, "start": cursor, "stop": stop})
         cursor, index = stop, (index + 1) % len(items)
     return result
+
+
+FRANCHISE_TIMELINES = {
+    "alien": {
+        "prometheus": 0, "alien covenant": 1, "alien": 2, "alien earth": 3,
+        "aliens": 4, "alien 3": 5, "alien resurrection": 6,
+    },
+    "it": {"welcome to derry": 0, "it": 1, "it chapter two": 2, "it chapter 2": 2},
+}
+
+
+def normalized_title(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def franchise_family(value: object) -> str:
+    title = normalized_title(value)
+    if any(token in title for token in ("alien", "prometheus")):
+        return "alien"
+    if title == "it" or title.startswith("it chapter") or "welcome to derry" in title:
+        return "it"
+    # A conservative fallback groups obvious numbered/subtitled installments
+    # without merging unrelated one-word titles.
+    root = re.split(r"\s+(?:chapter|part|season)\s+|\s*:\s*|\s+\d+$", title, maxsplit=1)[0].strip()
+    return root if len(root) >= 4 else title
+
+
+def franchise_block_order(family: str, title: str, year: object, original: int) -> tuple:
+    normalized = normalized_title(title)
+    timeline = FRANCHISE_TIMELINES.get(family, {})
+    exact = timeline.get(normalized)
+    if exact is None:
+        exact = next((rank for name, rank in timeline.items() if normalized.startswith(name + " ")), None)
+    parsed_year = int(year) if str(year).isdigit() else 9999
+    return (0, exact, original) if exact is not None else (1, parsed_year, normalized, original)
 
 
 def scheduled_items(channel: dict) -> list[dict]:
@@ -1334,24 +1440,59 @@ def scheduled_items(channel: dict) -> list[dict]:
     items = list(channel.get("items", []))
     mode = channel.get("playback_mode", "ordered")
     seed = str(channel.get("id", "channel"))
-    stable_key = lambda item: hashlib.sha256(f'{seed}:{item.get("id", "")}'.encode()).hexdigest()
+    def item_identity(item: dict) -> str:
+        source = str(item.get("plex_server_id") or item.get("file_path") or "")
+        return f'{source}:{item.get("id", "")}' if source else str(item.get("id", ""))
+
+    stable_key = lambda item: hashlib.sha256(f"{seed}:{item_identity(item)}".encode()).hexdigest()
     if mode == "shuffle":
         return sorted(items, key=stable_key)
-    if mode in {"shuffle_in_order", "marathon", "franchise"}:
+    if mode == "franchise":
+        # Build mixed movie/show blocks. A show's episodes stay in strict
+        # season/episode order, while movies and shows are placed on one smart
+        # franchise timeline. This keeps examples such as Alien -> Alien:
+        # Earth -> Aliens and Welcome to Derry -> It -> It Chapter Two intact.
+        blocks: dict[str, dict] = {}
+        seen_ids: set[str] = set()
+        for original, item in enumerate(items):
+            item_id = item_identity(item)
+            if item_id and item_id in seen_ids:
+                continue
+            if item_id:
+                seen_ids.add(item_id)
+            series = str(item.get("series", "")).strip()
+            title = series or str(item.get("title") or item_id)
+            block_id = f"show:{series.casefold()}" if series else f"movie:{item_id or original}"
+            block = blocks.setdefault(block_id, {"title": title, "year": item.get("year", ""), "original": original, "items": []})
+            block["items"].append(item)
+            if str(item.get("year", "")).isdigit() and (not str(block["year"]).isdigit() or int(item["year"]) < int(block["year"])):
+                block["year"] = item["year"]
+        families: dict[str, list[dict]] = {}
+        family_order: dict[str, int] = {}
+        for block in blocks.values():
+            family = franchise_family(block["title"])
+            families.setdefault(family, []).append(block)
+            family_order[family] = min(family_order.get(family, block["original"]), block["original"])
+        result = []
+        for family in sorted(families, key=lambda value: family_order[value]):
+            ordered = sorted(families[family], key=lambda block: franchise_block_order(family, block["title"], block["year"], block["original"]))
+            for block in ordered:
+                result.extend(sorted(block["items"], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", "")))))
+        return result
+    if mode in {"shuffle_in_order", "marathon"}:
         groups: dict[str, list[dict]] = {}
         seen_ids: set[str] = set()
         for item in items:
-            item_id = str(item.get("id", ""))
+            item_id = item_identity(item)
             if item_id and item_id in seen_ids:
                 continue
             if item_id:
                 seen_ids.add(item_id)
             title = str(item.get("title") or item.get("id"))
-            franchise = re.split(r"\s*(?:\d+|:| - )\s*", title, maxsplit=1)[0] if mode == "franchise" else ""
-            group = str(item.get("series") or franchise or title)
+            group = str(item.get("series") or title)
             groups.setdefault(group, []).append(item)
         group_names = list(groups)
-        if mode in {"shuffle_in_order", "franchise"}:
+        if mode == "shuffle_in_order":
             group_names.sort(key=lambda name: hashlib.sha256(f"{seed}:{name}".encode()).hexdigest())
         ordered_groups = {
             name: sorted(groups[name], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", ""))))
@@ -1376,73 +1517,74 @@ def server_base(settings: dict | None = None) -> str:
     return f"http://{host}:{settings['port']}"
 
 
-def cloudflared_path() -> str:
-    executable = "cloudflared.exe" if sys.platform == "win32" else "cloudflared"
-    roots = [Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)), Path(sys.executable).resolve().parent, Path(__file__).resolve().parent]
-    found = next((str(root / executable) for root in roots if (root / executable).is_file()), None) or shutil.which("cloudflared")
-    if not found or not Path(found).is_file():
-        raise ValueError("Secure public sharing requires cloudflared. Reinstall the latest Windows Creator build or install cloudflared on this computer.")
-    return found
+def relay_address(event: str) -> str:
+    try:
+        value = json.loads(event)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(value, dict) or value.get("type") != "run.localhost.tunnel.registered":
+        return ""
+    address = value.get("subject", "")
+    return "https://" + address if isinstance(address, str) and re.fullmatch(r"[a-z0-9-]+\.app\.lhr\.life", address) else ""
 
 
 def start_public_tunnel() -> str:
-    global TUNNEL_PROCESS, TUNNEL_URL
+    global TUNNEL_PROCESS, TUNNEL_URL, TUNNEL_URLS
     with TUNNEL_LOCK:
-        if TUNNEL_PROCESS and TUNNEL_PROCESS.poll() is None and TUNNEL_URL:
-            return TUNNEL_URL
-        command = [cloudflared_path(), "tunnel", "--url", f"http://127.0.0.1:{config()['port']}", "--no-autoupdate"]
-        TUNNEL_PROCESS = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-            creationflags=0x08000000 if sys.platform == "win32" else 0,
-        )
-        messages: queue.Queue[str] = queue.Queue(maxsize=200)
+        if TUNNEL_PROCESS is None or TUNNEL_PROCESS.poll() is not None:
+            bundled = Path(getattr(sys, "_MEIPASS", "")) / "openssh" / "ssh.exe"
+            ssh = str(bundled) if getattr(sys, "frozen", False) and bundled.is_file() else shutil.which("ssh")
+            if not ssh:
+                raise ValueError("Automatic public sharing requires OpenSSH, which was not found on this computer.")
+            known_hosts = DATA_DIR / "relay-known-hosts"
+            known_hosts.write_text(RELAY_HOST_KEY + "\n", encoding="ascii")
+            null = "NUL" if sys.platform == "win32" else "/dev/null"
+            process = subprocess.Popen(
+                [ssh, "-F", null, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                 "-o", "IdentityFile=none", "-o", "IdentityAgent=none",
+                 "-o", "StrictHostKeyChecking=yes", "-o", "HostKeyAlgorithms=ssh-ed25519",
+                 "-o", f'UserKnownHostsFile="{known_hosts.as_posix()}"', "-o", f"GlobalKnownHostsFile={null}",
+                 "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
+                 "-o", "ServerAliveCountMax=2", "-R", f"80:{HOST}:{PUBLIC_MEDIA_PORT}",
+                 "nokey@localhost.run", "--", "--output", "json"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=0x08000000 if sys.platform == "win32" else 0,
+            )
+            TUNNEL_PROCESS, TUNNEL_URL = process, ""
+            urls: queue.Queue[str] = queue.Queue()
+            TUNNEL_URLS = urls
 
-        def read_output() -> None:
-            assert TUNNEL_PROCESS and TUNNEL_PROCESS.stdout
-            for line in TUNNEL_PROCESS.stdout:
-                try:
-                    messages.put_nowait(line)
-                except queue.Full:
-                    try:
-                        messages.get_nowait()
-                        messages.put_nowait(line)
-                    except queue.Empty:
-                        pass
+            def read_output() -> None:
+                with process.stdout as output:
+                    for line in output:
+                        address = relay_address(line)
+                        if address:
+                            urls.put(address)
 
-        threading.Thread(target=read_output, daemon=True, name="channel-forge-tunnel-log").start()
-        deadline, recent = time.time() + 35, []
-        while time.time() < deadline:
-            if TUNNEL_PROCESS.poll() is not None:
-                break
+            threading.Thread(target=read_output, daemon=True, name="channel-forge-relay-output").start()
+        deadline = time.monotonic() + 25
+        while TUNNEL_PROCESS.poll() is None:
             try:
-                line = messages.get(timeout=0.5)
-            except queue.Empty:
+                TUNNEL_URL = TUNNEL_URLS.get_nowait()
                 continue
-            recent.append(line.strip())
-            match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line, re.IGNORECASE)
-            if match:
-                TUNNEL_URL = match.group(0).rstrip("/")
-                raw = load_json(CONFIG_FILE, {})
-                if not isinstance(raw, dict):
-                    raw = {}
-                raw["public_url"] = TUNNEL_URL
-                raw["public_tunnel"] = True
-                atomic_json(CONFIG_FILE, raw)
-                generate_exports()
-                return TUNNEL_URL
-        if TUNNEL_PROCESS.poll() is None:
-            TUNNEL_PROCESS.terminate()
-        TUNNEL_PROCESS = None
-        detail = next((line for line in reversed(recent) if line), "The secure tunnel did not become ready.")
-        raise ValueError(f"Could not start public sharing: {detail[:300]}")
+            except queue.Empty:
+                if TUNNEL_URL:
+                    return TUNNEL_URL
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.15)
+        stop_public_tunnel()
+        raise ValueError("Could not open the free media relay. Check the internet connection and try again.")
 
 
 def stop_public_tunnel() -> None:
-    global TUNNEL_PROCESS
+    global TUNNEL_PROCESS, TUNNEL_URL
     with TUNNEL_LOCK:
         if TUNNEL_PROCESS and TUNNEL_PROCESS.poll() is None:
             TUNNEL_PROCESS.terminate()
         TUNNEL_PROCESS = None
+        TUNNEL_URL = ""
 
 
 def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
@@ -1571,19 +1713,24 @@ def local_media_path(item: dict) -> Path:
 
 
 def start_ffmpeg_session(channel: dict) -> str:
-    """Create a local HLS encoder fed by Plex or an approved local media file."""
+    """Share the startup and encoder among viewers tuning the same program."""
+    channel_id = str(channel["id"])
+    lock_index = zlib.crc32(channel_id.encode()) % len(ENCODER_START_LOCKS)
+    with ENCODER_START_LOCKS[lock_index]:
+        return start_or_reuse_encoder(channel)
+
+
+def start_or_reuse_encoder(channel: dict) -> str:
     position = schedule_position(channel)
     item = position["item"]
-    identity = hashlib.sha256(f'{channel["id"]}:{item["id"]}:{position["start"].isoformat()}'.encode()).hexdigest()[:20]
+    on_demand = bool(channel.get("on_demand"))
+    start_key = "on-demand" if on_demand else position["start"].isoformat()
+    identity = hashlib.sha256(f'{channel["id"]}:{item["id"]}:{start_key}'.encode()).hexdigest()[:20]
     with LOCK:
         existing = FFMPEG_SESSIONS.get(identity)
-        if existing and existing["process"].poll() is None and (existing["directory"] / "index.m3u8").exists():
+        if existing and existing["process"].poll() in (None, 0) and (existing["directory"] / "index.m3u8").exists():
+            existing["last_access"] = time.time()
             return identity
-        for session_id, session in list(FFMPEG_SESSIONS.items()):
-            if session.get("channel_id") == channel["id"]:
-                if session["process"].poll() is None:
-                    session["process"].terminate()
-                FFMPEG_SESSIONS.pop(session_id, None)
     if item.get("source") == "local":
         media_input = str(local_media_path(item))
     else:
@@ -1593,24 +1740,30 @@ def start_ffmpeg_session(channel: dict) -> str:
         media_input = credentials["url"] + plex_part_key(item)
         separator = "&" if "?" in media_input else "?"
         media_input += separator + urllib.parse.urlencode({"X-Plex-Token": credentials["token"]})
-    directory = STREAM_DIR / identity
+    # Keep the previous program's buffered segments available during the handoff.
+    directory = STREAM_DIR / f"{identity}-{secrets.token_hex(6)}"
     directory.mkdir(parents=True, exist_ok=True)
-    for old in directory.glob("*"):
-        old.unlink(missing_ok=True)
-    remaining = max(30, int((position["stop"] - datetime.now(timezone.utc)).total_seconds()))
+    remaining = max(0.1, (position["stop"] - position["start"]).total_seconds() - position["offset_ms"] / 1000)
+    input_timing = ["-re"] if on_demand else ["-re", "-ss", f'{position["offset_ms"] / 1000:.3f}']
+    output_timing = [] if on_demand else ["-t", f"{remaining:.3f}"]
+    hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments"] if on_demand else
+                   ["-hls_list_size", "5", "-hls_flags", "delete_segments+independent_segments"])
+    relay_encoding = []
+    if config()["public_tunnel"]:
+        relay_encoding = ["-vf", "scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                          "-b:v", "360k", "-maxrate", "420k", "-bufsize", "420k", "-b:a", "64k"]
     command = [
-        ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin", "-re",
-        "-ss", f'{position["offset_ms"] / 1000:.3f}', "-i", media_input, "-t", str(remaining),
+        ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin",
+        *input_timing, "-i", media_input, *output_timing,
         "-map", "0:v:0", "-map", f"0:a:{preferred_audio_index(item, media_input)}?", "-c:v", "libx264", "-preset", "ultrafast",
         "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*1)",
-        "-c:a", "aac", "-ac", "2", "-ar", "48000",
-        "-f", "hls", "-hls_time", "1", "-hls_list_size", "5",
-        "-hls_flags", "delete_segments+append_list+omit_endlist+independent_segments",
+        "-c:a", "aac", "-ac", "2", "-ar", "48000", *relay_encoding,
+        "-f", "hls", "-hls_time", "1", *hls_options,
         "-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8"),
     ]
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=0x08000000 if sys.platform == "win32" else 0)
     with LOCK:
-        FFMPEG_SESSIONS[identity] = {"process": process, "directory": directory, "channel_id": channel["id"], "created": time.time(), "last_access": time.time()}
+        FFMPEG_SESSIONS[identity] = {"process": process, "directory": directory, "channel_id": channel["id"], "created": time.time(), "last_access": time.time(), "on_demand": on_demand}
     deadline = time.time() + 25
     playlist = directory / "index.m3u8"
     while time.time() < deadline:
@@ -1642,12 +1795,26 @@ def reap_idle_sessions_once(now: float | None = None) -> int:
     """Stop encoders whose viewers stopped requesting HLS data."""
     moment = now if now is not None else time.time()
     with LOCK:
-        expired = [(key, value) for key, value in FFMPEG_SESSIONS.items() if moment - value.get("last_access", value.get("created", moment)) > 60]
+        expired = []
+        for key, value in FFMPEG_SESSIONS.items():
+            # Cached, finished movies can resume without starting Plex again.
+            # An active movie encoder times out like live TV when viewers leave.
+            last_access = value.get("last_access", value.get("created", moment))
+            retention = 600 if value.get("on_demand") and value["process"].poll() == 0 else 60
+            if moment - last_access > retention:
+                expired.append((key, value))
         for key, _value in expired:
             FFMPEG_SESSIONS.pop(key, None)
     for _key, session in expired:
-        if session["process"].poll() is None:
-            session["process"].terminate()
+        process = session["process"]
+        if process.poll() is None:
+            process.terminate()
+        if session.get("directory"):
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                continue
+            shutil.rmtree(session["directory"], ignore_errors=True)
     return len(expired)
 
 
@@ -1758,7 +1925,6 @@ def generate_exports(values: list[dict] | None = None) -> dict:
         ])
     playlist_path = EXPORT_DIR / "channels.m3u"
     playlist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    sync_creator_async()
     return {"guide": str(guide_path), "playlist": str(playlist_path), "channels": len(values)}
 
 
@@ -1780,7 +1946,8 @@ def vault_items() -> list[dict]:
             seen.add(item_id)
             thumb = str(item.get("thumb", ""))
             if item.get("source") == "local" and thumb:
-                poster_url = f"{base}/api/local/image?section={urllib.parse.quote(section)}&id={urllib.parse.quote(str(item.get('id', '')))}"
+                media_section = str(item.get("section") or section)
+                poster_url = f"{base}/api/local/image?section={urllib.parse.quote(media_section)}&id={urllib.parse.quote(str(item.get('id', '')))}"
             elif thumb:
                 server_id = urllib.parse.quote(str(item.get("plex_server_id", "")))
                 poster_url = f"{base}/api/plex/image?path={urllib.parse.quote(thumb)}&server={server_id}"
@@ -1810,7 +1977,8 @@ def public_channel_catalog() -> dict:
         if not image_path:
             return ""
         if item.get("source") == "local":
-            return f"{base}/api/local/image?section={urllib.parse.quote(section, safe='')}&id={urllib.parse.quote(str(item.get('id', '')), safe='')}"
+            media_section = str(item.get("section") or section)
+            return f"{base}/api/local/image?section={urllib.parse.quote(media_section, safe='')}&id={urllib.parse.quote(str(item.get('id', '')), safe='')}"
         return f"{base}/api/plex/image?path={urllib.parse.quote(image_path, safe='')}&server={urllib.parse.quote(str(item.get('plex_server_id', '')), safe='')}"
     for channel in channels():
         try:
@@ -1859,7 +2027,8 @@ def vault_source(item_id: str) -> dict:
 def start_vault_session(item_id: str) -> str:
     item = vault_source(item_id)
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    channel = {"id": f"vault-{item_id}", "items": [item], "schedule_anchor": now.isoformat(), "playback_mode": "ordered"}
+    channel = {"id": f"vault-{item_id}", "items": [item], "schedule_anchor": now.isoformat(),
+               "playback_mode": "ordered", "on_demand": True}
     return start_playback_route(channel)
 
 
@@ -2128,20 +2297,7 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/local/libraries":
                 self.send_json(200, {"library": save_local_library(str(payload.get("name", "")), str(payload.get("path", "")))})
             elif parsed.path == "/api/directory/publish":
-                raw = load_json(CONFIG_FILE, {})
-                if not isinstance(raw, dict):
-                    raw = {}
-                if payload.get("directory_url"):
-                    raw["directory_url"] = str(payload["directory_url"]).strip().rstrip("/")
-                if payload.get("auto_tunnel"):
-                    raw["public_url"] = start_public_tunnel()
-                    raw["public_tunnel"] = True
-                elif payload.get("public_url"):
-                    raw["public_url"] = str(payload["public_url"]).strip().rstrip("/")
-                    raw["public_tunnel"] = False
-                atomic_json(CONFIG_FILE, raw)
-                generate_exports()
-                self.send_json(200, {"creator": publish_creator(payload)})
+                self.send_json(200, {"creator": publish_studio(payload)})
             elif parsed.path == "/api/channels":
                 self.send_json(200, {"channel": save_channel(payload)})
             elif parsed.path == "/api/channels/order":
@@ -2183,7 +2339,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         try:
             if self.path == "/api/directory/publish":
-                unpublish_creator()
+                with PUBLISH_LOCK:
+                    unpublish_creator()
+                    stop_public_tunnel()
+                    stop_public_media_server()
                 return self.send_json(200, {"ok": True})
             if self.path.startswith("/api/local/libraries/"):
                 delete_local_library(self.path.rsplit("/", 1)[-1])
@@ -2198,6 +2357,61 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True})
         except Exception as exc:
             self.send_json(400, {"error": str(exc)})
+
+
+class PublicMediaHandler(Handler):
+    """Limit the public HTTPS origin to the paths TV viewers consume."""
+
+    def send_json(self, status: int, payload: object) -> None:
+        if status == 400:
+            payload = {"error": "Published media is temporarily unavailable."}
+        super().send_json(status, payload)
+
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        path = parsed.path
+        if path == "/api/plex/image":
+            image = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
+            if not re.fullmatch(r"/library/metadata/\d+/(?:thumb|art)(?:/\d+)?", image):
+                return self.send_json(404, {"error": "Not found"})
+        elif path not in {
+            "/api/public/channels", "/api/public/vault", "/api/local/image",
+            "/exports/guide.xml", "/exports/channels.m3u",
+        } and not re.fullmatch(
+            r"/(?:live|vault)/[a-zA-Z0-9_-]+\.m3u8|"
+            r"/ffmpeg-stream/[a-zA-Z0-9_-]+/(?:index\.m3u8|segment\d+\.ts)|"
+            r"/hls-proxy/[a-zA-Z0-9_-]+|/user-assets/[^/]+",
+            path,
+        ):
+            return self.send_json(404, {"error": "Not found"})
+        super().do_GET()
+
+    def reject_write(self) -> None:
+        self.close_connection = True
+        self.send_json(405, {"error": "Published media is read-only."})
+
+    do_POST = do_PUT = do_DELETE = reject_write
+
+
+def start_public_media_server() -> None:
+    global PUBLIC_MEDIA_SERVER
+    with PUBLIC_MEDIA_LOCK:
+        if PUBLIC_MEDIA_SERVER is None:
+            server = ThreadingHTTPServer((HOST, PUBLIC_MEDIA_PORT), PublicMediaHandler)
+            threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-public-media").start()
+            PUBLIC_MEDIA_SERVER = server
+
+
+def stop_public_media_server() -> None:
+    global PUBLIC_MEDIA_SERVER
+    with PUBLIC_MEDIA_LOCK:
+        if PUBLIC_MEDIA_SERVER is not None:
+            PUBLIC_MEDIA_SERVER.shutdown()
+            PUBLIC_MEDIA_SERVER.server_close()
+            PUBLIC_MEDIA_SERVER = None
+
+
+atexit.register(stop_public_media_server)
 
 
 def ensure_files() -> None:
@@ -2243,21 +2457,35 @@ def open_data_folder() -> None:
 
 def restore_public_sharing() -> None:
     time.sleep(1)
-    settings = config()
-    if not settings.get("public_tunnel") or not settings.get("creator_profile"):
-        return
-    try:
-        start_public_tunnel()
-        publish_creator(settings["creator_profile"])
-        print("ChannelForge public sharing is online.")
-    except Exception as exc:
-        print(f"ChannelForge public sharing could not start: {sanitized_playback_error(exc)}")
+    registered_origin = ""
+    while True:
+        with PUBLISH_LOCK:
+            settings = config()
+            profile = settings["creator_profile"]
+            if not profile:
+                registered_origin = ""
+            else:
+                try:
+                    start_public_media_server()
+                    origin = start_public_tunnel() if settings["public_tunnel"] else settings["public_url"]
+                    if origin != registered_origin:
+                        raw = load_json(CONFIG_FILE, {})
+                        raw["public_url"] = origin
+                        atomic_json(CONFIG_FILE, raw)
+                        generate_exports()
+                        publish_creator(profile)
+                        registered_origin = origin
+                except Exception as exc:
+                    print(f"ChannelForge public sharing could not connect: {sanitized_playback_error(exc)}")
+        time.sleep(20)
 
 
 def main() -> None:
-    global APP_WINDOW
+    global APP_WINDOW, PUBLIC_MEDIA_PORT
     parser = argparse.ArgumentParser(description="Public_ChannelForge standalone TV server")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--public-media-port", type=int, choices=range(1, 65536), metavar="PORT",
+                        help="Listen on a separate loopback port for a public HTTPS reverse proxy")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--data-dir", action="store_true", help="Open the application data directory and exit")
     args = parser.parse_args()
@@ -2286,6 +2514,10 @@ def main() -> None:
         return
     print(f"{APP_NAME} {VERSION} is running at {url}")
     print(f"Data directory: {DATA_DIR}")
+    if args.public_media_port:
+        PUBLIC_MEDIA_PORT = args.public_media_port
+        start_public_media_server()
+        print(f"Read-only media origin is listening on http://{HOST}:{PUBLIC_MEDIA_PORT}")
     threading.Thread(target=reap_idle_sessions, daemon=True, name="channel-forge-idle-reaper").start()
     threading.Thread(target=restore_public_sharing, daemon=True, name="channel-forge-public-sharing").start()
     if not args.no_browser and sys.platform == "win32":

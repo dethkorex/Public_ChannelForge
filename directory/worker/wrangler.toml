@@ -1,11 +1,11 @@
 name = "channelforge-directory"
 main = "src/index.js"
 compatibility_date = "2026-11-01"
-routes = [{ pattern = "directory.channelforge.tv", custom_domain = true }]
+workers_dev = true
 
 [[kv_namespaces]]
 binding = "CREATORS"
-id = "REPLACE_WITH_PRODUCTION_KV_ID"
+id = "6e554e6b39ca49e7abda650fe56dab8e"
 
 [triggers]
 crons = ["*/2 * * * *"]

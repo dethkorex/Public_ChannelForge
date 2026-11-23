@@ -2,12 +2,17 @@ sub init()
   m.guide = m.top.findNode("guide") : m.video = m.top.findNode("video") : m.creators = m.top.findNode("creators") : m.channels = m.top.findNode("channels") : m.vault = m.top.findNode("vault") : m.pair = m.top.findNode("pair") : m.updates = m.top.findNode("updates") : m.status = m.top.findNode("status") : m.directoryTimer = m.top.findNode("directoryTimer")
   m.creators.observeField("itemSelected", "creatorSelected") : m.channels.observeField("itemSelected", "channelSelected") : m.vault.observeField("itemSelected", "vaultSelected") : m.pair.observeField("buttonSelected", "showPairing") : m.updates.observeField("buttonSelected", "checkUpdates")
   m.directoryTimer.observeField("fire", "refreshCatalog") : m.directoryTimer.control = "start"
+  m.liveRetryTimer = m.top.findNode("liveRetryTimer")
+  m.liveRetryTimer.observeField("fire", "continueLive")
+  m.video.observeField("state", "videoStateChanged")
+  m.liveItem = invalid
+  m.liveRetries = 0
   refreshCatalog()
 end sub
 sub refreshCatalog()
   if m.guide.visible = false then return
   m.status.text = "Refreshing public creator studios…"
-  task = CreateObject("roSGNode", "CatalogTask") : task.url = "https://directory.channelforge.tv/v1/catalog" : task.fallbackUrl = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json" : task.observeField("content", "catalogLoaded") : task.control = "run"
+  task = CreateObject("roSGNode", "CatalogTask") : task.url = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog" : task.fallbackUrl = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json" : task.observeField("content", "catalogLoaded") : task.control = "run"
   m.catalogTask = task
 end sub
 sub catalogLoaded()
@@ -87,6 +92,9 @@ sub playlistLoaded()
 end sub
 sub vaultSelected()
   item = m.vault.content.GetChild(m.vault.itemSelected)
+  if item = invalid then return
+  m.liveItem = invalid
+  m.liveRetryTimer.control = "stop"
   m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
 end sub
 sub checkUpdates()
@@ -105,13 +113,46 @@ sub playChannel(index as integer)
   if index >= m.channels.content.GetChildCount() then index = 0
   m.channels.jumpToItem = index
   item = m.channels.content.GetChild(index)
+  m.liveRetryTimer.control = "stop"
+  m.liveItem = item
+  m.liveRetries = 0
   m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
   m.top.findNode("banner").text = "CH " + item.shortDescriptionLine1 + "   " + item.title : m.top.findNode("banner").visible = true : m.top.findNode("bannerBg").visible = true
+end sub
+sub videoStateChanged()
+  if m.liveItem = invalid or m.guide.visible then return
+  if m.video.state = "playing" then m.liveRetries = 0
+  if m.video.state = "finished"
+    m.liveRetryTimer.duration = 1
+    m.liveRetryTimer.control = "start"
+  else if m.video.state = "error" and m.liveRetries < 3
+    m.liveRetries = m.liveRetries + 1
+    m.liveRetryTimer.duration = m.liveRetries * 2
+    m.liveRetryTimer.control = "start"
+  end if
+end sub
+sub continueLive()
+  if m.liveItem = invalid or m.guide.visible then return
+  item = CreateObject("roSGNode", "ContentNode")
+  item.url = m.liveItem.url
+  item.title = m.liveItem.title
+  item.streamFormat = m.liveItem.streamFormat
+  m.video.control = "stop"
+  m.video.content = item
+  m.video.control = "play"
 end sub
 function onKeyEvent(key as string, press as boolean) as boolean
   if not press then return false
   if m.guide.visible = false
-    if key = "OK" or key = "back" then m.guide.visible = true : m.channels.SetFocus(true) : return true
+    if key = "OK" or key = "back"
+      m.liveItem = invalid
+      m.liveRetryTimer.control = "stop"
+      m.video.control = "stop"
+      m.video.visible = false
+      m.guide.visible = true
+      m.channels.SetFocus(true)
+      return true
+    end if
     if key = "up" then playChannel(m.channels.itemFocused + 1) : return true
     if key = "down" then playChannel(m.channels.itemFocused - 1) : return true
   end if

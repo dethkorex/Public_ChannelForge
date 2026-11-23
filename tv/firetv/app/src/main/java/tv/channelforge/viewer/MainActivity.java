@@ -19,6 +19,8 @@ import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private final List<Creator> creators = new ArrayList<>();
@@ -29,7 +31,18 @@ public class MainActivity extends Activity {
     private TextView status, banner, updateButton;
     private int channelIndex = 0;
     private boolean guideVisible = true;
+    private Channel tunedChannel;
+    private int liveRetries;
+    private final Runnable continueLive = () -> {
+        if (tunedChannel != null && !guideVisible) {
+            video.setVideoURI(Uri.parse(tunedChannel.url));
+            video.start();
+        }
+    };
     private boolean directoryLoading = false;
+    private final ExecutorService posterLoader = Executors.newFixedThreadPool(3);
+    private int studioRequest = 0;
+    private String selectedPlaylist = "";
     private static final String PREFS = "channel_forge_tv";
     private static final String PAIRED_CREATOR = "paired_creator_url";
     private static final long DIRECTORY_REFRESH_MS = 60_000L;
@@ -81,8 +94,24 @@ public class MainActivity extends Activity {
         root.addView(guide, new FrameLayout.LayoutParams(-1,-1));
         banner = text("", 18, true); banner.setBackground(surface(new int[]{color("#111938"),color("#290A3E")},color("#12DFF9"),2,12)); banner.setVisibility(View.GONE); FrameLayout.LayoutParams bp=new FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM); bp.setMargins(dp(35),0,dp(35),dp(35)); root.addView(banner,bp);
         setContentView(root);
-        video.setOnPreparedListener(player -> { status.setText("●  STREAM READY  •  ENGLISH AUDIO PREFERRED"); player.start(); });
-        video.setOnErrorListener((player, what, extra) -> { showBanner("Stream unavailable — check the creator server"); return true; });
+        video.setOnPreparedListener(player -> {
+            liveRetries = 0;
+            status.setText("●  STREAM READY  •  ENGLISH AUDIO PREFERRED");
+            player.start();
+        });
+        video.setOnCompletionListener(player -> {
+            if (tunedChannel != null && !guideVisible) scheduleLive(400);
+            else if (!guideVisible) returnToGuide();
+        });
+        video.setOnErrorListener((player, what, extra) -> {
+            if (tunedChannel != null && !guideVisible && liveRetries < 3) {
+                showBanner("Reconnecting to " + tunedChannel.name + "…");
+                scheduleLive(1200L * ++liveRetries);
+            } else {
+                showBanner("Stream unavailable — check the creator server");
+            }
+            return true;
+        });
     }
 
     private String get(String address) throws Exception {
@@ -107,7 +136,7 @@ public class MainActivity extends Activity {
                     JSONArray values=new JSONObject(get(address)).getJSONArray("creators");
                     for(int i=0;i<values.length();i++){
                         JSONObject o=values.getJSONObject(i); String playlist=o.getString("playlist_url");
-                        if(!hasCreator(discovered,playlist))discovered.add(new Creator(o.getString("name"),o.optString("description"),playlist,o.optString("vault_url")));
+                        if(!hasCreator(discovered,playlist))discovered.add(new Creator(o.getString("name"),o.optString("description"),playlist,o.optString("vault_url"),o.optString("status_url")));
                     }
                     if(!discovered.isEmpty())break;
                 }catch(Exception error){last=error;}
@@ -126,7 +155,7 @@ public class MainActivity extends Activity {
         JSONObject state=new JSONObject(get(base+"/api/public/channels"));
         if(!state.has("channels"))throw new IOException("That URL is not a ChannelForge Creator");
         String host=Uri.parse(base).getHost();
-        return new Creator(host==null?"Paired Creator":host,"Paired directly with this Fire TV",base+"/exports/channels.m3u",base+"/api/public/vault");
+        return new Creator(host==null?"Paired Creator":host,"Paired directly with this Fire TV",base+"/exports/channels.m3u",base+"/api/public/vault",base+"/api/public/channels");
     }
 
     private void renderDirectoryRecovery(Exception error){
@@ -153,32 +182,191 @@ public class MainActivity extends Activity {
 
     private TextView focusButton(String label) { TextView button=text(label,14,true);button.setTextColor(color("#DFFBFF"));button.setGravity(Gravity.CENTER_VERTICAL);button.setMinHeight(dp(48));button.setFocusable(true);button.setBackground(surface(new int[]{color("#151A3D"),color("#101127")},color("#1BDFF5"),1,9));button.setOnFocusChangeListener((v, focused)->{v.setBackground(surface(focused?new int[]{color("#6A145C"),color("#231454")}:new int[]{color("#151A3D"),color("#101127")},focused?color("#FF42C5"):color("#1BDFF5"),focused?2:1,9));v.setScaleX(focused?1.025f:1f);v.setScaleY(focused?1.025f:1f);v.setTranslationZ(focused?dp(8):0);});return button;}
 
-    private void renderCreators() { creatorRail.removeAllViews(); status.setText("●  "+creators.size()+" PUBLIC CREATOR STUDIO"+(creators.size()==1?"":"S")+" ONLINE");creatorRail.addView(sectionTitle("COMMUNITY STUDIOS","#5DEEFF"));for(Creator creator:creators){TextView button=focusButton(creator.name+"\n"+creator.description);button.setOnClickListener(v->loadCreator(creator));LinearLayout.LayoutParams layout=new LinearLayout.LayoutParams(-1,-2);layout.setMargins(0,0,0,dp(9));creatorRail.addView(button,layout);}if(!creators.isEmpty())loadCreator(creators.get(0));}
+    private void renderCreators() {
+        creatorRail.removeAllViews();
+        status.setText("●  " + creators.size() + " PUBLIC CREATOR STUDIOS ONLINE");
+        creatorRail.addView(sectionTitle("COMMUNITY STUDIOS", "#5DEEFF"));
+        Creator selected = creators.get(0);
+        for (Creator creator : creators) {
+            TextView button = focusButton(creator.name + "\n" + creator.description);
+            button.setOnClickListener(view -> loadCreator(creator));
+            LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
+            layout.setMargins(0, 0, 0, dp(9));
+            creatorRail.addView(button, layout);
+            if (creator.playlist.equals(selectedPlaylist)) selected = creator;
+        }
+        loadCreator(selected);
+    }
 
-    private void loadCreator(Creator creator) { status.setText("Loading "+creator.name+"…"); new Thread(()->{try{List<Channel> loaded=parseM3u(get(creator.playlist));List<VaultItem> vault=creator.vault.isEmpty()?new ArrayList<>():parseVault(get(creator.vault)); runOnUiThread(()->{channels.clear();channels.addAll(loaded);vaultItems.clear();vaultItems.addAll(vault);channelIndex=0;renderChannels(creator.name);});}catch(Exception error){runOnUiThread(()->status.setText("Could not load "+creator.name));}}).start(); }
+    private void loadCreator(Creator creator) {
+        selectedPlaylist = creator.playlist;
+        status.setText("Loading " + creator.name + "…");
+        int request = ++studioRequest;
+        new Thread(() -> {
+            List<Channel> loaded = Collections.emptyList();
+            List<VaultItem> movies = Collections.emptyList();
+            try {
+                loaded = creator.channelStatus.isEmpty()
+                        ? parseM3u(get(creator.playlist))
+                        : parseOnlineChannels(get(creator.channelStatus));
+            } catch (Exception ignored) {}
+            if (!creator.vault.isEmpty()) {
+                try { movies = parseVault(get(creator.vault)); } catch (Exception ignored) {}
+            }
+            List<Channel> availableChannels = loaded;
+            List<VaultItem> availableMovies = movies;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || request != studioRequest) return;
+                channels.clear();
+                channels.addAll(availableChannels);
+                vaultItems.clear();
+                vaultItems.addAll(availableMovies);
+                channelIndex = 0;
+                renderChannels(creator.name);
+            });
+        }).start();
+    }
+
+    private List<Channel> parseOnlineChannels(String payload) throws JSONException {
+        List<Channel> result = new ArrayList<>();
+        JSONArray entries = new JSONObject(payload).getJSONArray("channels");
+        for (int i = 0; i < entries.length(); i++) {
+            JSONObject entry = entries.getJSONObject(i);
+            if (entry.optBoolean("online")) {
+                result.add(new Channel(entry.getString("name"), entry.getString("stream_url")));
+            }
+        }
+        return result;
+    }
 
     private List<VaultItem> parseVault(String value)throws Exception{List<VaultItem> result=new ArrayList<>();JSONArray items=new JSONObject(value).getJSONArray("items");for(int i=0;i<items.length();i++){JSONObject item=items.getJSONObject(i);result.add(new VaultItem(item.optString("title","Untitled"),item.optString("year"),item.optString("summary"),item.optString("poster_url"),item.getString("stream_url")));}return result;}
 
     private List<Channel> parseM3u(String m3u){List<Channel> result=new ArrayList<>();String pending="";for(String raw:m3u.split("\\r?\\n")){String line=raw.trim();if(line.startsWith("#EXTINF:")){int comma=line.lastIndexOf(',');pending=comma>=0?line.substring(comma+1).trim():"Channel";}else if(!line.isEmpty()&&!line.startsWith("#")&&!pending.isEmpty()){result.add(new Channel(pending,line));pending="";}}return result;}
 
-    private void renderChannels(String creator){channelRail.removeAllViews();status.setText("●  "+creator.toUpperCase(Locale.US)+"  •  "+channels.size()+" LIVE CHANNELS  •  "+vaultItems.size()+" MOVIES");channelRail.addView(sectionTitle("LIVE CHANNELS","#5DEEFF"));for(int i=0;i<channels.size();i++){final int index=i;Channel channel=channels.get(i);TextView button=focusButton(String.format(Locale.US,"CH %03d   %s\n● LIVE NOW  •  PRESS OK TO WATCH",i+1,channel.name));button.setOnClickListener(v->play(index));LinearLayout.LayoutParams layout=new LinearLayout.LayoutParams(-1,-2);layout.setMargins(0,0,0,dp(8));channelRail.addView(button,layout);}channelRail.addView(sectionTitle("REWIND CINEMA  •  BROWSE MOVIE SHELVES","#FF48C8"));LinearLayout shelf=new LinearLayout(this);shelf.setOrientation(LinearLayout.HORIZONTAL);shelf.setPadding(dp(8),dp(10),dp(8),dp(20));for(VaultItem item:vaultItems)shelf.addView(vaultBox(item));HorizontalScrollView scroll=new HorizontalScrollView(this);scroll.setHorizontalScrollBarEnabled(false);scroll.addView(shelf);channelRail.addView(scroll,new LinearLayout.LayoutParams(-1,-2));}
+    private void renderChannels(String creator) {
+        channelRail.removeAllViews();
+        status.setText("●  " + creator.toUpperCase(Locale.US) + "  •  " + channels.size()
+                + " LIVE CHANNELS  •  " + vaultItems.size() + " MOVIES");
+        channelRail.addView(sectionTitle("LIVE CHANNELS", "#5DEEFF"));
+        for (int i = 0; i < channels.size(); i++) {
+            final int index = i;
+            Channel channel = channels.get(i);
+            TextView button = focusButton(String.format(Locale.US, "CH %03d   %s\n● LIVE NOW  •  PRESS OK TO WATCH", i + 1, channel.name));
+            button.setOnClickListener(v -> play(index));
+            LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
+            layout.setMargins(0, 0, 0, dp(8));
+            channelRail.addView(button, layout);
+        }
+        channelRail.addView(sectionTitle("REWIND CINEMA", "#FF48C8"));
+        if (vaultItems.isEmpty()) {
+            channelRail.addView(text("No movies available from this studio.", 14, false));
+            return;
+        }
+        List<VaultItem> movies = new ArrayList<>(vaultItems);
+        LinearLayout shelf = new LinearLayout(this);
+        shelf.setPadding(dp(8), dp(10), dp(8), dp(20));
+        appendMovies(shelf, movies);
+        HorizontalScrollView scroll = new HorizontalScrollView(this) {
+            @Override protected void onScrollChanged(int left, int top, int oldLeft, int oldTop) {
+                super.onScrollChanged(left, top, oldLeft, oldTop);
+                if (left + getWidth() + dp(640) >= shelf.getWidth()) appendMovies(shelf, movies);
+            }
+        };
+        scroll.setHorizontalScrollBarEnabled(false);
+        scroll.addView(shelf);
+        channelRail.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+    }
 
-    private View vaultBox(VaultItem item){LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(8,8,8,8);box.setFocusable(true);GradientDrawable normal=new GradientDrawable();normal.setColor(Color.rgb(14,12,35));normal.setStroke(2,Color.rgb(0,220,245));normal.setCornerRadius(8);box.setBackground(normal);ImageView poster=new ImageView(this);poster.setScaleType(ImageView.ScaleType.CENTER_CROP);poster.setBackgroundColor(Color.rgb(30,15,55));box.addView(poster,new LinearLayout.LayoutParams(185,255));TextView title=text(item.title+(item.year.isEmpty()?"":" ("+item.year+")"),13,true);title.setMaxLines(2);box.addView(title,new LinearLayout.LayoutParams(185,70));LinearLayout.LayoutParams layout=new LinearLayout.LayoutParams(205,350);layout.setMargins(7,0,7,0);box.setLayoutParams(layout);box.setOnFocusChangeListener((view,focused)->{view.setScaleX(focused?1.08f:1f);view.setScaleY(focused?1.08f:1f);GradientDrawable frame=new GradientDrawable();frame.setColor(Color.rgb(14,12,35));frame.setStroke(focused?5:2,focused?Color.rgb(232,255,24):Color.rgb(0,220,245));frame.setCornerRadius(8);view.setBackground(frame);view.setTranslationZ(focused?18:0);});box.setOnClickListener(view->playUrl(item.title,item.url));if(!item.poster.isEmpty())new Thread(()->{try(InputStream input=new URL(item.poster).openStream()){byte[] data=readAll(input);runOnUiThread(()->poster.setImageBitmap(BitmapFactory.decodeByteArray(data,0,data.length)));}catch(Exception ignored){}}).start();return box;}
+    private void appendMovies(LinearLayout shelf, List<VaultItem> movies) {
+        int start = shelf.getChildCount();
+        int end = Math.min(start + 18, movies.size());
+        for (int i = start; i < end; i++) shelf.addView(vaultBox(movies.get(i)));
+    }
+
+    private View vaultBox(VaultItem item){LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(8,8,8,8);box.setFocusable(true);GradientDrawable normal=new GradientDrawable();normal.setColor(Color.rgb(14,12,35));normal.setStroke(2,Color.rgb(0,220,245));normal.setCornerRadius(8);box.setBackground(normal);ImageView poster=new ImageView(this);poster.setScaleType(ImageView.ScaleType.CENTER_CROP);poster.setBackgroundColor(Color.rgb(30,15,55));box.addView(poster,new LinearLayout.LayoutParams(185,255));TextView title=text(item.title+(item.year.isEmpty()?"":" ("+item.year+")"),13,true);title.setMaxLines(2);box.addView(title,new LinearLayout.LayoutParams(185,70));LinearLayout.LayoutParams layout=new LinearLayout.LayoutParams(205,350);layout.setMargins(7,0,7,0);box.setLayoutParams(layout);box.setOnFocusChangeListener((view,focused)->{view.setScaleX(focused?1.08f:1f);view.setScaleY(focused?1.08f:1f);GradientDrawable frame=new GradientDrawable();frame.setColor(Color.rgb(14,12,35));frame.setStroke(focused?5:2,focused?Color.rgb(232,255,24):Color.rgb(0,220,245));frame.setCornerRadius(8);view.setBackground(frame);view.setTranslationZ(focused?18:0);});box.setOnClickListener(view->playUrl(item.title,item.url));if(!item.poster.isEmpty())posterLoader.execute(()->loadPoster(item.poster,poster));return box;}
+
+    private void loadPoster(String address, ImageView poster) {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(address);
+            if (!"https".equals(url.getProtocol())) return;
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = 2;
+            try (InputStream input = connection.getInputStream()) {
+                android.graphics.Bitmap image = BitmapFactory.decodeStream(input, null, options);
+                if (image != null) runOnUiThread(() -> {
+                    if (poster.isAttachedToWindow()) poster.setImageBitmap(image);
+                });
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
 
     private void checkUpdates(TextView button){button.setText("UPDATES  •  CHECKING…");new Thread(()->{try{JSONObject release=new JSONObject(get(BuildConfig.GITHUB_RELEASES_API));String latest=release.optString("tag_name").replaceFirst("^v","");boolean newer=compareVersions(latest,BuildConfig.VERSION_NAME)>0;String apk=BuildConfig.GITHUB_RELEASES_URL;JSONArray assets=release.optJSONArray("assets");if(assets!=null)for(int i=0;i<assets.length();i++){JSONObject asset=assets.getJSONObject(i);if("ChannelForgeTV-FireTV.apk".equals(asset.optString("name"))){apk=asset.optString("browser_download_url",apk);break;}}final String downloadUrl=apk;runOnUiThread(()->{button.setText(newer?"DOWNLOAD UPDATE v"+latest+" ✓":"UP TO DATE ✓  v"+BuildConfig.VERSION_NAME);showBanner(newer?"Press Updates again to download the official Fire TV APK":"ChannelForge TV is up to date");if(newer)button.setOnClickListener(v->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(downloadUrl)));}catch(Exception e){showBanner(downloadUrl);}});});}catch(Exception e){runOnUiThread(()->{button.setText("UPDATES  •  RETRY");showBanner("Could not reach GitHub Releases");});}}).start();}
     private int compareVersions(String a,String b){String[] x=a.split("\\."),y=b.split("\\.");for(int i=0;i<3;i++){int xv=i<x.length?number(x[i]):0,yv=i<y.length?number(y[i]):0;if(xv!=yv)return Integer.compare(xv,yv);}return 0;}
     private int number(String value){try{return Integer.parseInt(value.replaceAll("[^0-9].*$",""));}catch(Exception ignored){return 0;}}
 
-    private void play(int index){if(channels.isEmpty())return;channelIndex=(index+channels.size())%channels.size();Channel channel=channels.get(channelIndex);status.setText("Tuning "+channel.name+"…");video.setVideoURI(Uri.parse(channel.url));guide.setVisibility(View.GONE);guideVisible=false;showBanner(String.format(Locale.US,"CH %03d   %s",channelIndex+1,channel.name));}
-    private void playUrl(String title,String url){status.setText("Inserting "+title+"…");video.setVideoURI(Uri.parse(url));guide.setVisibility(View.GONE);guideVisible=false;showBanner("REWIND CINEMA   •   "+title);}
+    private void scheduleLive(long delay) {
+        video.removeCallbacks(continueLive);
+        video.postDelayed(continueLive, delay);
+    }
+
+    private void play(int index) {
+        if (channels.isEmpty()) return;
+        channelIndex = (index + channels.size()) % channels.size();
+        tunedChannel = channels.get(channelIndex);
+        liveRetries = 0;
+        guide.setVisibility(View.GONE);
+        guideVisible = false;
+        video.removeCallbacks(continueLive);
+        continueLive.run();
+        showBanner(String.format(Locale.US, "CH %03d   %s", channelIndex + 1, tunedChannel.name));
+    }
+
+    private void playUrl(String title, String url) {
+        tunedChannel = null;
+        video.removeCallbacks(continueLive);
+        guide.setVisibility(View.GONE);
+        guideVisible = false;
+        video.setVideoURI(Uri.parse(url));
+        video.start();
+        showBanner("REWIND CINEMA   •   " + title);
+    }
     private void showBanner(String message){banner.setText(message);banner.setVisibility(View.VISIBLE);banner.removeCallbacks(hideBanner);banner.postDelayed(hideBanner,4000);} private final Runnable hideBanner=()->banner.setVisibility(View.GONE);
 
-    @Override public boolean onKeyDown(int key, KeyEvent event){if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_CENTER||key==KeyEvent.KEYCODE_ENTER||key==KeyEvent.KEYCODE_BACK)){guideVisible=true;guide.setVisibility(View.VISIBLE);channelRail.requestFocus();return true;}if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_UP||key==KeyEvent.KEYCODE_CHANNEL_UP)){play(channelIndex+1);return true;}if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_DOWN||key==KeyEvent.KEYCODE_CHANNEL_DOWN)){play(channelIndex-1);return true;}return super.onKeyDown(key,event);}
+    @Override public boolean onKeyDown(int key, KeyEvent event){if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_CENTER||key==KeyEvent.KEYCODE_ENTER||key==KeyEvent.KEYCODE_BACK)){returnToGuide();channelRail.requestFocus();return true;}if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_UP||key==KeyEvent.KEYCODE_CHANNEL_UP)){play(channelIndex+1);return true;}if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_DOWN||key==KeyEvent.KEYCODE_CHANNEL_DOWN)){play(channelIndex-1);return true;}return super.onKeyDown(key,event);}
 
     @Override protected void onResume(){super.onResume();if(guide!=null)loadDirectory();}
-    @Override protected void onDestroy(){if(guide!=null)guide.removeCallbacks(directoryRefresh);video.stopPlayback();super.onDestroy();}
+    @Override protected void onStop() {
+        returnToGuide();
+        super.onStop();
+    }
 
-    private static class Creator { final String name,description,playlist,vault; Creator(String n,String d,String p,String v){name=n;description=d;playlist=p;vault=v;} }
+    private void returnToGuide() {
+        tunedChannel = null;
+        video.removeCallbacks(continueLive);
+        video.stopPlayback();
+        guideVisible = true;
+        guide.setVisibility(View.VISIBLE);
+        banner.setVisibility(View.GONE);
+    }
+    @Override protected void onDestroy(){if(guide!=null)guide.removeCallbacks(directoryRefresh);posterLoader.shutdownNow();video.stopPlayback();super.onDestroy();}
+
+    private static class Creator {
+        final String name, description, playlist, vault, channelStatus;
+        Creator(String name, String description, String playlist, String vault, String channelStatus) {
+            this.name = name;
+            this.description = description;
+            this.playlist = playlist;
+            this.vault = vault;
+            this.channelStatus = channelStatus;
+        }
+    }
     private static class Channel { final String name,url; Channel(String n,String u){name=n;url=u;} }
     private static class VaultItem { final String title,year,summary,poster,url; VaultItem(String t,String y,String s,String p,String u){title=t;year=y;summary=s;poster=p;url=u;} }
 }

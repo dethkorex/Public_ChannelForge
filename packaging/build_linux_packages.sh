@@ -28,7 +28,7 @@ Version: $VERSION
 Section: video
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.10), python3-webview, ffmpeg
+Depends: python3 (>= 3.10), python3-webview, ffmpeg, openssh-client
 Maintainer: Public ChannelForge contributors
 Description: Local-first personal channel guide builder
  Build personal channel rotations and watch the public TV guide in two desktop apps.
@@ -98,6 +98,7 @@ arch = any
 license = MIT
 depend = python>=3.10
 depend = ffmpeg
+depend = openssh
 depend = python-pywebview
 depend = python-gobject
 depend = webkit2gtk-4.1

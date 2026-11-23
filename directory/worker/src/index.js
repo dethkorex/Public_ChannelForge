@@ -7,15 +7,119 @@ const safeUrl = value => {const url=new URL(text(value));if(url.protocol!=="http
 const publicCreator = value => {const {key_hash,failures,...visible}=value;return visible};
 
 async function readBody(request){const value=await request.json();if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("Expected an object.");return value}
-async function validate(value){const name=text(value.name).slice(0,80),slug=slugify(value.slug||name);if(!name||slug.length<3)throw new Error("Creator name is required.");return {name,slug,description:text(value.description).slice(0,400),guide_url:safeUrl(value.guide_url),playlist_url:safeUrl(value.playlist_url),status_url:value.status_url?safeUrl(value.status_url):"",vault_url:safeUrl(value.vault_url),logo_url:value.logo_url?safeUrl(value.logo_url):""}}
+function validate(value) {
+  const name = text(value.name).slice(0, 80);
+  const slug = slugify(value.slug || name);
+  if (!name || slug.length < 3) throw new Error("Creator name is required.");
+  const guide = new URL(safeUrl(value.guide_url));
+  if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.[a-z][a-z0-9-]*$|^[a-z0-9-]+\.[a-z][a-z0-9-]*$/i.test(guide.hostname)
+      || /\.(?:localhost|local|internal|test|onion|invalid)$/i.test(guide.hostname)) {
+    throw new Error("Publish using a public DNS hostname.");
+  }
+  const validateEndpoint = (address, path) => {
+    const endpoint = new URL(safeUrl(address));
+    if (endpoint.origin !== guide.origin || endpoint.pathname !== path || endpoint.search || endpoint.hash) {
+      throw new Error("Guide, playlist, and catalog URLs must come from the same ChannelForge media origin.");
+    }
+    return endpoint.href;
+  };
+  return {
+    name, slug, description: text(value.description).slice(0, 400),
+    guide_url: validateEndpoint(value.guide_url, "/exports/guide.xml"),
+    playlist_url: validateEndpoint(value.playlist_url, "/exports/channels.m3u"),
+    status_url: value.status_url ? validateEndpoint(value.status_url, "/api/public/channels") : "",
+    vault_url: validateEndpoint(value.vault_url, "/api/public/vault"),
+    logo_url: value.logo_url ? safeUrl(value.logo_url) : "",
+  };
+}
 async function owned(request,env,id){const creator=await env.CREATORS.get(`creator:${id}`,"json"),provided=text(request.headers.get("authorization")).replace(/^Bearer\s+/i,"");if(!creator||!provided||await hash(provided)!==creator.key_hash)return null;return creator}
-async function endpointOk(url,content){try{const response=await fetch(url,{headers:{"user-agent":"ChannelForge-Health/1.0"},cf:{cacheTtl:0},signal:AbortSignal.timeout(9000)});if(!response.ok)return false;const sample=(await response.text()).slice(0,2000);if(content==="xml")return sample.includes("<tv");if(content==="json")return sample.includes('"items"')||sample.includes('"channels"');return sample.includes("#EXTM3U")}catch{return false}}
+async function endpointOk(url, content) {
+  let reader;
+  try {
+    const response = await fetch(url, {
+      headers: {"user-agent": "ChannelForge-Health/1.0"},
+      cf: {cacheTtl: 0},
+      // Workers supports manual and follow. Reject 3xx using response.ok below.
+      redirect: "manual",
+      signal: AbortSignal.timeout(9000),
+    });
+    reader = response.body?.getReader();
+    if (!response.ok || !reader) return false;
+    const decoder = new TextDecoder();
+    let sample = "";
+    while (sample.length < 2000) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      sample += decoder.decode(value.subarray(0, 2000 - sample.length), {stream: true});
+      if (content === "xml" && sample.includes("<tv")) return true;
+      if (content === "json" && (sample.includes('"items"') || sample.includes('"channels"'))) return true;
+      if (content === "m3u" && sample.includes("#EXTM3U")) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    reader?.cancel().catch(() => {});
+  }
+}
 
-async function register(request,env){const value=await validate(await readBody(request));const slugOwner=await env.CREATORS.get(`slug:${value.slug}`);if(slugOwner)return json({error:"Creator name is already registered."},409);if(!await endpointOk(value.guide_url,"xml")||!await endpointOk(value.playlist_url,"m3u")||!await endpointOk(value.vault_url,"json"))return json({error:"Guide, playlist, and vault must be online before publishing."},422);const id=crypto.randomUUID(),apiKey=token(),now=Math.floor(Date.now()/1000),creator={id,...value,key_hash:await hash(apiKey),online:true,last_ok:now,updated_at:now,failures:0};await Promise.all([env.CREATORS.put(`creator:${id}`,JSON.stringify(creator)),env.CREATORS.put(`slug:${value.slug}`,id)]);return json({creator:publicCreator(creator),api_key:apiKey},201)}
-async function update(request,env,id){const creator=await owned(request,env,id);if(!creator)return json({error:"Invalid creator key."},403);if(request.method==="DELETE"){await Promise.all([env.CREATORS.delete(`creator:${id}`),env.CREATORS.delete(`slug:${creator.slug}`)]);return json({ok:true})}const value=await validate(await readBody(request));if(!await endpointOk(value.guide_url,"xml")||!await endpointOk(value.playlist_url,"m3u")||!await endpointOk(value.vault_url,"json"))return json({error:"Guide, playlist, and vault must be online before republishing."},422);if(value.slug!==creator.slug){const owner=await env.CREATORS.get(`slug:${value.slug}`);if(owner&&owner!==id)return json({error:"Creator name is already registered."},409);await Promise.all([env.CREATORS.delete(`slug:${creator.slug}`),env.CREATORS.put(`slug:${value.slug}`,id)])}const now=Math.floor(Date.now()/1000),saved={...creator,...value,online:true,last_ok:now,failures:0,updated_at:now};await env.CREATORS.put(`creator:${id}`,JSON.stringify(saved));return json({creator:publicCreator(saved)})}
-async function catalog(env){const list=await env.CREATORS.list({prefix:"creator:"}),records=(await Promise.all(list.keys.map(key=>env.CREATORS.get(key.name,"json")))).filter(Boolean),cutoff=Math.floor(Date.now()/1000)-Number(env.OFFLINE_AFTER_SECONDS||360);return json({version:1,generated_at:Math.floor(Date.now()/1000),creators:records.filter(item=>item.online&&item.last_ok>=cutoff).sort((a,b)=>a.name.localeCompare(b.name)).map(publicCreator)})}
+async function catalogSnapshot(env){const list=await env.CREATORS.list({prefix:"creator:"}),records=(await Promise.all(list.keys.map(key=>env.CREATORS.get(key.name,"json")))).filter(Boolean);return {version:1,generated_at:Math.floor(Date.now()/1000),creators:records.filter(item=>item.online).sort((a,b)=>a.name.localeCompare(b.name)).map(publicCreator)}}
+async function refreshCatalog(env){const snapshot=await catalogSnapshot(env);await env.CREATORS.put("catalog:v1",JSON.stringify(snapshot));return snapshot}
+async function register(request,env){const value=await validate(await readBody(request));const slugOwner=await env.CREATORS.get(`slug:${value.slug}`);if(slugOwner)return json({error:"Creator name is already registered."},409);if(!await endpointOk(value.guide_url,"xml")||!await endpointOk(value.playlist_url,"m3u")||!await endpointOk(value.vault_url,"json"))return json({error:"Guide, playlist, and vault must be online before publishing."},422);const id=crypto.randomUUID(),apiKey=token(),now=Math.floor(Date.now()/1000),creator={id,...value,key_hash:await hash(apiKey),online:true,last_ok:now,updated_at:now,failures:0};await Promise.all([env.CREATORS.put(`creator:${id}`,JSON.stringify(creator)),env.CREATORS.put(`slug:${value.slug}`,id)]);await refreshCatalog(env);return json({creator:publicCreator(creator),api_key:apiKey},201)}
+async function update(request,env,id){const creator=await owned(request,env,id);if(!creator)return json({error:"Invalid creator key."},403);if(request.method==="DELETE"){await Promise.all([env.CREATORS.delete(`creator:${id}`),env.CREATORS.delete(`slug:${creator.slug}`)]);await refreshCatalog(env);return json({ok:true})}const value=await validate(await readBody(request));if(!await endpointOk(value.guide_url,"xml")||!await endpointOk(value.playlist_url,"m3u")||!await endpointOk(value.vault_url,"json"))return json({error:"Guide, playlist, and vault must be online before republishing."},422);if(value.slug!==creator.slug){const owner=await env.CREATORS.get(`slug:${value.slug}`);if(owner&&owner!==id)return json({error:"Creator name is already registered."},409);await Promise.all([env.CREATORS.delete(`slug:${creator.slug}`),env.CREATORS.put(`slug:${value.slug}`,id)])}const now=Math.floor(Date.now()/1000),saved={...creator,...value,online:true,last_ok:now,failures:0,updated_at:now};await env.CREATORS.put(`creator:${id}`,JSON.stringify(saved));await refreshCatalog(env);return json({creator:publicCreator(saved)})}
+async function catalog(env){let snapshot=await env.CREATORS.get("catalog:v1","json");if(!snapshot)snapshot=await refreshCatalog(env);snapshot.generated_at=Math.floor(Date.now()/1000);return json(snapshot)}
 
 export default {
-  async fetch(request,env){try{const url=new URL(request.url),path=url.pathname;if(request.method==="OPTIONS")return new Response(null,{headers:{"access-control-allow-origin":"*","access-control-allow-methods":"GET,POST,PUT,DELETE,OPTIONS","access-control-allow-headers":"authorization,content-type"}});if(path==="/fire")return Response.redirect("https://github.com/dethkorex/Public_ChannelForge/releases/latest/download/ChannelForgeTV-FireTV.apk",302);if(path==="/health")return json({ok:true,service:"ChannelForge Creator Directory"});if(path==="/v1/catalog"&&request.method==="GET")return catalog(env);if(path==="/v1/creators"&&request.method==="POST")return register(request,env);const match=path.match(/^\/v1\/creators\/([0-9a-f-]+)$/);if(match&&(request.method==="PUT"||request.method==="DELETE"))return update(request,env,match[1]);return json({error:"Not found"},404)}catch(error){return json({error:error.message||"Request failed"},400)}},
-  async scheduled(_event,env,ctx){ctx.waitUntil((async()=>{const list=await env.CREATORS.list({prefix:"creator:"});for(const key of list.keys){const creator=await env.CREATORS.get(key.name,"json");if(!creator)continue;const checks=[endpointOk(creator.guide_url,"xml"),endpointOk(creator.playlist_url,"m3u")];if(creator.status_url)checks.push(endpointOk(creator.status_url,"json"));if(creator.vault_url)checks.push(endpointOk(creator.vault_url,"json"));const healthy=(await Promise.all(checks)).every(Boolean),now=Math.floor(Date.now()/1000);creator.failures=healthy?0:(creator.failures||0)+1;if(healthy)creator.last_ok=now;creator.online=healthy||creator.failures<2;await env.CREATORS.put(key.name,JSON.stringify(creator))}})())}
+  async fetch(request, env) {
+    try {
+      const {pathname} = new URL(request.url);
+      const {method} = request;
+      if (method === "OPTIONS") return new Response(null, {headers: {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
+        "access-control-allow-headers": "authorization,content-type",
+      }});
+      if (method === "GET" && pathname === "/health") return json({ok: true, service: "ChannelForge Creator Directory"});
+      if (method === "GET" && pathname === "/fire") {
+        return Response.redirect("https://github.com/dethkorex/Public_ChannelForge/releases/latest/download/ChannelForgeTV-FireTV.apk", 302);
+      }
+      if (method === "GET" && pathname === "/v1/catalog") return await catalog(env);
+      if (method === "POST" && pathname === "/v1/creators") return await register(request, env);
+      const match = pathname.match(/^\/v1\/creators\/([0-9a-f-]+)$/);
+      if (match && (method === "PUT" || method === "DELETE")) return await update(request, env, match[1]);
+      return json({error: "Not found"}, 404);
+    } catch (error) {
+      return json({error: error.message || "Request failed"}, 400);
+    }
+  },
+  async scheduled(_event,env,ctx){ctx.waitUntil((async()=>{
+    // Workers Free permits 50 outbound subrequests per invocation. Check at most
+    // ten creators (four endpoints each) in a rotating batch so the public
+    // directory remains usable as the community grows without paid services.
+    const list=await env.CREATORS.list({prefix:"creator:"}),keys=list.keys.sort((a,b)=>a.name.localeCompare(b.name));
+    if(!keys.length)return;
+    const batchSize=Math.min(10,keys.length),slot=Math.floor(Date.now()/120000),start=(slot*batchSize)%keys.length;
+    const selected=Array.from({length:batchSize},(_,index)=>keys[(start+index)%keys.length]);
+    let catalogChanged=false;
+    for(const key of selected){
+      const creator=await env.CREATORS.get(key.name,"json");if(!creator)continue;
+      const checks=[endpointOk(creator.guide_url,"xml"),endpointOk(creator.playlist_url,"m3u")];
+      if(creator.status_url)checks.push(endpointOk(creator.status_url,"json"));
+      if(creator.vault_url)checks.push(endpointOk(creator.vault_url,"json"));
+      const healthy=(await Promise.all(checks)).every(Boolean),wasOnline=Boolean(creator.online),previousFailures=Number(creator.failures||0),now=Math.floor(Date.now()/1000);
+      if(healthy){
+        // Healthy creators cause no recurring KV writes. Only recovery or a
+        // cleared failure counter is persisted.
+        if(!wasOnline||previousFailures){creator.failures=0;creator.online=true;creator.last_ok=now;await env.CREATORS.put(key.name,JSON.stringify(creator));if(!wasOnline)catalogChanged=true}
+      }else if(wasOnline&&previousFailures<1){
+        // One missed probe is tolerated so a transient network hiccup does not
+        // make a channel vanish from every TV guide.
+        creator.failures=1;await env.CREATORS.put(key.name,JSON.stringify(creator));
+      }else if(wasOnline){
+        creator.failures=2;creator.online=false;await env.CREATORS.put(key.name,JSON.stringify(creator));catalogChanged=true;
+      }
+      // An already-offline creator causes no further writes until it recovers.
+    }
+    if(catalogChanged)await refreshCatalog(env)
+  })())}
 };

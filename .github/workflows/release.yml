@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install FFmpeg
-        run: choco install ffmpeg cloudflared -y --no-progress
+        run: choco install ffmpeg -y --no-progress
       - shell: powershell
         run: ./scripts/build_windows.ps1
       - shell: powershell
@@ -99,6 +99,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate Roku components
+        run: npx --yes brighterscript@0.70.3 --root-dir tv/roku --create-package=false --copy-to-staging=false
       - name: Package Roku channel
         run: |
           mkdir -p tv-release

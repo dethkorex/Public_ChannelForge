@@ -1,5 +1,11 @@
 plugins { id 'com.android.application' }
 
+def directoryUrl = providers.gradleProperty('channelForgeCatalogUrl')
+    .getOrElse('https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog')
+if (!(directoryUrl ==~ /https:\/\/[A-Za-z0-9.:-]+\/v1\/catalog/)) {
+    throw new GradleException('channelForgeCatalogUrl must be an HTTPS /v1/catalog URL')
+}
+
 android {
     namespace 'tv.channelforge.viewer'
     compileSdk 35
@@ -7,11 +13,11 @@ android {
         applicationId 'tv.channelforge.viewer'
         minSdk 21
         targetSdk 35
-        versionCode 354
-        versionName '3.5.4'
+        versionCode 355
+        versionName '3.5.5'
         buildConfigField 'String', 'GITHUB_RELEASES_API', '"https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"'
         buildConfigField 'String', 'GITHUB_RELEASES_URL', '"https://github.com/dethkorex/Public_ChannelForge/releases/latest"'
-        buildConfigField 'String', 'DIRECTORY_URL', '"https://directory.channelforge.tv/v1/catalog"'
+        buildConfigField 'String', 'DIRECTORY_URL', '"' + directoryUrl + '"'
         buildConfigField 'String', 'DIRECTORY_FALLBACK_URL', '"https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"'
     }
     buildFeatures { buildConfig true }

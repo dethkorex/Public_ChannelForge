@@ -19,18 +19,18 @@ install_dependencies() {
   fi
   if command -v pacman >/dev/null 2>&1; then
     echo "Installing ChannelForge dependencies for Arch/Omarchy…"
-    "${elevate[@]}" pacman -S --needed python ffmpeg python-pywebview python-gobject webkit2gtk-4.1
+    "${elevate[@]}" pacman -S --needed python ffmpeg openssh python-pywebview python-gobject webkit2gtk-4.1
   elif command -v apt-get >/dev/null 2>&1; then
     echo "Installing ChannelForge dependencies for Debian/Ubuntu…"
     "${elevate[@]}" apt-get update
-    "${elevate[@]}" apt-get install -y python3 ffmpeg python3-webview gir1.2-webkit2-4.1
+    "${elevate[@]}" apt-get install -y python3 ffmpeg openssh-client python3-webview gir1.2-webkit2-4.1
   else
     echo "Unsupported package manager. Install Python 3, FFmpeg, PyWebView, GTK and WebKitGTK, then rerun install.sh."
     exit 1
   fi
 }
 
-if ! command -v ffmpeg >/dev/null 2>&1 || ! python3 -c 'import webview' >/dev/null 2>&1; then
+if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ssh >/dev/null 2>&1 || ! python3 -c 'import webview' >/dev/null 2>&1; then
   install_dependencies
 fi
 command -v ffmpeg >/dev/null 2>&1 || { echo "FFmpeg is still unavailable after dependency installation."; exit 1; }
