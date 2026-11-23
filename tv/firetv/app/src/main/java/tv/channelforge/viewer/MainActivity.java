@@ -29,14 +29,23 @@ public class MainActivity extends Activity {
     private TextView status, banner, updateButton;
     private int channelIndex = 0;
     private boolean guideVisible = true;
+    private boolean directoryLoading = false;
     private static final String PREFS = "channel_forge_tv";
     private static final String PAIRED_CREATOR = "paired_creator_url";
+    private static final long DIRECTORY_REFRESH_MS = 60_000L;
+    private final Runnable directoryRefresh = new Runnable() {
+        @Override public void run() {
+            if (guideVisible) loadDirectory();
+            if (guide != null) guide.postDelayed(this, DIRECTORY_REFRESH_MS);
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().getDecorView().setSystemUiVisibility(5894);
         buildUi();
         loadDirectory();
+        guide.postDelayed(directoryRefresh, DIRECTORY_REFRESH_MS);
         checkUpdates(updateButton);
     }
 
@@ -85,28 +94,30 @@ public class MainActivity extends Activity {
     private byte[] readAll(InputStream input) throws IOException { ByteArrayOutputStream out=new ByteArrayOutputStream(); byte[] buffer=new byte[8192]; int count; while((count=input.read(buffer))>=0) out.write(buffer,0,count); return out.toByteArray(); }
 
     private void loadDirectory() {
+        if(directoryLoading)return;
+        directoryLoading=true;
         status.setText("Scanning the public ChannelForge directory…");
         new Thread(() -> {
-            creators.clear();
+            List<Creator> discovered=new ArrayList<>();
             String paired=getSharedPreferences(PREFS,MODE_PRIVATE).getString(PAIRED_CREATOR,"");
-            if(!paired.isEmpty())try{creators.add(readPairedCreator(paired));}catch(Exception ignored){}
+            if(!paired.isEmpty())try{discovered.add(readPairedCreator(paired));}catch(Exception ignored){}
             Exception last=null;
             for(String address:new String[]{BuildConfig.DIRECTORY_URL,BuildConfig.DIRECTORY_FALLBACK_URL}){
                 try{
                     JSONArray values=new JSONObject(get(address)).getJSONArray("creators");
                     for(int i=0;i<values.length();i++){
                         JSONObject o=values.getJSONObject(i); String playlist=o.getString("playlist_url");
-                        if(!hasCreator(playlist))creators.add(new Creator(o.getString("name"),o.optString("description"),playlist,o.optString("vault_url")));
+                        if(!hasCreator(discovered,playlist))discovered.add(new Creator(o.getString("name"),o.optString("description"),playlist,o.optString("vault_url")));
                     }
-                    if(!creators.isEmpty())break;
+                    if(!discovered.isEmpty())break;
                 }catch(Exception error){last=error;}
             }
             Exception failure=last;
-            if(!creators.isEmpty())runOnUiThread(this::renderCreators);else runOnUiThread(()->renderDirectoryRecovery(failure));
+            runOnUiThread(()->{directoryLoading=false;creators.clear();creators.addAll(discovered);if(!creators.isEmpty())renderCreators();else renderDirectoryRecovery(failure);});
         }).start();
     }
 
-    private boolean hasCreator(String playlist){for(Creator creator:creators)if(creator.playlist.equals(playlist))return true;return false;}
+    private boolean hasCreator(List<Creator> values,String playlist){for(Creator creator:values)if(creator.playlist.equals(playlist))return true;return false;}
 
     private Creator readPairedCreator(String raw) throws Exception {
         String base=raw.trim().replaceAll("/+$","");
@@ -163,6 +174,9 @@ public class MainActivity extends Activity {
     private void showBanner(String message){banner.setText(message);banner.setVisibility(View.VISIBLE);banner.removeCallbacks(hideBanner);banner.postDelayed(hideBanner,4000);} private final Runnable hideBanner=()->banner.setVisibility(View.GONE);
 
     @Override public boolean onKeyDown(int key, KeyEvent event){if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_CENTER||key==KeyEvent.KEYCODE_ENTER||key==KeyEvent.KEYCODE_BACK)){guideVisible=true;guide.setVisibility(View.VISIBLE);channelRail.requestFocus();return true;}if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_UP||key==KeyEvent.KEYCODE_CHANNEL_UP)){play(channelIndex+1);return true;}if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_DOWN||key==KeyEvent.KEYCODE_CHANNEL_DOWN)){play(channelIndex-1);return true;}return super.onKeyDown(key,event);}
+
+    @Override protected void onResume(){super.onResume();if(guide!=null)loadDirectory();}
+    @Override protected void onDestroy(){if(guide!=null)guide.removeCallbacks(directoryRefresh);video.stopPlayback();super.onDestroy();}
 
     private static class Creator { final String name,description,playlist,vault; Creator(String n,String d,String p,String v){name=n;description=d;playlist=p;vault=v;} }
     private static class Channel { final String name,url; Channel(String n,String u){name=n;url=u;} }

@@ -40,6 +40,8 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("checkUpdates(updateButton)", activity)
         self.assertIn("if(!guideVisible&&", activity)
         self.assertIn("DIRECTORY_FALLBACK_URL", activity)
+        self.assertIn("DIRECTORY_REFRESH_MS", activity)
+        self.assertIn("guide.postDelayed(directoryRefresh", activity)
         self.assertIn("android:icon=\"@mipmap/channel_forge_tv_icon\"", manifest)
         self.assertIn("android:banner=\"@drawable/channel_forge_tv_banner\"", manifest)
         self.assertIn("DIRECTORY_FALLBACK_URL", gradle)
@@ -55,6 +57,8 @@ class TvAppTests(unittest.TestCase):
         workflow = (root / ".github/workflows/tv-apps.yml").read_text(encoding="utf-8")
         self.assertIn("KeyboardDialog", scene)
         self.assertIn("connectPaired", scene)
+        self.assertIn("refreshCatalog", scene)
+        self.assertIn("directoryTimer", (root / "tv/roku/components/MainScene.xml").read_text(encoding="utf-8"))
         self.assertIn("m.top.fallbackUrl", catalog)
         self.assertIn("mm_icon_focus_fhd=pkg:/images/channel-forge-tv.png", manifest)
         self.assertIn("manifest source components images", workflow)
@@ -99,6 +103,8 @@ class TvAppTests(unittest.TestCase):
         self.assertIn('id="home-changelog"', tv.HTML)
         self.assertIn('data-section-block="cinema" hidden><h2>CREATOR STUDIOS', tv.HTML)
         self.assertIn("if(name==='cinema'&&selectedCreator&&!vaultItems.length)studio(selectedCreator)", tv.HTML)
+        self.assertIn("if(manual){await load();return liveChannels}", tv.HTML)
+        self.assertIn("scanChannels(true)", tv.HTML)
 
     def test_tv_has_program_details_favorites_and_mini_player(self):
         self.assertIn('id="program-dialog"', tv.HTML)

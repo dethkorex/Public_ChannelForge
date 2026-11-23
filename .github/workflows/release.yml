@@ -40,11 +40,6 @@ jobs:
         with:
           name: Public_ChannelForge-Windows
           path: release/*
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: release/*
-          generate_release_notes: true
 
   linux-installers:
     needs: test
@@ -75,9 +70,68 @@ jobs:
         with:
           name: Public_ChannelForge-Linux
           path: release/*
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+
+  fire-tv:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
         with:
-          files: release/*
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Build installable Fire TV APK
+        run: |
+          gradle -p tv/firetv :app:assembleDebug
+          mkdir -p tv-release
+          cp tv/firetv/app/build/outputs/apk/debug/app-debug.apk tv-release/ChannelForgeTV-FireTV.apk
+          sha256sum tv-release/ChannelForgeTV-FireTV.apk > tv-release/SHA256SUMS-TV.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChannelForge-TV-FireTV
+          path: tv-release/*
+
+  roku:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package Roku channel
+        run: |
+          mkdir -p tv-release
+          cd tv/roku
+          zip -r ../../tv-release/ChannelForgeTV-Roku.zip manifest source components images
+          cd ../..
+          sha256sum tv-release/ChannelForgeTV-Roku.zip > tv-release/SHA256SUMS-Roku.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChannelForge-TV-Roku
+          path: tv-release/*
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows-installer, linux-installers, fire-tv, roku]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*ChannelForge*"
+          path: release-assets
+          merge-multiple: true
+      - name: Verify complete release set
+        run: |
+          test -f release-assets/ChannelForge_Setup.exe
+          test -f release-assets/SHA256SUMS.txt
+          test -f release-assets/ChannelForgeTV-FireTV.apk
+          test -f release-assets/SHA256SUMS-TV.txt
+          test -f release-assets/ChannelForgeTV-Roku.zip
+          test -f release-assets/SHA256SUMS-Roku.txt
+          test -f release-assets/SHA256SUMS-Linux.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
           generate_release_notes: true
 

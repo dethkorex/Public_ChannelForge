@@ -7,6 +7,11 @@ from directory import server
 
 
 class DirectoryTests(unittest.TestCase):
+    def test_worker_reactivates_creator_when_it_republishes_after_restart(self):
+        worker = (Path(__file__).resolve().parents[1] / "directory/worker/src/index.js").read_text(encoding="utf-8")
+        self.assertIn('online:true,last_ok:now,failures:0,updated_at:now', worker)
+        self.assertIn('must be online before republishing', worker)
+
     def setUp(self):
         server.DB_PATH = Path(tempfile.mkdtemp(prefix="channel-forge-directory-")) / "directory.db"
         os.environ["CHANNELFORGE_DIRECTORY_ALLOW_HTTP"] = "1"

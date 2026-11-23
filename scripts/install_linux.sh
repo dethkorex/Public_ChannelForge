@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/Public_ChannelForge.py" ]]; then
+  ROOT="$SCRIPT_DIR"
+elif [[ -f "$SCRIPT_DIR/../Public_ChannelForge.py" ]]; then
+  ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+else
+  echo "ChannelForge application files were not found beside this installer. Extract the complete archive and try again."
+  exit 1
+fi
 
 install_dependencies() {
   local elevate=()
