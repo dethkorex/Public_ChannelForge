@@ -1750,8 +1750,8 @@ def start_or_reuse_encoder(channel: dict) -> str:
                    ["-hls_list_size", "5", "-hls_flags", "delete_segments+independent_segments"])
     relay_encoding = []
     if config()["public_tunnel"]:
-        relay_encoding = ["-vf", "scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-                          "-b:v", "360k", "-maxrate", "420k", "-bufsize", "420k", "-b:a", "64k"]
+        relay_encoding = ["-vf", "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                          "-b:v", "420k", "-maxrate", "500k", "-bufsize", "500k", "-b:a", "64k"]
     command = [
         ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin",
         *input_timing, "-i", media_input, *output_timing,

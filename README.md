@@ -12,7 +12,7 @@ Version 3.2 adds three public components without changing the owner's private Ch
 
 Use **Go live worldwide** in Creator to list channels and movies you have permission to share. Creator starts a read-only media listener and connects it to the free localhost.run relay. The Windows installer bundles the relay client, and the Linux packages install it as a dependency. Creator reconnects and republishes when its relay address changes. Browsing the guide or movie catalog leaves playback idle. Viewers trigger playback when they press Play, and viewers tuning the same program share an encoder.
 
-Viewers install ChannelForge TV and browse published studios automatically. Keep Creator running while sharing media. Cloudflare hosts the directory metadata, and video streams from the creator's machine. The free relay rotates addresses and limits bandwidth, so automatic sharing uses a video profile up to 480p. Studios that already run a public HTTPS media origin can enter it under **Advanced sharing settings** and point it at `127.0.0.1:8790`.
+Viewers install ChannelForge TV and browse published studios automatically. Keep Creator running while sharing media. Cloudflare hosts the directory metadata, and video streams from the creator's machine. Automatic sharing supports up to 720p, with a bitrate capped for the free relay. Studios that already run a public HTTPS media origin can enter it under **Advanced sharing settings** and point it at `127.0.0.1:8790`.
 
 Source and deployment instructions are in [`directory/`](directory/), [`tv/firetv/`](tv/firetv/), and [`tv/roku/`](tv/roku/). Tagged releases build the installable Fire TV APK and Roku ZIP automatically.
 

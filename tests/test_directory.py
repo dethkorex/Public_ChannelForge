@@ -9,14 +9,14 @@ from directory import server
 class DirectoryTests(unittest.TestCase):
     def test_worker_reactivates_creator_when_it_republishes_after_restart(self):
         worker = (Path(__file__).resolve().parents[1] / "directory/worker/src/index.js").read_text(encoding="utf-8")
-        self.assertIn('online:true,last_ok:now,failures:0,updated_at:now', worker)
+        self.assertRegex(worker, r"online:\s*true,\s*last_ok:\s*now,\s*failures:\s*0,\s*updated_at:\s*now")
         self.assertIn('must be online before republishing', worker)
 
     def test_worker_stays_within_free_tier_health_check_limits(self):
         worker = (Path(__file__).resolve().parents[1] / "directory/worker/src/index.js").read_text(encoding="utf-8")
-        self.assertIn("Math.min(10,keys.length)", worker)
+        self.assertIn("Math.min(8,keys.length)", worker)
         self.assertIn("An already-offline creator causes no further writes", worker)
-        self.assertIn('env.CREATORS.get("catalog:v1","json")', worker)
+        self.assertRegex(worker, r'env\.CREATORS\.get\("catalog:v1",\s*"json"\)')
 
     def setUp(self):
         server.DB_PATH = Path(tempfile.mkdtemp(prefix="channel-forge-directory-")) / "directory.db"
