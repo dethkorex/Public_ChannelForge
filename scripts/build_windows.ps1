@@ -34,6 +34,7 @@ Expand-Archive -LiteralPath $sshArchive -DestinationPath $buildRoot -Force
 $sshSource = Join-Path $buildRoot "OpenSSH-Win64"
 $sshArguments = @(
     "--add-binary", "$sshSource\ssh.exe;openssh",
+    "--add-binary", "$sshSource\ssh-keygen.exe;openssh",
     "--add-binary", "$sshSource\libcrypto.dll;openssh",
     "--add-data", "$sshSource\LICENSE.txt;openssh",
     "--add-data", "$sshSource\NOTICE.txt;openssh"

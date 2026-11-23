@@ -36,11 +36,12 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.13"
+VERSION = "3.5.14"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
 RELAY_HOST_KEY = "localhost.run ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9"
+RELAY_INSTANCE = secrets.token_hex(20)
 DEFAULT_DIRECTORY_URL = "https://channelforge-directory.fresh-anorak.workers.dev"
 OLD_DIRECTORY_URL = "https://directory.channelforge.tv"
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -1613,27 +1614,55 @@ def relay_address(event: str) -> str:
     return "https://" + address if isinstance(address, str) and re.fullmatch(r"[a-z0-9-]+\.app\.lhr\.life", address) else ""
 
 
+def openssh_tool(name: str) -> str | None:
+    executable = name + ".exe" if sys.platform == "win32" else name
+    bundled = Path(getattr(sys, "_MEIPASS", "")) / "openssh" / executable
+    return str(bundled) if getattr(sys, "frozen", False) and bundled.is_file() else shutil.which(name)
+
+
+def relay_key_path() -> Path:
+    identity = DATA_DIR / "relay-identity"
+    if not identity.is_file():
+        keygen = openssh_tool("ssh-keygen")
+        if not keygen:
+            raise ValueError("ChannelForge could not find the OpenSSH key generator. Install the current ChannelForge package.")
+        subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-C", "ChannelForge Media Relay", "-f", str(identity)],
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=8, check=True,
+                       creationflags=0x08000000 if sys.platform == "win32" else 0)
+    return identity
+
+
+def relay_reaches_this_creator(origin: str) -> bool:
+    request = urllib.request.Request(f"{origin}/api/public/origin?check={secrets.token_hex(6)}",
+                                     headers={"Accept": "application/json", "Cache-Control": "no-cache"})
+    try:
+        with urllib.request.urlopen(request, timeout=4) as response:
+            return json.loads(response.read(512)).get("instance") == RELAY_INSTANCE
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def start_public_tunnel() -> str:
     global TUNNEL_PROCESS, TUNNEL_URL, TUNNEL_URLS
     with TUNNEL_LOCK:
         if PUBLIC_MEDIA_SERVER is None:
             raise ValueError("The read-only media server is not running.")
         if TUNNEL_PROCESS is None or TUNNEL_PROCESS.poll() is not None:
-            bundled = Path(getattr(sys, "_MEIPASS", "")) / "openssh" / "ssh.exe"
-            ssh = str(bundled) if getattr(sys, "frozen", False) and bundled.is_file() else shutil.which("ssh")
+            ssh = openssh_tool("ssh")
             if not ssh:
                 raise ValueError("Automatic public sharing requires OpenSSH, which was not found on this computer.")
             known_hosts = DATA_DIR / "relay-known-hosts"
             known_hosts.write_text(RELAY_HOST_KEY + "\n", encoding="ascii")
+            identity = relay_key_path()
             null = "NUL" if sys.platform == "win32" else "/dev/null"
             process = subprocess.Popen(
                 [ssh, "-F", null, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                 "-o", "IdentityFile=none", "-o", "IdentityAgent=none",
+                 "-i", str(identity), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
                  "-o", "StrictHostKeyChecking=yes", "-o", "HostKeyAlgorithms=ssh-ed25519",
                  "-o", f'UserKnownHostsFile="{known_hosts.as_posix()}"', "-o", f"GlobalKnownHostsFile={null}",
                  "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
                  "-o", "ServerAliveCountMax=2", "-R", f"80:{HOST}:{PUBLIC_MEDIA_SERVER.server_port}",
-                 "nokey@localhost.run", "--", "--output", "json"],
+                 "channelforge@localhost.run", "--", "--output", "json"],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
                 creationflags=0x08000000 if sys.platform == "win32" else 0,
@@ -1651,16 +1680,19 @@ def start_public_tunnel() -> str:
 
             threading.Thread(target=read_output, daemon=True, name="channel-forge-relay-output").start()
         deadline = time.monotonic() + 25
+        candidate = ""
         while TUNNEL_PROCESS.poll() is None:
             try:
-                TUNNEL_URL = TUNNEL_URLS.get_nowait()
-                continue
+                candidate = TUNNEL_URLS.get_nowait()
             except queue.Empty:
-                if TUNNEL_URL:
-                    return TUNNEL_URL
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.15)
+                pass
+            if candidate and candidate != TUNNEL_URL and relay_reaches_this_creator(candidate):
+                TUNNEL_URL = candidate
+            if TUNNEL_URL and (not candidate or candidate == TUNNEL_URL):
+                return TUNNEL_URL
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.35 if candidate else 0.15)
         stop_public_tunnel()
         raise ValueError("Could not open the free media relay. Check the internet connection and try again.")
 
@@ -2336,6 +2368,8 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/public/channels":
                 extended = urllib.parse.parse_qs(parsed.query).get("guide") == ["extended"]
                 self.send_json(200, public_channel_catalog(self.catalog_base(), extended=extended))
+            elif parsed.path == "/api/public/origin":
+                self.send_json(200, {"instance": RELAY_INSTANCE})
             elif parsed.path == "/api/update":
                 release = latest_release()
                 release.pop("assets", None)
@@ -2564,7 +2598,7 @@ class PublicMediaHandler(Handler):
             if not re.fullmatch(r"/library/metadata/\d+/(?:thumb|art)(?:/\d+)?", image):
                 return self.send_json(404, {"error": "Not found"})
         elif path not in {
-            "/api/public/channels", "/api/public/vault", "/api/local/image",
+            "/api/public/channels", "/api/public/vault", "/api/public/origin", "/api/local/image",
             "/exports/guide.xml", "/exports/channels.m3u",
         } and not re.fullmatch(
             r"/(?:live|vault)/[a-zA-Z0-9_-]+\.m3u8|"

@@ -46,9 +46,11 @@ ChannelForge v3.5.10 shows channels as each studio responds, compresses large gu
 
 ChannelForge v3.5.11 binds automatic worldwide sharing to the running Creator, while same-PC viewing uses the direct connection. The public relay offers an economical video rendition alongside 720p. **Publish worldwide when I save** is selected by default when creating a channel and can be turned off for a private studio.
 
-From v3.5.12 onward, Fire TV releases use one permanent signing certificate. To switch from an earlier sideloaded build, uninstall it once and install the new official APK. Future updates signed with this certificate can install in place. Live channels also keep recently evicted segments available for slow connections.
+Fire TV releases use one permanent signing certificate. To switch from an earlier sideloaded build, uninstall it once and install the new official APK. Future updates signed with this certificate can install in place. Live channels also keep recently evicted segments available for slow connections.
 
 ChannelForge v3.5.13 adds a compact desktop live guide with the preview on the left and the next several hours of programming below. Desktop, Fire TV, and Roku show buffering and reconnecting messages during playback, and live overlays identify the channel and upcoming program. Creator supports persistent media connections, and the desktop viewer reuses connections for playlist and segment requests.
+
+ChannelForge v3.5.14 gives each Creator its own relay identity and verifies the public address before publishing. Automatic sharing continues to use the creator’s machine and the free relay.
 
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
@@ -102,7 +104,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.13-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.5.14-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation
