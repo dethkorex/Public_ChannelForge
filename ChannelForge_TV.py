@@ -20,7 +20,7 @@ from pathlib import Path
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.22"
+VERSION = "3.5.23"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -1076,6 +1076,7 @@ $('#cinema-expand').onclick=expandCinemaMovie;
 $('#cinema-studio-select').onchange=event=>selectCinemaStudio(allCreators.find(creator=>creator.playlist_url===event.target.value));
 function reflectApplicationFullscreen(active){
     const button=$('#desktop-fullscreen');
+    document.documentElement.classList.toggle('application-fullscreen',active);
     button.setAttribute('aria-pressed',String(active));
     button.title=active?'Exit fullscreen (F11)':'Enter fullscreen (F11)';
     button.setAttribute('aria-label',button.title);
@@ -1286,6 +1287,7 @@ function showScreen(name){
     if(name==='cinema'&&selectedCreator)studio(selectedCreator);
     if(innerWidth<=900)document.body.classList.remove('menu-open');
     window.scrollTo(0,0);
+    document.querySelector('main.wrap').scrollTop=0;
 }
 '''
 

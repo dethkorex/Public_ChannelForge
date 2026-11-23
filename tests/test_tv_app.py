@@ -139,6 +139,8 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("overflow: hidden auto", cinema)
         self.assertIn(".cinema-movie:is(:hover,:focus-visible) .cinema-case", cinema)
         self.assertIn("prefers-reduced-motion", cinema)
+        self.assertIn(".application-fullscreen .cinema-mode main.wrap", cinema)
+        self.assertIn("grid-template-rows: auto auto minmax(0, 1fr)", cinema)
         self.assertIn("$('#selected-play')?.focus", tv.HTML)
         self.assertIn('id="cinema-monitor" hidden', tv.HTML)
         self.assertIn("v.controls=!liveMode", tv.HTML)

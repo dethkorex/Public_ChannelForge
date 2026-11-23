@@ -68,6 +68,8 @@ Creator scans connected Plex movie libraries on startup. Eligible studios publis
 
 ChannelForge v3.5.22 updates Fire TV playback to Media3 for adaptive HLS. Live TV viewers refresh the guide as programs roll over, show the upcoming program, and offer an offline message if a channel is unavailable.
 
+ChannelForge v3.5.23 fits Rewind Cinema to the fullscreen display. The shelf and movie details scroll inside their panels. Moving the window to a display in an extended desktop before entering fullscreen uses that display.
+
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
 ![ChannelForge TV home hub](preview/channel-forge-tv-v346-home.png)
@@ -120,7 +122,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.22-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.5.23-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation
