@@ -4,3 +4,6 @@ minor_version=5
 build_version=0
 ui_resolutions=fhd
 bs_const=directory_url=https://directory.channelforge.tv/v1/catalog
+mm_icon_focus_fhd=pkg:/images/channel-forge-tv.png
+splash_screen_fhd=pkg:/images/channel-forge-tv.png
+splash_color=#070817

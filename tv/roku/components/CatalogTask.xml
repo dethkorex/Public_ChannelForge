@@ -1,2 +1,2 @@
 <?xml version="1.0" encoding="utf-8" ?>
-<component name="CatalogTask" extends="Task"><interface><field id="url" type="string"/><field id="content" type="node"/></interface><script type="text/brightscript" uri="CatalogTask.brs"/></component>
+<component name="CatalogTask" extends="Task"><interface><field id="url" type="string"/><field id="fallbackUrl" type="string"/><field id="content" type="node"/></interface><script type="text/brightscript" uri="CatalogTask.brs"/></component>

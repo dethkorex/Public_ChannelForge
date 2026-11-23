@@ -42,6 +42,28 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("DIRECTORY_FALLBACK_URL", gradle)
         self.assertTrue((root / "tv/firetv/app/src/main/res/drawable/channel_forge_tv_icon.png").is_file())
 
+    def test_roku_is_viewer_only_with_fallback_pairing_and_branding(self):
+        root = Path(__file__).resolve().parents[1]
+        scene = (root / "tv/roku/components/MainScene.brs").read_text(encoding="utf-8")
+        catalog = (root / "tv/roku/components/CatalogTask.brs").read_text(encoding="utf-8")
+        manifest = (root / "tv/roku/manifest").read_text(encoding="utf-8")
+        workflow = (root / ".github/workflows/tv-apps.yml").read_text(encoding="utf-8")
+        self.assertIn("KeyboardDialog", scene)
+        self.assertIn("connectPaired", scene)
+        self.assertIn("m.top.fallbackUrl", catalog)
+        self.assertIn("mm_icon_focus_fhd=pkg:/images/channel-forge-tv.png", manifest)
+        self.assertIn("manifest source components images", workflow)
+        self.assertNotIn("Public_ChannelForge.py", "\n".join(path.name for path in (root / "tv/roku").rglob("*")))
+
+    def test_linux_packages_and_installer_include_creator_and_tv(self):
+        root = Path(__file__).resolve().parents[1]
+        packaging = (root / "packaging/build_linux_packages.sh").read_text(encoding="utf-8")
+        installer = (root / "scripts/install_linux.sh").read_text(encoding="utf-8")
+        self.assertIn('Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py', packaging)
+        self.assertIn('public-channelforge"', installer)
+        self.assertIn('channelforge-tv"', installer)
+        self.assertIn("Installed both apps", installer)
+
     def test_tv_prefers_hls_js_and_batches_large_movie_shelves(self):
         hls_branch = "if(window.Hls&&Hls.isSupported())"
         native_fallback = "else if(v.canPlayType('application/vnd.apple.mpegurl'))"

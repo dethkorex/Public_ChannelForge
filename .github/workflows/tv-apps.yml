@@ -44,7 +44,7 @@ jobs:
         run: |
           mkdir -p tv-release
           cd tv/roku
-          zip -r ../../tv-release/ChannelForgeTV-Roku.zip manifest source components
+          zip -r ../../tv-release/ChannelForgeTV-Roku.zip manifest source components images
           cd ../..
           sha256sum tv-release/ChannelForgeTV-Roku.zip > tv-release/SHA256SUMS-Roku.txt
       - uses: actions/upload-artifact@v4

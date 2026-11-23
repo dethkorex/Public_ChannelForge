@@ -1,14 +1,64 @@
 sub init()
-  m.guide = m.top.findNode("guide") : m.video = m.top.findNode("video") : m.creators = m.top.findNode("creators") : m.channels = m.top.findNode("channels") : m.vault = m.top.findNode("vault") : m.updates = m.top.findNode("updates") : m.status = m.top.findNode("status")
-  m.creators.observeField("itemSelected", "creatorSelected") : m.channels.observeField("itemSelected", "channelSelected") : m.vault.observeField("itemSelected", "vaultSelected") : m.updates.observeField("buttonSelected", "checkUpdates")
-  task = CreateObject("roSGNode", "CatalogTask") : task.url = "https://directory.channelforge.tv/v1/catalog" : task.observeField("content", "catalogLoaded") : task.control = "run"
+  m.guide = m.top.findNode("guide") : m.video = m.top.findNode("video") : m.creators = m.top.findNode("creators") : m.channels = m.top.findNode("channels") : m.vault = m.top.findNode("vault") : m.pair = m.top.findNode("pair") : m.updates = m.top.findNode("updates") : m.status = m.top.findNode("status")
+  m.creators.observeField("itemSelected", "creatorSelected") : m.channels.observeField("itemSelected", "channelSelected") : m.vault.observeField("itemSelected", "vaultSelected") : m.pair.observeField("buttonSelected", "showPairing") : m.updates.observeField("buttonSelected", "checkUpdates")
+  task = CreateObject("roSGNode", "CatalogTask") : task.url = "https://directory.channelforge.tv/v1/catalog" : task.fallbackUrl = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json" : task.observeField("content", "catalogLoaded") : task.control = "run"
   m.catalogTask = task
 end sub
 sub catalogLoaded()
   m.creators.content = m.catalogTask.content
   m.status.text = m.catalogTask.content.GetChildCount().ToStr() + " creator studios online"
   m.creators.SetFocus(true)
-  if m.catalogTask.content.GetChildCount() > 0 then loadCreator(0)
+  if m.catalogTask.content.GetChildCount() > 0
+    loadCreator(0)
+  else
+    registry = CreateObject("roRegistrySection", "ChannelForge")
+    paired = registry.Read("creator_url")
+    if paired <> ""
+      connectPaired(paired)
+    else
+      m.status.text = "No public creators found. Select PAIR CREATOR to enter a secure Creator URL."
+      m.pair.SetFocus(true)
+    end if
+  end if
+end sub
+sub showPairing()
+  dialog = CreateObject("roSGNode", "KeyboardDialog")
+  dialog.title = "Pair ChannelForge Creator"
+  dialog.message = "Enter the HTTPS pairing URL shown in Creator under Publish worldwide."
+  dialog.buttons = ["PAIR", "CANCEL"]
+  dialog.observeField("buttonSelected", "pairingSelected")
+  m.top.dialog = dialog
+end sub
+sub pairingSelected()
+  dialog = m.top.dialog
+  if dialog = invalid then return
+  if dialog.buttonSelected = 0
+    base = dialog.text.Trim()
+    while right(base, 1) = "/"
+      base = left(base, len(base) - 1)
+    end while
+    suffix = "/api/public/channels"
+    if len(base) > len(suffix) and right(base, len(suffix)) = suffix then base = left(base, len(base) - len(suffix))
+    if left(base, 8) <> "https://"
+      m.status.text = "Pairing URLs must begin with https://"
+    else
+      registry = CreateObject("roRegistrySection", "ChannelForge")
+      registry.Write("creator_url", base)
+      registry.Flush()
+      connectPaired(base)
+    end if
+  end if
+  dialog.close = true
+end sub
+sub connectPaired(base as string)
+  root = CreateObject("roSGNode", "ContentNode")
+  creator = root.CreateChild("ContentNode")
+  creator.title = "Paired Creator"
+  creator.description = "Direct secure pairing"
+  creator.url = base + "/exports/channels.m3u"
+  creator.shortDescriptionLine2 = base + "/api/public/vault"
+  m.creators.content = root
+  loadCreator(0)
 end sub
 sub creatorSelected()
   loadCreator(m.creators.itemSelected)
@@ -63,7 +113,10 @@ function onKeyEvent(key as string, press as boolean) as boolean
   if key = "right" and m.guide.visible and not m.vault.HasFocus() then m.channels.SetFocus(true) : return true
   if key = "down" and m.guide.visible and m.channels.HasFocus() and m.channels.itemFocused >= m.channels.content.GetChildCount() - 1 then m.vault.SetFocus(true) : return true
   if key = "up" and m.guide.visible and m.vault.HasFocus() then m.channels.SetFocus(true) : return true
-  if key = "up" and m.guide.visible and m.creators.HasFocus() then m.updates.SetFocus(true) : return true
+  if key = "up" and m.guide.visible and m.creators.HasFocus() then m.pair.SetFocus(true) : return true
+  if key = "right" and m.guide.visible and m.pair.HasFocus() then m.updates.SetFocus(true) : return true
+  if key = "left" and m.guide.visible and m.updates.HasFocus() then m.pair.SetFocus(true) : return true
   if key = "down" and m.guide.visible and m.updates.HasFocus() then m.channels.SetFocus(true) : return true
+  if key = "down" and m.guide.visible and m.pair.HasFocus() then m.creators.SetFocus(true) : return true
   return false
 end function
