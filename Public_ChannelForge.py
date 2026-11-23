@@ -43,7 +43,7 @@ from release_metadata import read_latest_release
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.6.1"
+VERSION = "3.6.2"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -621,8 +621,6 @@ def update_channel_run(channel_id, action):
         finished = run_finished(channel)
         if action == "shuffle":
             previous_order = scheduled_items(channel)
-            if channel.get("playback_mode") != "shuffle_in_order":
-                channel["playback_mode"] = "shuffle"
             for _ in range(16):
                 channel["shuffle_seed"] = secrets.token_hex(8)
                 if scheduled_items(channel) != previous_order:
@@ -1527,11 +1525,16 @@ def save_channel(payload: dict, channel_id: str = "") -> dict:
                 payload = {**payload, "schedule_anchor": previous.get("schedule_anchor")}
         item = clean_channel(payload, channel_id)
         if channel_id and previous:
-            if previous.get("shuffle_seed"):
+            restore = payload.get("restore_preset") is True
+            if previous.get("shuffle_seed") and not restore and item["playback_mode"] == previous.get("playback_mode", "ordered"):
                 item["shuffle_seed"] = previous["shuffle_seed"]
             old_end = parse_timestamp(previous["air_until"])
             item["air_until"] = (old_end if run_finished(previous) else
                                  old_end - lineup_duration(previous) + lineup_duration(item)).isoformat()
+            if restore and not run_finished(previous):
+                now = datetime.now(timezone.utc)
+                item["schedule_anchor"] = now.isoformat()
+                item["air_until"] = (now + lineup_duration(item)).isoformat()
         else:
             item["air_until"] = current_run_end(item).isoformat()
         if channel_id:
@@ -1680,7 +1683,7 @@ def scheduled_items(channel: dict) -> list[dict]:
         return f'{source}:{item.get("id", "")}' if source else str(item.get("id", ""))
 
     stable_key = lambda item: hashlib.sha256(f"{seed}:{item_identity(item)}".encode()).hexdigest()
-    if mode == "shuffle":
+    if mode == "shuffle" or (mode == "ordered" and channel.get("shuffle_seed")):
         return sorted(items, key=stable_key)
     if mode == "franchise":
         # Build mixed movie/show blocks. A show's episodes stay in strict
@@ -1709,13 +1712,16 @@ def scheduled_items(channel: dict) -> list[dict]:
             families.setdefault(family, []).append(block)
             family_order[family] = min(family_order.get(family, block["original"]), block["original"])
         result = []
-        for family in sorted(families, key=lambda value: family_order[value]):
+        family_names = sorted(families, key=family_order.get)
+        if channel.get("shuffle_seed"):
+            family_names.sort(key=lambda name: hashlib.sha256(f"{seed}:{name}".encode()).digest())
+        for family in family_names:
             ordered = sorted(families[family], key=lambda block: franchise_block_order(family, block["title"], block["year"], block["original"]))
             for block in ordered:
                 result.extend(sorted(block["items"], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", "")))))
         return result
     if mode in {"shuffle_in_order", "marathon"}:
-        groups: dict[str, list[dict]] = {}
+        groups: dict[tuple[str, str, str], list[dict]] = {}
         seen_ids: set[str] = set()
         for item in items:
             item_id = item_identity(item)
@@ -1724,11 +1730,12 @@ def scheduled_items(channel: dict) -> list[dict]:
             if item_id:
                 seen_ids.add(item_id)
             title = str(item.get("title") or item.get("id"))
-            group = str(item.get("series") or title)
+            series = str(item.get("series") or "").strip()
+            group = ("show", series, str(item.get("plex_server_id") or "")) if series else ("movie", title, item_id)
             groups.setdefault(group, []).append(item)
         group_names = list(groups)
-        if mode == "shuffle_in_order":
-            group_names.sort(key=lambda name: hashlib.sha256(f"{seed}:{name}".encode()).hexdigest())
+        if mode == "shuffle_in_order" or channel.get("shuffle_seed"):
+            group_names.sort(key=lambda group: hashlib.sha256(f"{seed}:{group[1]}".encode()).hexdigest())
         ordered_groups = {
             name: sorted(groups[name], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", ""))))
             for name in group_names

@@ -309,12 +309,19 @@ function renderChannelBrandingPreview(){
 for(const control of ["#channel-background","#channel-logo","#channel-corner-bug","#channel-name","#channel-number"]){
   $(control).addEventListener("input",renderChannelBrandingPreview);
 }
+let restorePresetOnSave = false;
+$("#restore-preset").onclick = () => {
+  restorePresetOnSave = true;
+  toast("Save the channel to start its selected preset from the beginning.");
+};
 async function openChannel(channel = null) {
   if (!state.config.token_saved && !state.config.local_libraries?.length) {
     toast("Add a local folder or connect Plex in Sources & Sharing first.", true);
     return;
   }
   $("#channel-form").reset();
+  restorePresetOnSave = false;
+  $("#restore-preset").hidden = !channel;
   $("#channel-id").value = channel?.id || "";
   $("#channel-name").value = channel?.name || "";
   $("#channel-number").value = channel?.number || nextChannelNumber();
@@ -348,7 +355,7 @@ async function openChannel(channel = null) {
   $("#publish-on-save").disabled = Boolean(state.config.creator_published);
   renderChannelBrandingPreview();
   $("#channel-dialog").showModal();
-  setBuilderStep(channel ? 2 : 1);
+  setBuilderStep(1);
   await loadBuilderLibraries(channel?.section);
 }
 
@@ -387,7 +394,7 @@ $("#channel-library").addEventListener("change", event => {
   resetBuilderFilters();
   loadMedia(event.target.value);
 });
-$("#channel-form").addEventListener("submit",async event=>{event.preventDefault();const items=[...selectedLineup.values()].flatMap(choice=>choice.items);if(!items.length){toast("Select at least one playable title.",true);return}const id=$("#channel-id").value,payload={name:$("#channel-name").value,number:$("#channel-number").value,section:items[0].section,playback_mode:$("#playback-mode").value,logo_asset_id:$("#channel-logo").value,background_asset_id:$("#channel-background").value,corner_bug_asset_id:$("#channel-corner-bug").value,items};if(!id)payload.publish_worldwide=$("#publish-on-save").checked;try{const saved=await api(id?`/api/channels/${id}`:"/api/channels",{method:id?"PUT":"POST",body:JSON.stringify(payload)});$("#channel-dialog").close();await refresh();toast(saved.publishing_pending?"Channel saved. Publishing this studio worldwide in the background.":"Channel saved and guide regenerated.")}catch(e){toast(e.message,true)}});
+$("#channel-form").addEventListener("submit",async event=>{event.preventDefault();const items=[...selectedLineup.values()].flatMap(choice=>choice.items);if(!items.length){toast("Select at least one playable title.",true);return}const id=$("#channel-id").value,payload={name:$("#channel-name").value,number:$("#channel-number").value,section:items[0].section,playback_mode:$("#playback-mode").value,logo_asset_id:$("#channel-logo").value,background_asset_id:$("#channel-background").value,corner_bug_asset_id:$("#channel-corner-bug").value,items};if(id && restorePresetOnSave)payload.restore_preset=true;if(!id)payload.publish_worldwide=$("#publish-on-save").checked;try{const saved=await api(id?`/api/channels/${id}`:"/api/channels",{method:id?"PUT":"POST",body:JSON.stringify(payload)});$("#channel-dialog").close();await refresh();toast(saved.publishing_pending?"Channel saved. Publishing this studio worldwide in the background.":"Channel saved and guide regenerated.")}catch(e){toast(e.message,true)}});
 $("#generate-asset").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/assets/generate",{method:"POST",body:JSON.stringify({name:$("#asset-name").value,kind:$("#asset-kind").value,primary:$("#asset-primary").value,secondary:$("#asset-secondary").value})});await refresh();toast("Original artwork generated.")}catch(e){toast(e.message,true)}});
 $("#upload-asset").addEventListener("submit",async event=>{event.preventDefault();const file=$("#upload-file").files[0];if(!file)return;try{const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error("Could not read that file."));reader.readAsDataURL(file)});await api("/api/assets/upload",{method:"POST",body:JSON.stringify({name:$("#upload-name").value,kind:$("#upload-kind").value,data})});event.target.reset();await refresh();toast("Artwork added to your library.")}catch(e){toast(e.message,true)}});
 $("#close-dialog").onclick=$("#cancel-dialog").onclick=()=>$("#channel-dialog").close();
@@ -413,12 +420,6 @@ for(const selector of ["#smart-genre","#smart-year-min","#smart-year-max","#smar
 $("#smart-select").onclick = () => {
   const matches = filteredMediaChoices();
   for (const choice of matches) selectedLineup.set(choice.key, choice);
-  const mode = $("#playback-mode");
-  const choices = [...selectedLineup.values()];
-  if (mode.value === "ordered" && matches.length) {
-    if (choices.every(choice => choice.type === "show")) mode.value = "shuffle_in_order";
-    if (choices.every(choice => choice.type === "movie")) mode.value = "marathon";
-  }
   updateMediaSelection();
   toast(matches.length ? `Added ${matches.length} matching shows and titles.` : "No titles match those filters.", !matches.length);
 };

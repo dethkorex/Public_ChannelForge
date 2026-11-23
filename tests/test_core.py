@@ -274,6 +274,29 @@ class CoreTests(unittest.TestCase):
             episodes = [item["episode"] for item in lineup if item["series"] == series]
             self.assertEqual(episodes, sorted(episodes))
 
+    def test_reshuffle_then_restore_mixed_marathon(self):
+        items = [{"id": show + str(ep), "title": show + str(ep), "series": show,
+                  "episode": ep, "season": 1} for show in ("B", "A") for ep in (2, 1)]
+        items.insert(2, {"id": "film", "title": "Movie"})
+        channel = app.save_channel({"name": "Mixed marathon", "number": "8",
+                                    "playback_mode": "marathon", "items": items})
+        def ids(value):
+            return [item["id"] for item in app.scheduled_items(value)]
+        expected = ["B1", "B2", "film", "A1", "A2"]
+        self.assertEqual(ids(channel), expected)
+        shuffled = app.update_channel_run(channel["id"], "shuffle")
+        self.assertEqual(shuffled["playback_mode"], "marathon")
+        changed = ids(shuffled)
+        self.assertNotEqual(changed, expected)
+        for show in ("A", "B"):
+            index = changed.index(show + "1")
+            self.assertEqual(changed[index:index + 2], [show + "1", show + "2"])
+        edited = app.save_channel(shuffled, channel["id"])
+        self.assertEqual(ids(edited), changed)
+        app.save_channel({**edited, "restore_preset": True}, channel["id"])
+        self.assertEqual(ids(app.channels()[0]), expected)
+        self.assertNotIn("shuffle_seed", app.channels()[0])
+
     def test_shuffle_shows_rotates_series_and_never_repeats_an_episode(self):
         items = [
             {"id": "a1", "title": "A 1", "series": "Show A", "season": 1, "episode": 1},
