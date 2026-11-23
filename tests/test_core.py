@@ -749,6 +749,51 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(app.FFMPEG_SESSIONS)
             self.assertEqual(list(Path(temporary).iterdir()), [])
 
+    def test_public_and_local_viewers_join_one_published_channel(self):
+        channel = {"id": "shared", "schedule_anchor": "2026-01-01T00:00:00Z"}
+        settings = {"creator_profile": {"name": "Studio"}, "public_tunnel": True,
+                    "public_url": "https://studio.example"}
+        with mock.patch.object(app, "config", return_value=settings), \
+             mock.patch.object(app, "channels", return_value=[channel]), \
+             mock.patch.object(app, "LIVE_PLAYOUT", {}), \
+             mock.patch.object(app.LivePlayout, "run"):
+            manifests = []
+            for kind in (app.Handler, app.PublicMediaHandler):
+                handler = object.__new__(kind)
+                handler.send_bytes = mock.Mock()
+                handler.broadcast("shared", "master", None)
+                manifests.append(handler.send_bytes.call_args.args[1])
+            self.assertEqual(len(app.LIVE_PLAYOUT), 1)
+            self.assertIn(b"/broadcast/shared/", manifests[0])
+            self.assertEqual(manifests[0], manifests[1])
+
+    def test_playlist_read_survives_a_file_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            playlist = Path(temp) / "index.m3u8"
+            playlist.write_bytes(b"#EXTM3U\n")
+            original = open
+            attempts = [PermissionError(), FileNotFoundError()]
+            def open_during_replace(*args, **kwargs):
+                if attempts:
+                    raise attempts.pop(0)
+                return original(*args, **kwargs)
+            with mock.patch("builtins.open", side_effect=open_during_replace):
+                self.assertEqual(app.read_encoder_playlist(playlist), b"#EXTM3U\n")
+
+    @unittest.skipUnless(os.name == "nt", "Windows file sharing")
+    def test_open_playlist_does_not_lock_the_filename_on_windows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            playlist = directory / "index.m3u8"
+            playlist.write_bytes(b"first")
+            replacement = directory / "index.m3u8.tmp"
+            replacement.write_bytes(b"second")
+            with open(playlist, "rb", opener=app.open_shared_playlist) as reader:
+                playlist.rename(directory / "previous.m3u8")
+                os.replace(replacement, playlist)
+                self.assertEqual(reader.read(), b"first")
+            self.assertEqual(app.read_encoder_playlist(playlist), b"second")
+
     def test_continuous_media_manifest_marks_transition_and_final_segment(self):
         feed = app.LivePlayout(lambda boundary: None)
         boundary = app.datetime.now(app.timezone.utc)

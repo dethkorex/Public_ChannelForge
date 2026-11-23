@@ -3,7 +3,7 @@ sub init()
   m.creators.observeField("itemSelected", "creatorSelected") : m.channels.observeField("itemSelected", "channelSelected") : m.vault.observeField("itemSelected", "vaultSelected") : m.pair.observeField("buttonSelected", "showPairing") : m.updates.observeField("buttonSelected", "checkUpdates")
   m.directoryTimer.observeField("fire", "refreshCatalog") : m.directoryTimer.control = "start"
   m.liveRetryTimer = m.top.findNode("liveRetryTimer")
-  m.liveRetryTimer.observeField("fire", "continueLive")
+  m.liveRetryTimer.observeField("fire", "resumePlayback")
   m.playbackDeadline = m.top.findNode("playbackDeadline")
   m.playbackDeadline.observeField("fire", "playbackTimedOut")
   m.upcomingTimer = m.top.findNode("upcomingTimer")
@@ -11,6 +11,7 @@ sub init()
   m.programBoundaryTimer = m.top.findNode("programBoundaryTimer")
   m.programBoundaryTimer.observeField("fire", "scheduleNextProgram")
   m.video.observeField("state", "videoStateChanged")
+  m.video.observeField("position", "trackPlaybackPosition")
   m.bannerTimer = m.top.findNode("bannerTimer")
   m.bannerTimer.observeField("fire", "hideChannelBanner")
   m.bufferPanel = m.top.findNode("buffering")
@@ -193,6 +194,9 @@ sub insertSelectedMovie()
   item = m.selectedMovie
   if item = invalid then return
   m.activeMovie = item
+  m.moviePosition = 0
+  m.movieRetryPosition = 0
+  m.movieRetries = 0
   m.liveItem = invalid
   m.liveRetryTimer.control = "stop"
   m.upcomingTimer.control = "stop"
@@ -217,6 +221,7 @@ sub animateTape(inserting as boolean)
     m.top.findNode("insertTapeMotion").control = "start"
     m.tapeTimer.duration = 1.85
   else
+    m.liveRetryTimer.control = "stop"
     m.video.control = "pause"
     m.top.findNode("ejectTapeMotion").control = "start"
     m.tapeTimer.duration = 0.89
@@ -295,7 +300,7 @@ sub videoStateChanged()
     end if
     clearPlaybackDeadline()
     m.bufferPanel.visible = false
-    m.liveRetries = 0
+    if m.liveItem <> invalid and m.liveRetries > 0 then m.liveStableTime = CreateObject("roTimespan")
     if m.liveItem <> invalid then showChannelBanner(m.liveItem)
     if m.upcomingDue then showUpcomingBanner()
   else if state = "buffering"
@@ -315,6 +320,7 @@ sub videoStateChanged()
     if m.crtWaiting = true then m.top.findNode("tapeMotion").visible = false
     m.crtWaiting = false
     clearPlaybackDeadline()
+    if m.activeMovie <> invalid and scheduleMovieRetry() then return
     if m.liveItem <> invalid and m.liveRetries < 3
       showBuffering("RECONNECTING TO THE STUDIO", m.liveItem.title)
       m.liveRetries = m.liveRetries + 1
@@ -347,7 +353,48 @@ sub playbackTimedOut()
   m.liveRetryTimer.control = "stop"
   m.programBoundaryTimer.control = "stop"
   m.video.control = "stop"
+  if scheduleMovieRetry() then return
+  if m.liveItem <> invalid and m.liveRetries < 2
+    m.liveRetries = m.liveRetries + 1
+    showBuffering("RECONNECTING TO THE STUDIO", m.liveItem.title)
+    m.liveRetryTimer.duration = m.liveRetries * 2
+    m.liveRetryTimer.control = "start"
+    return
+  end if
   showBuffering("THE STUDIO DID NOT DELIVER VIDEO", "Press OK to retry or Back for the guide.")
+end sub
+sub trackPlaybackPosition()
+  if m.liveItem <> invalid and m.liveRetries > 0 and m.video.state = "playing"
+    if m.liveStableTime <> invalid and m.liveStableTime.TotalSeconds() >= 8 then m.liveRetries = 0
+  end if
+  if m.activeMovie = invalid or m.ejectingMovie or m.video.state <> "playing" then return
+  m.moviePosition = m.video.position
+  if m.movieRetries > 0 and m.moviePosition >= m.movieRetryPosition + 30 then m.movieRetries = 0
+end sub
+function scheduleMovieRetry() as boolean
+  if m.activeMovie = invalid or m.guide.visible or m.ejectingMovie then return false
+  if m.movieRetries >= 2 then return false
+  m.movieRetryPosition = m.moviePosition
+  m.movieRetries = m.movieRetries + 1
+  showBuffering("RECONNECTING TO THE MOVIE", m.activeMovie.title)
+  m.liveRetryTimer.duration = m.movieRetries * 2
+  m.liveRetryTimer.control = "start"
+  return true
+end function
+sub resumePlayback()
+  if m.guide.visible or m.ejectingMovie then return
+  if m.activeMovie = invalid
+    continueLive()
+    return
+  end if
+  item = CreateObject("roSGNode", "ContentNode")
+  item.url = m.activeMovie.url
+  item.streamFormat = m.activeMovie.streamFormat
+  item.title = m.activeMovie.title
+  item.playStart = m.moviePosition
+  m.video.content = item
+  m.video.control = "play"
+  startPlaybackDeadline()
 end sub
 sub scheduleNextProgram()
   if m.liveItem = invalid or m.guide.visible then return
@@ -492,8 +539,8 @@ function onKeyEvent(key as string, press as boolean) as boolean
   if not press then return false
   if m.guide.visible = false
     if key = "OK" and m.bufferPanel.visible and not m.waitingForVideo and m.activeMovie <> invalid and not m.ejectingMovie and not m.top.findNode("tapeMotion").visible
-      m.video.control = "play"
-      startPlaybackDeadline()
+      m.movieRetries = 0
+      resumePlayback()
       return true
     end if
     if key = "OK" and m.bufferPanel.visible and not m.waitingForVideo and m.liveItem <> invalid

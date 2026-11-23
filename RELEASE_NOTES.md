@@ -1,3 +1,7 @@
 - Creator keeps your studio discoverable when an older ChannelForge process is using the public media port. All channels and movies share the studio connection.
+- People watching the same published channel at home and remotely now share one broadcast. Switching channels is less likely to run into a busy studio.
+- Fixed a Windows Creator issue that could stop a live channel when its video playlist was being refreshed.
+- Creator can resume an interrupted Plex media download. Windows, Linux, Fire TV and Roku can retry a movie from its playback position.
+- Fire TV refreshes its guide after you leave a stalled stream so it can pick up a studio's new address automatically.
 - Fire TV now buffers a few seconds before playback and keeps a larger reserve during live TV. Movies can reconnect at the same position after a temporary network failure.
 - On supported FFmpeg builds, Creator prepares the first six seconds of remote movies and live TV ahead of playback.

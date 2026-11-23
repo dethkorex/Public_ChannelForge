@@ -113,7 +113,7 @@ public class MainActivity extends Activity {
         if (!guideVisible) {
             video.removeCallbacks(this.continueLive);
             player.stop();
-            if (tunedChannel != null && liveRetries == 0) {
+            if (tunedChannel != null && liveRetries < 2) {
                 ++liveRetries;
                 showBuffering("Reconnecting to the studio…", true);
                 scheduleLive(1000);
@@ -435,7 +435,9 @@ public class MainActivity extends Activity {
                 boolean unavailable = cause instanceof HttpDataSource.InvalidResponseCodeException
                         && (((HttpDataSource.InvalidResponseCodeException) cause).responseCode == 404
                         || ((HttpDataSource.InvalidResponseCodeException) cause).responseCode == 410);
-                if (tunedChannel != null && unavailable && !renderedFrame) {
+                String failedUrl = unavailable ? ((HttpDataSource.InvalidResponseCodeException) cause).dataSpec.uri.toString() : "";
+                if (tunedChannel != null && unavailable && !renderedFrame
+                        && (failedUrl.equals(tunedChannel.url) || failedUrl.equals(tunedChannel.continuousUrl))) {
                     video.removeCallbacks(liveProgramBoundary);
                     playbackFailed = true;
                     showBuffering("This channel is offline. Press OK to retry or Back for the guide.", false);
@@ -2083,6 +2085,8 @@ public class MainActivity extends Activity {
     }
 
     private void returnToGuide() {
+        boolean refreshAfterStall = !guideVisible && resumed
+                && (playbackFailed || playbackWaiting || liveRetries > 0 || movieRetries > 0);
         ejectingTape = false;
         clearCassette();
         tunedChannel = null;
@@ -2103,6 +2107,7 @@ public class MainActivity extends Activity {
         bufferPanel.setVisibility(View.GONE);
         streamTitle = "";
         if (activePage == Page.LIVE) showLoadedChannels();
+        if (refreshAfterStall) loadDirectory();
     }
     @Override protected void onDestroy() {
         unregisterReceiver(updateResult);

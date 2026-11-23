@@ -1006,7 +1006,10 @@ function setPlayerState(message,error=false,canRetry=error){
         retry.type='button';
         retry.className='retry-stream';
         retry.textContent='Retry playback';
-        retry.onclick=()=>play(activeStreamUrl,activeMedia);
+        retry.onclick=()=>{
+            if(!liveMode)activeMedia.resumeAt=$('#player').currentTime||activeMedia.resumeAt||0;
+            play(activeStreamUrl,activeMedia);
+        };
         state.append(' ',retry);
     }
 }
@@ -1014,13 +1017,28 @@ function showChannelOffline(){
     clearTimeout(liveBoundaryTimer);
     setPlayerState('This channel is offline.',true);
 }
-let playbackGeneration=0, liveRetryTimer, liveBoundaryTimer, liveRetries=0, playbackTimer, lastPlaybackTime=-1, playingSince=0;
+let playbackGeneration=0, liveRetryTimer, liveBoundaryTimer, liveRetries=0, movieRetries=0, playbackTimer, lastPlaybackTime=-1, playingSince=0;
+function recoverMovie(){
+    if(liveMode||!activeStreamUrl||activeMedia?.ejecting)return false;
+    if(liveRetryTimer)return true;
+    if(movieRetries>=2)return false;
+    const generation=playbackGeneration;
+    activeMedia.resumeAt=$('#player').currentTime||activeMedia.resumeAt||0;
+    clearTimeout(playbackTimer);playbackTimer=null;
+    setBuffering(true,'Reconnecting to the movie…');
+    liveRetryTimer=setTimeout(()=>{
+        liveRetryTimer=null;
+        if(generation===playbackGeneration&&!activeMedia?.ejecting)play(activeStreamUrl,activeMedia,true);
+    },1000*++movieRetries);
+    return true;
+}
 function armPlaybackDeadline(generation, delay){
     if(playbackTimer)return;
     playbackTimer=setTimeout(()=>{
         playbackTimer=null;
         if(generation!==playbackGeneration||!activeStreamUrl)return;
-        if(liveMode&&liveRetries<1){
+        if(!liveMode&&recoverMovie())return;
+        if(liveMode&&liveRetries<2){
             advanceLive(true,'The studio did not deliver video in time.');
             return;
         }
@@ -1077,7 +1095,7 @@ function play(url,media=null,continuing=false){
     if(hls){hls.destroy();hls=null}
     lastPlaybackTime=-1;playingSince=0;
     if(!continuing){
-        liveRetries=0;playerMini=false;document.body.classList.remove('has-mini-player','player-controls-hidden');
+        liveRetries=0;movieRetries=0;playerMini=false;document.body.classList.remove('has-mini-player','player-controls-hidden');
         document.body.append(shell);shell.className='mini-player-shell';v.classList.remove('mini');
     }
     activeStreamUrl=url;activeMedia=media||{kind:/\/live\//.test(url)?'live':'movie',title:'ChannelForge'};
@@ -1112,12 +1130,12 @@ function play(url,media=null,continuing=false){
     if(window.Hls&&Hls.isSupported()){
         const hostname=new URL(url,location.href).hostname;
         const local=['127.0.0.1','localhost','[::1]'].includes(hostname);
-        const constrained=liveMode&&hostname.endsWith('.app.lhr.life');
+        const constrained=hostname.endsWith('.app.lhr.life');
         const liveBuffer=local?{liveSyncDurationCount:2,liveMaxLatencyDurationCount:8,maxBufferLength:8,maxMaxBufferLength:12}
-            :{liveSyncDuration:8,liveMaxLatencyDuration:24,maxBufferLength:18,maxMaxBufferLength:24,
+            :{liveSyncDuration:12,liveMaxLatencyDuration:28,maxBufferLength:24,maxMaxBufferLength:35,
               abrEwmaDefaultEstimate:250000,abrBandWidthUpFactor:0.55,abrBandWidthFactor:0.8};
         const options=liveMode?{startPosition:-1,backBufferLength:2,startFragPrefetch:true,...liveBuffer}
-            :{startPosition:0,backBufferLength:120,maxBufferLength:60};
+            :{startPosition:activeMedia.resumeAt||0,backBufferLength:120,maxBufferLength:60};
         const player=new Hls({autoStartLoad:false,...options});hls=player;
         let movieRecovery=false;
         const primeLive=liveMode&&!local;
@@ -1132,7 +1150,7 @@ function play(url,media=null,continuing=false){
                 if(started||!v.buffered.length)return;
                 const end=v.buffered.length-1;
                 const seconds=v.buffered.end(end)-Math.max(v.currentTime,v.buffered.start(end));
-                if(seconds>=2.4)begin();
+                if(seconds>=3.5)begin();
                 else if(!fallback)fallback=setTimeout(begin,2200);
             });
             player.on(Hls.Events.DESTROYING,()=>clearTimeout(fallback));
@@ -1144,7 +1162,7 @@ function play(url,media=null,continuing=false){
             const loadMedia=()=>{
                 if(generation!==playbackGeneration||activeMedia.ejecting)return;
                 if(activeMedia.deferDecode)player.attachMedia(v);
-                player.startLoad();
+                player.startLoad(liveMode?-1:activeMedia.resumeAt||0);
                 if(!primeLive)start();
             };
             if(activeMedia.deferDecode&&activeMedia.transportPending){
@@ -1170,10 +1188,17 @@ function play(url,media=null,continuing=false){
                 return;
             }
             if(data.type===Hls.ErrorTypes.MEDIA_ERROR&&!movieRecovery){movieRecovery=true;player.recoverMediaError();return}
+            const status=Number(data.response?.code||0);
+            if(data.type===Hls.ErrorTypes.NETWORK_ERROR&&(!status||status===408||status===429||status>=500)&&recoverMovie())return;
             setPlayerState('COULD NOT PLAY THIS MOVIE',true);
         });
         player.loadSource(source);if(!activeMedia.deferDecode)player.attachMedia(v);
-    }else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=source;start()}
+    }else if(v.canPlayType('application/vnd.apple.mpegurl')){
+        if(!liveMode&&activeMedia.resumeAt>0)v.addEventListener('loadedmetadata',()=>{
+            if(generation===playbackGeneration)v.currentTime=activeMedia.resumeAt;
+        },{once:true});
+        v.src=source;start();
+    }
     else showNativePlayback();
 }
 function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}
@@ -1187,6 +1212,8 @@ function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeM
         lastPlaybackTime=video.currentTime;
         if(!playingSince)playingSince=performance.now();
         else if(liveMode&&performance.now()-playingSince>=4000)liveRetries=0;
+        else if(!liveMode&&performance.now()-playingSince>=30000)movieRetries=0;
+        if(!liveMode)activeMedia.resumeAt=video.currentTime;
         if(liveMode&&progressed){
             const channel=liveChannels.find(channel=>channel.stream_url===activeStreamUrl)||activeMedia.channel;
             const program=programAt(channel);
@@ -1226,7 +1253,7 @@ function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeM
             showNativePlayback();
         }else if(!hls){
             if(liveMode)advanceLive(true);
-            else setPlayerState('COULD NOT PLAY THIS MOVIE',true);
+            else if(video.error?.code!==2||!recoverMovie())setPlayerState('COULD NOT PLAY THIS MOVIE',true);
         }
     });
     video.addEventListener('waiting',()=>{

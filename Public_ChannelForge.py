@@ -91,7 +91,7 @@ PLAYBACK_ERRORS: dict[str, tuple[float, str]] = {}
 PLAYBACK_ERROR_COOLDOWN = 30
 FFMPEG_SESSIONS: dict[str, dict] = {}
 ENCODER_STARTING: dict[str, int] = {}
-MAX_ENCODERS = 4
+MAX_ENCODERS = min(6, max(4, 1 + (os.cpu_count() or 2) // 2))
 STREAM_CACHE_LIMIT = 3 * 1024**3
 STREAM_FREE_RESERVE = 1024**3
 STREAM_ROLLING_BUDGET = 128 * 1024**2
@@ -1817,8 +1817,9 @@ def configured_media_funnel():
     return ""
 
 
-def constrained_public_relay():
-    settings = config()
+def constrained_public_relay(settings=None):
+    if settings is None:
+        settings = config()
     host = urllib.parse.urlsplit(settings.get("public_url", "")).hostname or ""
     return host.endswith(".app.lhr.life") or (settings["public_tunnel"] and not host.endswith(".ts.net"))
 
@@ -2153,6 +2154,10 @@ def launch_encoder(identity, channel, position, profile, relay, budget):
     directory = STREAM_DIR / f"{identity}-{secrets.token_hex(6)}"
     remaining = max(0.1, (position["stop"] - position["start"]).total_seconds() - position["offset_ms"] / 1000)
     input_timing = ["-re"] if on_demand else ["-re", "-ss", f'{position["offset_ms"] / 1000:.3f}']
+    if item.get("source") != "local":
+        # Plex media parts support byte ranges. Resume an interrupted read at
+        # the missing byte while leaving normal end-of-file handling intact.
+        input_timing += ["-rw_timeout", "7000000", "-reconnect", "1", "-reconnect_delay_max", "2"]
     executable = ffmpeg_path()
     if public_delivery and ffmpeg_supports_read_burst(executable):
         # Fill the viewer's startup buffer, then pace the encoder at normal speed.
@@ -2281,6 +2286,33 @@ def remove_encoder_files(directory):
         pass  # Files unrelated to FFmpeg must stay in place.
 
 
+def open_shared_playlist(path, flags):
+    # Windows readers must permit FFmpeg to rename its completed playlist
+    # over the file while an HTTP request is still reading the old snapshot.
+    import _winapi
+    import msvcrt
+    share_read_write_delete = 0x1 | 0x2 | 0x4
+    handle = _winapi.CreateFile(path, _winapi.GENERIC_READ, share_read_write_delete,
+                                0, _winapi.OPEN_EXISTING, 0, 0)
+    try:
+        return msvcrt.open_osfhandle(handle, flags | os.O_BINARY)
+    except OSError:
+        _winapi.CloseHandle(handle)
+        raise
+
+
+def read_encoder_playlist(path):
+    opener = open_shared_playlist if sys.platform == "win32" else None
+    for attempt in range(7):
+        try:
+            with open(path, "rb", opener=opener) as source:
+                return source.read()
+        except (FileNotFoundError, PermissionError):
+            if attempt == 6:
+                raise
+            time.sleep(.025 * (attempt + 1))
+
+
 class LivePlayout:
     def __init__(self, open_program, run_anchor=None):
         self.run_anchor = run_anchor
@@ -2350,20 +2382,21 @@ class LivePlayout:
                 self.condition.notify_all()
 
     def read_program(self, session, directory, process, epoch):
-        master = (directory / "index.m3u8").read_text()
+        master = read_encoder_playlist(directory / "index.m3u8").decode()
         adaptive = "#EXT-X-STREAM-INF" in master
         last = -1
         while self.active():
+            returncode = process.poll() if process is not None else 0
             snapshots = {}
             ended = True
             for name in (("economy", "balanced", "hd") if adaptive else ("economy",)):
                 playlist = directory / (f"index_{name}.m3u8" if adaptive else "index.m3u8")
-                content = playlist.read_text() if playlist.exists() else ""
+                content = read_encoder_playlist(playlist).decode()
                 ended = ended and "#EXT-X-ENDLIST" in content
                 snapshots[name] = {
                     int(number): (duration, f"/ffmpeg-stream/{session}/{filename}")
                     for duration, filename, number in re.findall(
-                        r"(?m)^(#EXTINF:[^\n]+)\n(segment(?:[a-z]+_)?(\d+)\.ts)$", content)
+                        r"(?m)^(#EXTINF:[^\r\n]+)\r?\n(segment(?:[a-z]+_)?(\d+)\.ts)\r?$", content)
                 }
             if not adaptive:
                 snapshots.update(balanced=snapshots["economy"], hd=snapshots["economy"])
@@ -2379,15 +2412,8 @@ class LivePlayout:
                     self.condition.notify_all()
             if ended and common:
                 return
-            if process.poll() is not None:
-                if process.returncode or not common:
-                    raise ValueError("The channel encoder stopped before delivering its program.")
-                # A playlist may have been replaced between reading it and process exit.
-                if not ended:
-                    if all("#EXT-X-ENDLIST" in (directory / (f"index_{name}.m3u8" if adaptive else "index.m3u8")).read_text()
-                           for name in snapshots):
-                        continue
-                    raise ValueError("The channel encoder stopped without a final playlist.")
+            if returncode is not None:
+                raise ValueError("The channel encoder stopped without a final playlist.")
             time.sleep(.12)
 
 
@@ -2858,6 +2884,13 @@ class Handler(BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
     protocol_version = "HTTP/1.1"
 
+    def delivery_profile(self):
+        settings = config()
+        # A studio's local and public listeners serve the same broadcast clock
+        # and encoded segments. Each viewer still uses its own transport URL.
+        shared = isinstance(self, PublicMediaHandler) or bool(settings["creator_profile"])
+        return shared, shared and constrained_public_relay(settings)
+
     def setup(self) -> None:
         super().setup()
         self.connection.settimeout(25)
@@ -2913,8 +2946,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def broadcast(self, channel_id, playlist, token):
-        public = isinstance(self, PublicMediaHandler)
-        constrained = public and constrained_public_relay()
+        public, constrained = self.delivery_profile()
         feed_key = (channel_id, public, constrained)
         if playlist == "master":
             channel = next((row for row in channels() if row["id"] == channel_id), None)
@@ -2974,7 +3006,7 @@ class Handler(BaseHTTPRequestHandler):
                 session = FFMPEG_SESSIONS.get(match[2])
             if session:
                 try:
-                    manifest = (session["directory"] / "index.m3u8").read_bytes()
+                    manifest = read_encoder_playlist(session["directory"] / "index.m3u8")
                 except OSError:
                     manifest = b""
                 if b"#EXT-X-STREAM-INF:" in manifest:
@@ -3111,8 +3143,7 @@ class Handler(BaseHTTPRequestHandler):
                 if run_finished(channel):
                     return self.send_json(410, {"error": "This channel has finished its lineup."})
                 try:
-                    public_delivery = isinstance(self, PublicMediaHandler)
-                    constrained_live = public_delivery and constrained_public_relay()
+                    public_delivery, constrained_live = self.delivery_profile()
                     route = start_playback_route(channel, public_delivery=public_delivery, constrained_live=constrained_live)
                     with LOCK:
                         PLAYBACK_ERRORS.pop(channel_id, None)
@@ -3125,7 +3156,8 @@ class Handler(BaseHTTPRequestHandler):
                 item_id = Path(parsed.path).stem
                 if not re.fullmatch(r"[a-f0-9]{24}", item_id):
                     raise FileNotFoundError
-                self.send_playback_manifest(start_vault_session(item_id, public_delivery=isinstance(self, PublicMediaHandler)))
+                public_delivery, _ = self.delivery_profile()
+                self.send_playback_manifest(start_vault_session(item_id, public_delivery=public_delivery))
             elif parsed.path.startswith("/ffmpeg-stream/"):
                 parts = parsed.path.strip("/").split("/")
                 if len(parts) != 3 or not re.fullmatch(ENCODER_FILE, parts[2]):
@@ -3139,9 +3171,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not session:
                     raise FileNotFoundError
                 path = session["directory"] / parts[2]
-                if not path.is_file():
-                    raise FileNotFoundError
-                self.send_bytes(200, path.read_bytes(), "application/vnd.apple.mpegurl" if path.suffix == ".m3u8" else "video/mp2t")
+                if path.suffix == ".m3u8":
+                    self.send_bytes(200, read_encoder_playlist(path), "application/vnd.apple.mpegurl")
+                else:
+                    self.send_bytes(200, path.read_bytes(), "video/mp2t")
             elif parsed.path.startswith("/hls-proxy/"):
                 proxy_id = parsed.path.rsplit("/", 1)[-1]
                 with LOCK:
