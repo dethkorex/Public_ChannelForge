@@ -117,6 +117,36 @@ class CoreTests(unittest.TestCase):
                 client.close()
                 local.shutdown()
 
+    def test_public_movie_catalog_can_be_read_in_pages_without_changing_legacy_response(self):
+        app.atomic_json(app.VAULT_CATALOG_FILE, {"items": [
+            {"id": "1", "title": "First", "type": "movie"},
+            {"id": "1", "title": "Duplicate", "type": "movie"},
+            {"id": "2", "title": "An episode", "type": "episode"},
+            {"id": "3", "title": "Second", "type": "movie"},
+            {"id": "4", "title": "Third", "type": "movie"},
+        ]})
+        with app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler) as local:
+            threading.Thread(target=local.serve_forever, daemon=True).start()
+            client = http.client.HTTPConnection("127.0.0.1", local.server_port, timeout=5)
+            try:
+                def read(query):
+                    client.request("GET", "/api/public/vault" + query)
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200)
+                    return json.loads(response.read())
+
+                first = read("?limit=2")
+                following = read("?limit=2&offset=2")
+                original = read("")
+                self.assertEqual(first["next_offset"], 2)
+                self.assertIsNone(following["next_offset"])
+                self.assertNotIn("next_offset", original)
+                self.assertEqual(first["items"] + following["items"], original["items"])
+                self.assertEqual([movie["title"] for movie in original["items"]], ["First", "Second", "Third"])
+            finally:
+                client.close()
+                local.shutdown()
+
     def test_creator_prefers_hls_js_when_chromium_claims_native_hls(self):
         script = (app.WEB_DIR / "app.js").read_text(encoding="utf-8")
         hls_branch = 'if(window.Hls&&Hls.isSupported())'
@@ -148,6 +178,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("/api/plex/image?path=", public["programs"][0]["poster_url"])
         self.assertIn("%2Fart%2F", public["programs"][0]["backdrop_url"])
         self.assertNotIn("X-Plex-Token", json.dumps(public))
+        brief = app.public_channel_catalog(brief=True)["channels"][0]
+        self.assertEqual(brief["stream_url"], public["stream_url"])
+        self.assertEqual(len(brief["programs"]), 2)
+        current, next_program = brief["programs"]
+        self.assertEqual(current["stop_epoch_ms"], next_program["start_epoch_ms"])
+        self.assertEqual(set(current), {"title", "start_epoch_ms", "stop_epoch_ms"})
 
     def test_public_channel_catalog_hides_missing_local_source(self):
         channel = app.save_channel({"name": "Missing Local", "number": "13", "items": [{"id": "local-9", "title": "Offline", "source": "local", "file_path": str(app.DATA_DIR / "missing-video.mkv"), "duration_ms": 3600000}]})

@@ -22,16 +22,24 @@ test("simultaneous publications remain independently discoverable and removable"
     },
     delete: async key => records.delete(key),
   }};
-  t.mock.method(globalThis, "fetch", async url => new Response(
-    url.endsWith(".xml") ? "<tv></tv>" : url.endsWith(".m3u") ? "#EXTM3U" : '{"items":[]}'
-  ));
+  let vaultAvailable = true;
+  let originAvailable = true;
+  t.mock.method(globalThis, "fetch", async url => {
+    const path = new URL(url).pathname;
+    if (!originAvailable || (!vaultAvailable && path === "/api/public/vault")) {
+      return new Response(null, {status: 504});
+    }
+    return new Response(path.endsWith(".xml") ? "<tv></tv>" : path.endsWith(".m3u") ? "#EXTM3U" :
+      path === "/api/public/channels" ? '{"channels":[]}' : '{"items":[]}');
+  });
   const directory = "https://example.com";
   const catalog = async () => (await (await worker.fetch(new Request(directory + "/v1/catalog"), env)).json()).creators;
   async function publish(name, origin) {
     const response = await worker.fetch(new Request(directory + "/v1/creators", {
       method: "POST",
       body: JSON.stringify({name, guide_url: origin + "/exports/guide.xml",
-        playlist_url: origin + "/exports/channels.m3u", vault_url: origin + "/api/public/vault"}),
+        playlist_url: origin + "/exports/channels.m3u", status_url: origin + "/api/public/channels",
+        vault_url: origin + "/api/public/vault"}),
     }), env);
     assert.equal(response.status, 201);
     return response.json();
@@ -46,4 +54,22 @@ test("simultaneous publications remain independently discoverable and removable"
   }), env);
   assert.equal(removal.status, 200);
   assert.deepEqual(await catalog(), [rival.creator]);
+
+  async function probe() {
+    let completion;
+    await worker.scheduled({}, env, {waitUntil: task => { completion = task; }});
+    await completion;
+  }
+  vaultAvailable = false;
+  await probe();
+  await probe();
+  assert.deepEqual(await catalog(), [rival.creator]);
+  originAvailable = false;
+  await probe();
+  assert.deepEqual(await catalog(), [rival.creator]);
+  await probe();
+  assert.deepEqual(await catalog(), []);
+  originAvailable = true;
+  await probe();
+  assert.deepEqual((await catalog()).map(studio => studio.id), [rival.creator.id]);
 });

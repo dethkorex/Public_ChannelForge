@@ -19,7 +19,7 @@ from pathlib import Path
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.18"
+VERSION = "3.5.19"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"

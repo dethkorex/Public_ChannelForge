@@ -19,6 +19,7 @@ import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -56,6 +57,7 @@ public class MainActivity extends Activity {
         }
     };
     private boolean directoryLoading = false;
+    private long directoryMissStarted;
     private final ExecutorService posterLoader = Executors.newFixedThreadPool(3);
     private final ExecutorService studioLoader = Executors.newFixedThreadPool(4);
     private final ExecutorService updateLoader = Executors.newSingleThreadExecutor();
@@ -95,11 +97,20 @@ public class MainActivity extends Activity {
     private LinearLayout movieRail;
     private int studioRequest = 0;
     private int movieRequest = 0;
-    private long movieCatalogLoadedAt = 0;
+    private boolean moviePageLoading, movieShelfLoaded;
+    private int nextMovieOffset = -1;
+    private LinearLayout movieShelf;
+    private TextView moreMovies;
     private String selectedPlaylist = "";
     private static final String PREFS = "channel_forge_tv";
     private static final String PAIRED_CREATOR = "paired_creator_url";
     private static final long DIRECTORY_REFRESH_MS = 60_000L;
+    private static final long DIRECTORY_RETRY_MS = 10_000L;
+    private static final long DIRECTORY_GRACE_MS = 30_000L;
+    private static final int MOVIE_PAGE_SIZE = 12;
+    private static final long METADATA_DEADLINE_MS = 20_000L;
+    private static final int MAX_METADATA_BYTES = 24 * 1024 * 1024;
+    private final Runnable directoryRetry = this::loadDirectory;
     private final Runnable directoryRefresh = new Runnable() {
         @Override public void run() {
             if (guideVisible) loadDirectory();
@@ -217,46 +228,105 @@ public class MainActivity extends Activity {
     }
 
     private String get(String address) throws Exception {
+        long deadline = SystemClock.elapsedRealtime() + METADATA_DEADLINE_MS;
         HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
         connection.setConnectTimeout(6000);
-        connection.setReadTimeout(15000);
+        connection.setReadTimeout(8000);
         connection.setRequestProperty("Accept", "application/json, application/x-mpegURL, */*");
         connection.setRequestProperty("User-Agent", "ChannelForgeTV/" + BuildConfig.VERSION_NAME);
         try {
             int code = connection.getResponseCode();
             if (code < 200 || code >= 300) throw new IOException("Creator returned HTTP " + code);
             try (InputStream input = connection.getInputStream()) {
-                return new String(readAll(input), StandardCharsets.UTF_8);
+                ByteArrayOutputStream payload = new ByteArrayOutputStream();
+                byte[] buffer = new byte[8192];
+                int count;
+                while ((count = input.read(buffer)) != -1) {
+                    if (SystemClock.elapsedRealtime() > deadline) throw new IOException("Studio response timed out.");
+                    if (payload.size() + count > MAX_METADATA_BYTES) throw new IOException("Studio response is too large.");
+                    payload.write(buffer, 0, count);
+                }
+                return new String(payload.toByteArray(), StandardCharsets.UTF_8);
             }
         } finally {
             connection.disconnect();
         }
     }
 
-    private byte[] readAll(InputStream input) throws IOException { ByteArrayOutputStream out=new ByteArrayOutputStream(); byte[] buffer=new byte[8192]; int count; while((count=input.read(buffer))>=0) out.write(buffer,0,count); return out.toByteArray(); }
-
     private void loadDirectory() {
         if(directoryLoading)return;
         directoryLoading=true;
-        status.setText("Scanning the public ChannelForge directory…");
+        if (creators.isEmpty()) status.setText("Scanning the public ChannelForge directory…");
         new Thread(() -> {
             List<Creator> discovered=new ArrayList<>();
-            String paired=getSharedPreferences(PREFS,MODE_PRIVATE).getString(PAIRED_CREATOR,"");
-            if(!paired.isEmpty())try{discovered.add(readPairedCreator(paired));}catch(Exception ignored){}
             Exception last=null;
             for(String address:new String[]{BuildConfig.DIRECTORY_URL,BuildConfig.DIRECTORY_FALLBACK_URL}){
                 try{
                     JSONArray values=new JSONObject(get(address)).getJSONArray("creators");
                     for(int i=0;i<values.length();i++){
-                        JSONObject o=values.getJSONObject(i); String playlist=o.getString("playlist_url");
-                        if(!hasCreator(discovered,playlist))discovered.add(new Creator(o.getString("name"),o.optString("description"),playlist,o.optString("vault_url"),o.optString("status_url")));
+                        JSONObject o = values.optJSONObject(i);
+                        if (o == null) continue;
+                        String playlist = o.optString("playlist_url");
+                        if (!playlist.isEmpty() && !hasCreator(discovered, playlist)) {
+                            discovered.add(new Creator(o.optString("name", "Creator"), o.optString("description"),
+                                    playlist, o.optString("vault_url"), o.optString("status_url")));
+                        }
                     }
                     if(!discovered.isEmpty())break;
                 }catch(Exception error){last=error;}
             }
+            String paired = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PAIRED_CREATOR, "");
+            if (!paired.isEmpty() && !hasCreator(discovered, paired + "/exports/channels.m3u")) {
+                try { discovered.add(readPairedCreator(paired)); } catch (Exception ignored) {}
+            }
             Exception failure=last;
-            runOnUiThread(()->{directoryLoading=false;creators.clear();creators.addAll(discovered);if(!creators.isEmpty())renderCreators();else renderDirectoryRecovery(failure);});
+            runOnUiThread(() -> applyDirectory(discovered, failure));
         }).start();
+    }
+
+    private void applyDirectory(List<Creator> discovered, Exception failure) {
+        directoryLoading = false;
+        if (isFinishing() || isDestroyed()) return;
+        guide.removeCallbacks(directoryRetry);
+        if (discovered.isEmpty()) {
+            if (!creators.isEmpty()) {
+                long now = SystemClock.elapsedRealtime();
+                if (directoryMissStarted == 0) directoryMissStarted = now;
+                if (now - directoryMissStarted < DIRECTORY_GRACE_MS) {
+                    status.setText("Checking worldwide studios… Showing the last scan.");
+                    if (guideVisible) guide.postDelayed(directoryRetry, DIRECTORY_RETRY_MS);
+                    return;
+                }
+            }
+            creators.clear();
+            renderDirectoryRecovery(failure);
+            return;
+        }
+        directoryMissStarted = 0;
+        boolean changed = !sameCreators(discovered);
+        creators.clear();
+        creators.addAll(discovered);
+        if (changed || liveRail == null) {
+            renderCreators();
+        } else {
+            for (Creator creator : creators) {
+                if (creator.playlist.equals(selectedPlaylist)) {
+                    loadCreator(creator);
+                    break;
+                }
+            }
+        }
+    }
+
+    private boolean sameCreators(List<Creator> discovered) {
+        if (creators.size() != discovered.size()) return false;
+        for (int i = 0; i < creators.size(); i++) {
+            Creator old = creators.get(i), current = discovered.get(i);
+            if (!old.playlist.equals(current.playlist) || !old.name.equals(current.name)
+                    || !old.description.equals(current.description) || !old.vault.equals(current.vault)
+                    || !old.channelStatus.equals(current.channelStatus)) return false;
+        }
+        return true;
     }
 
     private boolean hasCreator(List<Creator> values,String playlist){for(Creator creator:values)if(creator.playlist.equals(playlist))return true;return false;}
@@ -265,7 +335,7 @@ public class MainActivity extends Activity {
         String base=raw.trim().replaceAll("/+$","");
         if(base.endsWith("/api/public/channels"))base=base.substring(0,base.length()-"/api/public/channels".length());
         if(!base.startsWith("https://"))throw new IOException("Pairing URLs must use HTTPS");
-        JSONObject state=new JSONObject(get(base+"/api/public/channels"));
+        JSONObject state=new JSONObject(get(base+"/api/public/channels?guide=brief"));
         if(!state.has("channels"))throw new IOException("That URL is not a ChannelForge Creator");
         String host=Uri.parse(base).getHost();
         return new Creator(host==null?"Paired Creator":host,"Paired directly with this Fire TV",base+"/exports/channels.m3u",base+"/api/public/vault",base+"/api/public/channels");
@@ -277,14 +347,13 @@ public class MainActivity extends Activity {
         movieRail = null;
         ++studioRequest;
         ++movieRequest;
-        status.setText("●  STANDALONE TV READY  •  NO PUBLIC STUDIOS ONLINE");
+        status.setText(error == null ? "NO PUBLIC STUDIOS ONLINE" : "PUBLIC DIRECTORY UNAVAILABLE  •  SELECT SCAN TO RETRY");
         creatorRail.addView(sectionTitle("DISCOVERY","#5DEEFF"));
         TextView retry=focusButton("↻  SCAN PUBLIC DIRECTORY");retry.setOnClickListener(v->loadDirectory());creatorRail.addView(retry,new LinearLayout.LayoutParams(-1,-2));addGap(creatorRail,10);
         TextView pair=focusButton("＋  OPTIONAL DIRECT PAIR");pair.setOnClickListener(v->showPairingDialog());creatorRail.addView(pair,new LinearLayout.LayoutParams(-1,-2));
         creatorRail.addView(text("Pairing is optional. It connects one published studio directly while the global directory is unavailable.",12,false));
         channelRail.addView(sectionTitle("CHANNELFORGE TV","#FF48C8"));
         TextView hero=text("TURN THE DIAL.\nFIND SOMETHING UNFORGETTABLE.",27,true);hero.setTextColor(color("#FFF229"));hero.setBackground(surface(new int[]{color("#1A1450"),color("#32103F")},color("#12DFF9"),1,14));channelRail.addView(hero,new LinearLayout.LayoutParams(-1,-2));addGap(channelRail,12);
-        TextView ready=text("✓  THE VIEWER IS INSTALLED AND WORKING",16,true);ready.setTextColor(color("#70FF9A"));channelRail.addView(ready);
         TextView detail=text(error==null?"No public creator studios are broadcasting right now.":"Both worldwide directory sources are unavailable. Your Fire TV app can retry without needing Creator installed on this device.",14,false);detail.setTextColor(color("#C6D1E7"));channelRail.addView(detail);
         channelRail.addView(sectionTitle("WHAT APPEARS HERE","#5DEEFF"));channelRail.addView(text("• Live channels and the full program guide\n• Poster artwork and upcoming show details\n• Rewind Cinema movie shelves from online studios",14,false));
         retry.requestFocus();
@@ -319,7 +388,11 @@ public class MainActivity extends Activity {
         boolean changed = !creator.playlist.equals(selectedPlaylist) || liveRail == null || movieRail == null;
         selectedPlaylist = creator.playlist;
         if (changed) {
-            movieCatalogLoadedAt = 0;
+            ++movieRequest;
+            moviePageLoading = movieShelfLoaded = false;
+            nextMovieOffset = -1;
+            movieShelf = null;
+            moreMovies = null;
             channels.clear();
             vaultItems.clear();
             channelIndex = 0;
@@ -335,36 +408,93 @@ public class MainActivity extends Activity {
         }
         int request = ++studioRequest;
         studioLoader.execute(() -> {
-            List<Channel> loaded = Collections.emptyList();
+            List<Channel> loaded = null;
             try {
-                loaded = creator.channelStatus.isEmpty()
-                        ? parseM3u(get(creator.playlist))
-                        : parseOnlineChannels(get(creator.channelStatus));
-            } catch (Exception ignored) {}
+                if (!creator.channelStatus.isEmpty()) {
+                    String brief = Uri.parse(creator.channelStatus).buildUpon().appendQueryParameter("guide", "brief").build().toString();
+                    loaded = parseOnlineChannels(get(brief));
+                }
+            } catch (Exception unavailable) {
+                // The playlist is independent of the guide and still allows tuning.
+            }
+            if (loaded == null) {
+                try {
+                    String playlist = get(creator.playlist);
+                    if (playlist.startsWith("#EXTM3U")) loaded = parseM3u(playlist);
+                } catch (Exception ignored) {}
+            }
             List<Channel> availableChannels = loaded;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed() || request != studioRequest) return;
+                if (availableChannels == null) {
+                    if (channels.isEmpty()) {
+                        liveRail.removeAllViews();
+                        liveRail.addView(sectionTitle("LIVE CHANNELS", "#5DEEFF"));
+                        TextView retry = focusButton("RETRY LIVE CHANNELS");
+                        retry.setOnClickListener(v -> loadCreator(creator));
+                        liveRail.addView(retry);
+                    }
+                    return;
+                }
                 channels.clear();
                 channels.addAll(availableChannels);
                 channelIndex = Math.min(channelIndex, Math.max(0, channels.size() - 1));
                 renderChannels(creator.name);
             });
         });
-        if (!changed && System.currentTimeMillis() - movieCatalogLoadedAt < 120_000L) return;
+        if (!movieShelfLoaded && !moviePageLoading) loadMoviePage(creator, 0);
+    }
+
+    private void loadMoviePage(Creator creator, int offset) {
+        if (moviePageLoading) return;
+        moviePageLoading = true;
         int movieLoad = ++movieRequest;
-        movieCatalogLoadedAt = System.currentTimeMillis();
+        if (moreMovies != null) moreMovies.setText("LOADING MOVIES…");
         studioLoader.execute(() -> {
-            List<VaultItem> movies = Collections.emptyList();
-            if (!creator.vault.isEmpty()) {
-                try { movies = parseVault(get(creator.vault)); } catch (Exception ignored) {}
+            try {
+                JSONObject page = new JSONObject();
+                if (!creator.vault.isEmpty()) {
+                    String address = Uri.parse(creator.vault).buildUpon()
+                            .appendQueryParameter("limit", String.valueOf(MOVIE_PAGE_SIZE))
+                            .appendQueryParameter("offset", String.valueOf(offset)).build().toString();
+                    page = new JSONObject(get(address));
+                }
+                List<VaultItem> movies = creator.vault.isEmpty() ? Collections.emptyList() : parseVault(page);
+                int followingOffset = page.optInt("next_offset", -1);
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || movieLoad != movieRequest) return;
+                    moviePageLoading = false;
+                    movieShelfLoaded = true;
+                    nextMovieOffset = followingOffset > offset ? followingOffset : -1;
+                    if (offset == 0) {
+                        vaultItems.clear();
+                        vaultItems.addAll(movies);
+                        renderMovies(creator);
+                    } else {
+                        Set<String> known = new HashSet<>();
+                        for (VaultItem item : vaultItems) known.add(item.url);
+                        for (VaultItem item : movies) if (known.add(item.url)) vaultItems.add(item);
+                        updateStudioStatus(creator.name);
+                        growMovieShelf(creator);
+                    }
+                });
+            } catch (Exception unavailable) {
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed() || movieLoad != movieRequest) return;
+                    moviePageLoading = false;
+                    if (moreMovies != null) {
+                        moreMovies.setText("RETRY MORE MOVIES");
+                    } else {
+                        status.setText("●  " + creator.name + "  •  " + channels.size()
+                                + " LIVE CHANNELS  •  MOVIE CATALOG TIMED OUT");
+                        movieRail.removeAllViews();
+                        movieRail.addView(sectionTitle("REWIND CINEMA", "#FF48C8"));
+                        TextView retry = focusButton("RETRY MOVIE CATALOG");
+                        retry.setOnClickListener(v -> loadMoviePage(creator, 0));
+                        movieRail.addView(retry);
+                    }
+                });
             }
-            List<VaultItem> availableMovies = movies;
-            runOnUiThread(() -> {
-                if (isFinishing() || isDestroyed() || movieLoad != movieRequest) return;
-                vaultItems.clear();
-                vaultItems.addAll(availableMovies);
-                renderMovies(creator.name);
-            });
         });
     }
 
@@ -384,9 +514,9 @@ public class MainActivity extends Activity {
         return result;
     }
 
-    private List<VaultItem> parseVault(String value) throws Exception {
+    private List<VaultItem> parseVault(JSONObject value) throws JSONException {
         List<VaultItem> result = new ArrayList<>();
-        JSONArray items = new JSONObject(value).getJSONArray("items");
+        JSONArray items = value.getJSONArray("items");
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.getJSONObject(i);
             if (!"movie".equals(item.optString("type"))) continue;
@@ -417,25 +547,27 @@ public class MainActivity extends Activity {
 
     private void updateStudioStatus(String creator) {
         status.setText("●  " + creator.toUpperCase(Locale.US) + "  •  " + channels.size()
-                + " LIVE CHANNELS  •  " + vaultItems.size() + " MOVIES");
+                + " LIVE CHANNELS  •  " + (movieShelfLoaded
+                ? vaultItems.size() + (nextMovieOffset >= 0 ? "+" : "") + " MOVIES" : "CHECKING MOVIES"));
     }
 
-    private void renderMovies(String creator) {
+    private void renderMovies(Creator creator) {
         movieRail.removeAllViews();
-        updateStudioStatus(creator);
+        updateStudioStatus(creator.name);
         movieRail.addView(sectionTitle("REWIND CINEMA", "#FF48C8"));
         if (vaultItems.isEmpty()) {
             movieRail.addView(text("No movies available from this studio.", 14, false));
             return;
         }
-        List<VaultItem> movies = new ArrayList<>(vaultItems);
         LinearLayout shelf = new LinearLayout(this);
+        movieShelf = shelf;
         shelf.setPadding(dp(8), dp(10), dp(8), dp(20));
-        appendMovies(shelf, movies);
+        growMovieShelf(creator);
         HorizontalScrollView scroll = new HorizontalScrollView(this) {
             @Override protected void onScrollChanged(int left, int top, int oldLeft, int oldTop) {
                 super.onScrollChanged(left, top, oldLeft, oldTop);
-                if (left + getWidth() + dp(640) >= shelf.getWidth()) appendMovies(shelf, movies);
+                if (shelf == movieShelf && moreMovies == null && shelf.getChildCount() < vaultItems.size()
+                        && left + getWidth() + dp(640) >= shelf.getWidth()) growMovieShelf(creator);
             }
         };
         scroll.setHorizontalScrollBarEnabled(false);
@@ -443,10 +575,21 @@ public class MainActivity extends Activity {
         movieRail.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
     }
 
-    private void appendMovies(LinearLayout shelf, List<VaultItem> movies) {
-        int start = shelf.getChildCount();
-        int end = Math.min(start + 18, movies.size());
-        for (int i = start; i < end; i++) shelf.addView(vaultBox(movies.get(i)));
+    private void growMovieShelf(Creator creator) {
+        boolean moveFocus = moreMovies != null && moreMovies.isFocused();
+        if (moreMovies != null) {
+            movieShelf.removeView(moreMovies);
+            moreMovies = null;
+        }
+        int start = movieShelf.getChildCount();
+        int end = Math.min(start + 18, vaultItems.size());
+        for (int i = start; i < end; i++) movieShelf.addView(vaultBox(vaultItems.get(i)));
+        if (nextMovieOffset >= 0 && end == vaultItems.size()) {
+            moreMovies = focusButton("LOAD MORE MOVIES");
+            moreMovies.setOnClickListener(v -> loadMoviePage(creator, nextMovieOffset));
+            movieShelf.addView(moreMovies, new LinearLayout.LayoutParams(-2, -1));
+        }
+        if (moveFocus && start < movieShelf.getChildCount()) movieShelf.getChildAt(start).requestFocus();
     }
 
     private View vaultBox(VaultItem item){LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(8,8,8,8);box.setFocusable(true);GradientDrawable normal=new GradientDrawable();normal.setColor(Color.rgb(14,12,35));normal.setStroke(2,Color.rgb(0,220,245));normal.setCornerRadius(8);box.setBackground(normal);ImageView poster=new ImageView(this);poster.setScaleType(ImageView.ScaleType.CENTER_CROP);poster.setBackgroundColor(Color.rgb(30,15,55));box.addView(poster,new LinearLayout.LayoutParams(185,255));TextView title=text(item.title+(item.year.isEmpty()?"":" ("+item.year+")"),13,true);title.setMaxLines(2);box.addView(title,new LinearLayout.LayoutParams(185,70));LinearLayout.LayoutParams layout=new LinearLayout.LayoutParams(205,350);layout.setMargins(7,0,7,0);box.setLayoutParams(layout);box.setOnFocusChangeListener((view,focused)->{view.setScaleX(focused?1.08f:1f);view.setScaleY(focused?1.08f:1f);GradientDrawable frame=new GradientDrawable();frame.setColor(Color.rgb(14,12,35));frame.setStroke(focused?5:2,focused?Color.rgb(232,255,24):Color.rgb(0,220,245));frame.setCornerRadius(8);view.setBackground(frame);view.setTranslationZ(focused?18:0);});box.setOnClickListener(view->playUrl(item.title,item.url));if(!item.poster.isEmpty())posterLoader.execute(()->loadPoster(item.poster,poster));return box;}
@@ -761,7 +904,10 @@ public class MainActivity extends Activity {
         unregisterReceiver(updateResult);
         updateLoader.shutdownNow();
         if (updateSession >= 0 && !installerOpened) abandonUpdate(updateSession);
-        if (guide != null) guide.removeCallbacks(directoryRefresh);
+        if (guide != null) {
+            guide.removeCallbacks(directoryRefresh);
+            guide.removeCallbacks(directoryRetry);
+        }
         posterLoader.shutdownNow();
         studioLoader.shutdownNow();
         video.stopPlayback();

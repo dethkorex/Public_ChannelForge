@@ -36,7 +36,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.18"
+VERSION = "3.5.19"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -2130,7 +2130,7 @@ def vault_movies():
                 yield str(channel.get("section", "")), item
 
 
-def vault_items(base: str | None = None) -> list[dict]:
+def vault_items(base: str | None = None, *, offset: int = 0, limit: int | None = None) -> list[dict]:
     result, seen = [], set()
     base = base or server_base()
     for section, item in vault_movies():
@@ -2138,6 +2138,10 @@ def vault_items(base: str | None = None) -> list[dict]:
         if item_id in seen:
             continue
         seen.add(item_id)
+        if len(seen) <= offset:
+            continue
+        if limit is not None and len(result) >= limit:
+            break
         thumb = str(item.get("thumb", ""))
         if item.get("source") == "local" and thumb:
             media_section = str(item.get("section") or section)
@@ -2159,7 +2163,7 @@ def vault_items(base: str | None = None) -> list[dict]:
     return result
 
 
-def public_channel_catalog(base: str | None = None, *, extended: bool = False) -> dict:
+def public_channel_catalog(base: str | None = None, *, extended: bool = False, brief: bool = False) -> dict:
     """Return lightweight guide/status data without starting a media session."""
     base = base or server_base()
     moment = datetime.now(timezone.utc)
@@ -2179,8 +2183,13 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False) -
     for channel in channels():
         try:
             items = scheduled_items(channel)
-            current = schedule_position(channel, moment, items=items)["item"]
-            slots = schedule_window(channel, start, end, items=items)
+            position = schedule_position(channel, moment, items=items)
+            current = position["item"]
+            if brief:
+                following = schedule_position(channel, position["stop"], items=items)
+                slots = [position, following]
+            else:
+                slots = schedule_window(channel, start, end, items=items)
             if current.get("source") == "local":
                 online = Path(str(current.get("file_path", ""))).is_file()
             else:
@@ -2198,6 +2207,10 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False) -
             "stream_url": f"{base}/live/{urllib.parse.quote(str(channel.get('id', '')))}.m3u8",
             "logo_url": f"{base}/user-assets/{urllib.parse.quote(str(logo.get('filename', '')))}" if logo else "",
             "programs": [{
+                "title": str(slot["item"].get("title", "Untitled")),
+                "start_epoch_ms": int(slot["start"].timestamp() * 1000),
+                "stop_epoch_ms": int(slot["stop"].timestamp() * 1000),
+            } for slot in slots[:2]] if brief else [{
                 "title": str(slot["item"].get("title", "Untitled")),
                 "year": str(slot["item"].get("year", "")), "type": str(slot["item"].get("type", "video")),
                 "genres": (slot["item"].get("genres") or [])[:2],
@@ -2389,11 +2402,20 @@ class Handler(BaseHTTPRequestHandler):
                     guide.append({"channel_id": channel["id"], "name": channel["name"], "number": channel["number"], "logo_asset_id": channel.get("logo_asset_id", ""), "programs": [{"title": slot["item"].get("title", "Untitled"), "year": slot["item"].get("year", ""), "type": slot["item"].get("type", "video"), "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat()} for slot in slots]})
                 self.send_json(200, {"generated_at": moment.isoformat(), "channels": guide})
             elif parsed.path == "/api/public/vault":
-                self.send_json(200, {"version": 1, "generated_at": datetime.now(timezone.utc).isoformat(),
-                                     "items": vault_items(self.catalog_base())})
+                query = urllib.parse.parse_qs(parsed.query)
+                payload = {"version": 1, "generated_at": datetime.now(timezone.utc).isoformat()}
+                if "limit" in query:
+                    limit = max(1, min(100, int(query["limit"][0])))
+                    offset = max(0, int(query.get("offset", ["0"])[0]))
+                    items = vault_items(self.catalog_base(), offset=offset, limit=limit + 1)
+                    payload.update(items=items[:limit], next_offset=offset + limit if len(items) > limit else None)
+                else:
+                    payload["items"] = vault_items(self.catalog_base())
+                self.send_json(200, payload)
             elif parsed.path == "/api/public/channels":
-                extended = urllib.parse.parse_qs(parsed.query).get("guide") == ["extended"]
-                self.send_json(200, public_channel_catalog(self.catalog_base(), extended=extended))
+                guide = urllib.parse.parse_qs(parsed.query).get("guide")
+                self.send_json(200, public_channel_catalog(self.catalog_base(), extended=guide == ["extended"],
+                                                           brief=guide == ["brief"]))
             elif parsed.path == "/api/public/origin":
                 self.send_json(200, {"instance": RELAY_INSTANCE})
             elif parsed.path == "/api/update":

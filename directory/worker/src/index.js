@@ -82,7 +82,7 @@ async function publishable(value) {
   const checks = await Promise.all([
     endpointOk(value.guide_url, "xml"),
     endpointOk(value.playlist_url, "m3u"),
-    endpointOk(value.vault_url, "json"),
+    endpointOk(value.vault_url + "?limit=1", "json"),
   ]);
   return checks.every(Boolean);
 }
@@ -163,17 +163,17 @@ export default {
   },
   async scheduled(_event,env,ctx){ctx.waitUntil((async()=>{
     // Workers Free permits 50 outbound subrequests per invocation. Check at most
-    // eight creators (four endpoints each) in a rotating batch so the public
+    // eight creators (at most two origin requests each) in a rotating batch so the public
     // directory remains usable as the community grows without paid services.
     const {keys}=await env.CREATORS.list({prefix:"creator:"});
     const batchSize=Math.min(8,keys.length),slot=Math.floor(Date.now()/120000),start=(slot*batchSize)%keys.length;
     const selected=Array.from({length:batchSize},(_,index)=>keys[(start+index)%keys.length]);
     for(const key of selected){
       const creator=await env.CREATORS.get(key.name,"json");if(!creator)continue;
-      const checks=[endpointOk(creator.guide_url,"xml"),endpointOk(creator.playlist_url,"m3u")];
-      if(creator.status_url)checks.push(endpointOk(creator.status_url,"json"));
-      if(creator.vault_url)checks.push(endpointOk(creator.vault_url,"json"));
-      const healthy=(await Promise.all(checks)).every(Boolean),wasOnline=Boolean(creator.online),previousFailures=Number(creator.failures||0),now=Math.floor(Date.now()/1000);
+      // A slow movie catalog or full guide should not hide reachable studios.
+      const healthy = (creator.status_url && await endpointOk(creator.status_url + "?guide=brief", "json"))
+        || await endpointOk(creator.playlist_url, "m3u");
+      const wasOnline=Boolean(creator.online),previousFailures=Number(creator.failures||0),now=Math.floor(Date.now()/1000);
       if(healthy){
         // Healthy creators cause no recurring KV writes. Only recovery or a
         // cleared failure counter is persisted.
