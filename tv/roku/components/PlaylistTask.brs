@@ -13,6 +13,7 @@ sub load()
   if m.top.onlineCatalog
     catalog = ParseJson(payload)
     if catalog <> invalid and catalog.channels <> invalid
+      m.top.catalogAvailable = true
       for each channel in catalog.channels
         if channel.online = true
           node = root.CreateChild("ContentNode")

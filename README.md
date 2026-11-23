@@ -66,6 +66,8 @@ ChannelForge v3.5.21 opens desktop TV in a window. Press **F11** or click the fu
 
 Creator scans connected Plex movie libraries on startup. Eligible studios publish automatically and reconnect if the connection drops. Open **Sources & sharing** to check the connection or take the studio offline. Launching Creator a second time restores its existing desktop window.
 
+ChannelForge v3.5.22 updates Fire TV playback to Media3 for adaptive HLS. Live TV viewers refresh the guide as programs roll over, show the upcoming program, and offer an offline message if a channel is unavailable.
+
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
 ![ChannelForge TV home hub](preview/channel-forge-tv-v346-home.png)
@@ -118,7 +120,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.21-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.5.22-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation

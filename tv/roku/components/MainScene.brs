@@ -4,6 +4,10 @@ sub init()
   m.directoryTimer.observeField("fire", "refreshCatalog") : m.directoryTimer.control = "start"
   m.liveRetryTimer = m.top.findNode("liveRetryTimer")
   m.liveRetryTimer.observeField("fire", "continueLive")
+  m.upcomingTimer = m.top.findNode("upcomingTimer")
+  m.upcomingTimer.observeField("fire", "showUpcomingBanner")
+  m.programBoundaryTimer = m.top.findNode("programBoundaryTimer")
+  m.programBoundaryTimer.observeField("fire", "scheduleNextProgram")
   m.video.observeField("state", "videoStateChanged")
   m.bannerTimer = m.top.findNode("bannerTimer")
   m.bannerTimer.observeField("fire", "hideChannelBanner")
@@ -11,6 +15,8 @@ sub init()
   m.bufferTitle = m.top.findNode("bufferTitle")
   m.bufferDetails = m.top.findNode("bufferDetails")
   m.liveItem = invalid
+  m.liveProgramStop = 0
+  m.checkingOffline = false
   m.liveRetries = 0
   m.catalogLoading = false
   m.creatorUrl = ""
@@ -97,9 +103,11 @@ sub loadCreator(index as integer)
   m.status.text = "Loading " + creator.title + "…"
   task = CreateObject("roSGNode", "PlaylistTask") : task.url = creator.url
   if creator.statusUrl <> invalid and creator.statusUrl <> ""
-    task.url = creator.statusUrl
+    task.url = creator.statusUrl + "?guide=brief"
     task.onlineCatalog = true
   end if
+  m.guideStatusUrl = task.url
+  if not task.onlineCatalog then m.guideStatusUrl = ""
   if m.playlistTask <> invalid then m.playlistTask.unobserveField("content")
   task.observeField("content", "playlistLoaded")
   m.playlistTask = task
@@ -124,6 +132,8 @@ sub vaultSelected()
   if item = invalid then return
   m.liveItem = invalid
   m.liveRetryTimer.control = "stop"
+  m.upcomingTimer.control = "stop"
+  m.programBoundaryTimer.control = "stop"
   hideChannelBanner()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
   m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
@@ -146,7 +156,9 @@ sub playChannel(index as integer)
   item = m.channels.content.GetChild(index)
   m.liveRetryTimer.control = "stop"
   m.liveItem = item
+  m.checkingOffline = false
   m.liveRetries = 0
+  updateLiveProgramStop()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
   m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
   showChannelBanner(item)
@@ -161,9 +173,7 @@ sub videoStateChanged()
   else if state = "buffering"
     if m.video.content <> invalid then showBuffering("BUFFERING VIDEO", m.video.content.title)
   else if state = "finished" and m.liveItem <> invalid
-    showBuffering("LOADING THE NEXT PROGRAM", m.liveItem.title)
-    m.liveRetryTimer.duration = 1
-    m.liveRetryTimer.control = "start"
+    scheduleNextProgram()
   else if state = "error"
     if m.liveItem <> invalid and m.liveRetries < 3
       showBuffering("RECONNECTING TO THE STUDIO", m.liveItem.title)
@@ -172,8 +182,24 @@ sub videoStateChanged()
       m.liveRetryTimer.control = "start"
     else
       showBuffering("STREAM UNAVAILABLE", "Press Back to return to the guide.")
+      if m.liveItem <> invalid
+        m.checkingOffline = true
+        m.programBoundaryTimer.control = "stop"
+        refreshOnAirGuide()
+      end if
     end if
   end if
+end sub
+sub scheduleNextProgram()
+  if m.liveItem = invalid or m.guide.visible then return
+  m.upcomingTimer.control = "stop"
+  m.programBoundaryTimer.control = "stop"
+  showBuffering("LOADING THE NEXT PROGRAM", m.liveItem.title)
+  remaining = m.liveProgramStop - CreateObject("roDateTime").AsSeconds()
+  m.liveRetryTimer.duration = 1
+  if remaining > 0 then m.liveRetryTimer.duration = remaining + 1
+  m.liveRetryTimer.control = "stop"
+  m.liveRetryTimer.control = "start"
 end sub
 sub showBuffering(title as string, detail as string)
   m.bufferTitle.text = title
@@ -216,8 +242,70 @@ sub showChannelBanner(item as object)
   m.bannerTimer.control = "stop"
   m.bannerTimer.control = "start"
 end sub
+sub updateLiveProgramStop()
+  m.liveProgramStop = 0
+  m.upcomingTimer.control = "stop"
+  m.programBoundaryTimer.control = "stop"
+  if m.liveItem = invalid or m.liveItem.programs = invalid then return
+  now = CreateObject("roDateTime").AsSeconds()
+  for index = 0 to m.liveItem.programs.Count() - 1
+    program = m.liveItem.programs[index]
+    if program.start_epoch_ms <> invalid and program.stop_epoch_ms <> invalid
+      if program.start_epoch_ms / 1000# <= now and program.stop_epoch_ms / 1000# > now
+        m.liveProgramStop = program.stop_epoch_ms / 1000#
+        m.programBoundaryTimer.duration = m.liveProgramStop - now + 1.7
+        m.programBoundaryTimer.control = "start"
+        if index + 1 < m.liveItem.programs.Count()
+          lead = (program.stop_epoch_ms - program.start_epoch_ms) / 3000#
+          if lead > 12 then lead = 12
+          delay = m.liveProgramStop - now - lead
+          if delay < 1 then delay = 1
+          m.upcomingTimer.duration = delay
+          m.upcomingTimer.control = "start"
+        end if
+        return
+      end if
+    end if
+  end for
+end sub
+
+sub showUpcomingBanner()
+  if m.liveItem <> invalid and not m.guide.visible and m.video.state = "playing" then showChannelBanner(m.liveItem)
+end sub
+
+sub refreshOnAirGuide()
+  if m.guideStatusUrl = invalid or m.guideStatusUrl = "" then return
+  if m.onAirGuideTask <> invalid then m.onAirGuideTask.unobserveField("content")
+  task = CreateObject("roSGNode", "PlaylistTask")
+  task.url = m.guideStatusUrl
+  task.onlineCatalog = true
+  task.observeField("content", "onAirGuideLoaded")
+  m.onAirGuideTask = task
+  task.control = "run"
+end sub
+
+sub onAirGuideLoaded()
+  if m.liveItem = invalid or m.guide.visible then return
+  guideContent = m.onAirGuideTask.content
+  for index = 0 to guideContent.GetChildCount() - 1
+    channel = guideContent.GetChild(index)
+    if channel.url = m.liveItem.url
+      if m.checkingOffline then return
+      m.liveItem.programs = channel.programs
+      updateLiveProgramStop()
+      if m.video.state = "playing" then showChannelBanner(m.liveItem)
+      return
+    end if
+  end for
+  if m.checkingOffline and m.onAirGuideTask.catalogAvailable
+    showBuffering("THIS CHANNEL IS OFFLINE", "Press Back to return to the guide.")
+  end if
+end sub
+
 sub continueLive()
   if m.liveItem = invalid or m.guide.visible then return
+  updateLiveProgramStop()
+  refreshOnAirGuide()
   item = CreateObject("roSGNode", "ContentNode")
   item.url = m.liveItem.url
   item.title = m.liveItem.title
@@ -232,6 +320,8 @@ function onKeyEvent(key as string, press as boolean) as boolean
     if key = "back" or (key = "OK" and m.liveItem <> invalid)
       m.liveItem = invalid
       m.liveRetryTimer.control = "stop"
+      m.upcomingTimer.control = "stop"
+      m.programBoundaryTimer.control = "stop"
       m.video.control = "stop"
       m.video.visible = false
       m.guide.visible = true

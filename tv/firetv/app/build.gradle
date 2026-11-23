@@ -1,5 +1,11 @@
 plugins { id 'com.android.application' }
 
+dependencies {
+    implementation 'androidx.media3:media3-exoplayer:1.7.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.7.1'
+    implementation 'androidx.media3:media3-ui:1.7.1'
+}
+
 def directoryUrl = providers.gradleProperty('channelForgeCatalogUrl')
     .getOrElse('https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog')
 if (!(directoryUrl ==~ /https:\/\/[A-Za-z0-9.:-]+\/v1\/catalog/)) {
@@ -13,8 +19,8 @@ android {
         applicationId 'tv.channelforge.viewer'
         minSdk 21
         targetSdk 35
-        versionCode 371
-        versionName '3.5.21'
+        versionCode 372
+        versionName '3.5.22'
         buildConfigField 'String', 'GITHUB_RELEASES_API', '"https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"'
         buildConfigField 'String', 'DIRECTORY_URL', '"' + directoryUrl + '"'
         buildConfigField 'String', 'DIRECTORY_FALLBACK_URL', '"https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"'

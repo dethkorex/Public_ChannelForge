@@ -155,6 +155,15 @@
     box-shadow: none;
 }
 .cinema-mode .movie-tools .movie-search-wrap { min-width: 0; }
+.cinema-mode .movie-tools .movie-search-wrap:focus-within {
+    border-color: #77ffff;
+    box-shadow: 0 0 0 2px #32eef152;
+}
+.cinema-mode .movie-search-wrap .movie-search:focus {
+    border-color: transparent;
+    outline: none;
+    box-shadow: none;
+}
 .cinema-mode #movie-count { justify-self: end; color: var(--cinema-cyan); font-weight: 750; }
 .cinema-mode [data-section-block="cinema"].vault-layout {
     align-items: stretch;

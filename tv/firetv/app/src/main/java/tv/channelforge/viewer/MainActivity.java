@@ -15,7 +15,6 @@ import android.graphics.Color;
 import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -25,6 +24,19 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.widget.*;
+import androidx.media3.common.AudioAttributes;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.MimeTypes;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
+import androidx.media3.common.util.UnstableApi;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.HttpDataSource;
+import androidx.media3.exoplayer.DefaultLoadControl;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter;
+import androidx.media3.ui.PlayerView;
 import org.json.*;
 import java.io.*;
 import java.net.*;
@@ -33,12 +45,14 @@ import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+@UnstableApi
 public class MainActivity extends Activity {
     private final List<Creator> creators = new ArrayList<>();
     private final List<Channel> channels = new ArrayList<>();
     private final List<VaultItem> vaultItems = new ArrayList<>();
-    private VideoView video;
-    private MediaController movieControls;
+    private PlayerView video;
+    private ExoPlayer player;
+    private boolean renderedFrame;
     private LinearLayout guide, creatorRail, channelRail;
     private TextView status, banner, updateButton;
     private LinearLayout bufferPanel, bannerPanel;
@@ -49,22 +63,29 @@ public class MainActivity extends Activity {
     private boolean guideVisible = true;
     private Channel tunedChannel;
     private int liveRetries;
+    private long tunedProgramEnd;
+    private boolean hasUpcomingProgram;
+    private final Runnable upcomingProgram = () -> {
+        if (tunedChannel != null && !guideVisible && player.isPlaying()) showChannelBanner(tunedChannel);
+    };
+    private final Runnable liveProgramBoundary = this::retuneAtBoundary;
     private boolean playbackWaiting, playbackFailed;
     private String activeMovieUrl = "";
     private final Runnable playbackDeadline = () -> {
         playbackWaiting = false;
         if (!guideVisible) {
             video.removeCallbacks(this.continueLive);
-            video.stopPlayback();
+            player.stop();
             failPlayback();
         }
     };
     private final Runnable continueLive = () -> {
         if (tunedChannel != null && !guideVisible) {
+            trackLiveProgram();
+            if (!hasUpcomingProgram) refreshOnAirGuide(tunedChannel);
             showBuffering("Connecting to the studio…", true);
             waitForPlayback();
-            video.setVideoURI(Uri.parse(tunedChannel.url));
-            video.start();
+            startStream(tunedChannel.url, true);
         }
     };
     private boolean directoryLoading = false;
@@ -166,10 +187,23 @@ public class MainActivity extends Activity {
 
     private void buildUi() {
         FrameLayout root = new FrameLayout(this); root.setBackground(surface(new int[]{color("#050616"),color("#25073D"),color("#070312")},0,0,0));
-        video = new VideoView(this);
+        video = new PlayerView(this);
+        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
+                .setUserAgent("ChannelForge-TV/" + BuildConfig.VERSION_NAME)
+                .setConnectTimeoutMs(6000).setReadTimeoutMs(10000);
+        player = new ExoPlayer.Builder(this)
+                .setMediaSourceFactory(new DefaultMediaSourceFactory(http))
+                .setLoadControl(new DefaultLoadControl.Builder().setBufferDurationsMs(8000, 25000, 900, 2000).build())
+                .setBandwidthMeter(new DefaultBandwidthMeter.Builder(this).setInitialBitrateEstimate(320_000L).build())
+                .setAudioAttributes(AudioAttributes.DEFAULT, true)
+                .build();
+        player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+                .setPreferredAudioLanguage("en").build());
+        video.setPlayer(player);
+        video.setUseController(false);
+        video.setKeepContentOnPlayerReset(true);
         video.setFocusable(false);
         root.addView(video, new FrameLayout.LayoutParams(-1, -1));
-        movieControls = new MediaController(this);
         guide = new LinearLayout(this); guide.setOrientation(LinearLayout.VERTICAL); guide.setPadding(dp(26),dp(16),dp(26),dp(15)); guide.setBackgroundColor(Color.argb(238, 4, 5, 20));
         LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(10));
         ImageView logo=new ImageView(this);logo.setImageResource(R.mipmap.channel_forge_tv_icon);logo.setScaleType(ImageView.ScaleType.FIT_CENTER);header.addView(logo,new LinearLayout.LayoutParams(dp(68),dp(68)));
@@ -216,40 +250,47 @@ public class MainActivity extends Activity {
         root.addView(bannerPanel, bp);
         setContentView(root);
         screenSwitcher.requestFocus();
-        video.setOnPreparedListener(player -> {
-            status.setText("●  STREAM READY  •  ENGLISH AUDIO PREFERRED");
-            player.start();
-        });
-        video.setOnInfoListener((player, event, extra) -> {
-            if (guideVisible) return false;
-            if (event == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
-                showBuffering("Buffering video…", true);
-                waitForPlayback();
+        player.addListener(new Player.Listener() {
+            @Override public void onPlaybackStateChanged(int state) {
+                if (guideVisible) return;
+                if (state == Player.STATE_BUFFERING) {
+                    showBuffering("Buffering video…", true);
+                    waitForPlayback();
+                } else if (state == Player.STATE_ENDED) {
+                    clearPlaybackDeadline();
+                    if (tunedChannel != null) {
+                        retuneAtBoundary();
+                    } else returnToGuide();
+                }
             }
-            if (event == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START || event == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
-                clearPlaybackDeadline();
-                bufferPanel.setVisibility(View.GONE);
-                liveRetries = 0;
+
+            @Override public void onRenderedFirstFrame() {
+                if (guideVisible) return;
+                renderedFrame = true;
+                hidePlaybackBuffer();
                 if (tunedChannel != null) showChannelBanner(tunedChannel);
             }
-            return false;
-        });
-        video.setOnCompletionListener(player -> {
-            if (tunedChannel != null && !guideVisible) {
-                showBuffering("Loading the next program…", true);
-                scheduleLive(400);
+
+            @Override public void onIsPlayingChanged(boolean playing) {
+                if (playing && renderedFrame && !guideVisible) hidePlaybackBuffer();
             }
-            else if (!guideVisible) returnToGuide();
-        });
-        video.setOnErrorListener((player, what, extra) -> {
-            clearPlaybackDeadline();
-            if (tunedChannel != null && !guideVisible && liveRetries < 2) {
-                showBuffering("Reconnecting to the studio…", true);
-                scheduleLive(1200L * ++liveRetries);
-            } else {
-                failPlayback();
+
+            @Override public void onPlayerError(PlaybackException error) {
+                if (guideVisible) return;
+                clearPlaybackDeadline();
+                Throwable cause = error.getCause();
+                boolean unavailable = cause instanceof HttpDataSource.InvalidResponseCodeException
+                        && (((HttpDataSource.InvalidResponseCodeException) cause).responseCode == 404
+                        || ((HttpDataSource.InvalidResponseCodeException) cause).responseCode == 410);
+                if (tunedChannel != null && unavailable && !renderedFrame) {
+                    video.removeCallbacks(liveProgramBoundary);
+                    playbackFailed = true;
+                    showBuffering("This channel is offline. Press OK to retry or Back for the guide.", false);
+                } else if (tunedChannel != null && liveRetries < 2) {
+                    showBuffering("Reconnecting to the studio…", true);
+                    scheduleLive(1200L * ++liveRetries);
+                } else failPlayback();
             }
-            return true;
         });
     }
 
@@ -441,7 +482,7 @@ public class MainActivity extends Activity {
             try {
                 if (!creator.channelStatus.isEmpty()) {
                     String brief = Uri.parse(creator.channelStatus).buildUpon().appendQueryParameter("guide", "brief").build().toString();
-                    loaded = parseOnlineChannels(get(brief));
+                    loaded = parseOnlineChannels(get(brief), brief);
                 }
             } catch (Exception unavailable) {
                 // The playlist is independent of the guide and still allows tuning.
@@ -533,7 +574,7 @@ public class MainActivity extends Activity {
         });
     }
 
-    private List<Channel> parseOnlineChannels(String payload) throws JSONException {
+    private List<Channel> parseOnlineChannels(String payload, String guideUrl) throws JSONException {
         List<Channel> result = new ArrayList<>();
         JSONArray entries = new JSONObject(payload).getJSONArray("channels");
         for (int i = 0; i < entries.length(); i++) {
@@ -543,6 +584,7 @@ public class MainActivity extends Activity {
                 channel.number = entry.optString("number");
                 channel.logo = entry.optString("logo_url");
                 channel.programs = entry.optJSONArray("programs");
+                channel.guideUrl = guideUrl;
                 result.add(channel);
             }
         }
@@ -831,7 +873,58 @@ public class MainActivity extends Activity {
 
     private void scheduleLive(long delay) {
         video.removeCallbacks(continueLive);
+        video.removeCallbacks(upcomingProgram);
+        video.removeCallbacks(liveProgramBoundary);
         video.postDelayed(continueLive, delay);
+    }
+
+    private void retuneAtBoundary() {
+        if (tunedChannel == null || guideVisible) return;
+        showBuffering("Loading the next program…", true);
+        scheduleLive(Math.max(350, tunedProgramEnd - System.currentTimeMillis() + 200));
+    }
+
+    private void trackLiveProgram() {
+        video.removeCallbacks(upcomingProgram);
+        video.removeCallbacks(liveProgramBoundary);
+        tunedProgramEnd = 0;
+        hasUpcomingProgram = false;
+        long now = System.currentTimeMillis();
+        if (tunedChannel == null || tunedChannel.programs == null) return;
+        for (int i = 0; i < tunedChannel.programs.length(); i++) {
+            JSONObject program = tunedChannel.programs.optJSONObject(i);
+            if (program == null) continue;
+            long start = guideTimeMillis(program, "start");
+            long end = guideTimeMillis(program, "stop");
+            if (start <= now && now < end) {
+                tunedProgramEnd = end;
+                video.postDelayed(liveProgramBoundary, end - now + 1700);
+                if (i + 1 < tunedChannel.programs.length()) {
+                    hasUpcomingProgram = true;
+                    long lead = Math.min(12_000L, (end - start) / 3);
+                    video.postDelayed(upcomingProgram, Math.max(100L, end - now - lead));
+                }
+                return;
+            }
+        }
+    }
+
+    private void refreshOnAirGuide(Channel channel) {
+        if (channel.guideUrl.isEmpty()) return;
+        studioLoader.execute(() -> {
+            try {
+                for (Channel updated : parseOnlineChannels(get(channel.guideUrl), channel.guideUrl)) {
+                    if (!channel.url.equals(updated.url)) continue;
+                    runOnUiThread(() -> {
+                        if (isFinishing() || isDestroyed() || tunedChannel != channel || guideVisible) return;
+                        channel.programs = updated.programs;
+                        trackLiveProgram();
+                        if (player.isPlaying()) showChannelBanner(channel);
+                    });
+                    break;
+                }
+            } catch (Exception ignored) {}
+        });
     }
 
     private void waitForPlayback() {
@@ -844,6 +937,25 @@ public class MainActivity extends Activity {
     private void clearPlaybackDeadline() {
         playbackWaiting = false;
         video.removeCallbacks(playbackDeadline);
+    }
+
+    private void hidePlaybackBuffer() {
+        clearPlaybackDeadline();
+        bufferPanel.setVisibility(View.GONE);
+        liveRetries = 0;
+    }
+
+    private void startStream(String url, boolean live) {
+        renderedFrame = false;
+        MediaItem.Builder media = new MediaItem.Builder().setUri(url).setMimeType(MimeTypes.APPLICATION_M3U8);
+        if (live) {
+            media.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(3200).build());
+            player.setMediaItem(media.build());
+        } else {
+            player.setMediaItem(media.build(), 0);
+        }
+        player.prepare();
+        player.play();
     }
 
     private void failPlayback() {
@@ -861,8 +973,8 @@ public class MainActivity extends Activity {
         activeMovieUrl = "";
         guide.setVisibility(View.GONE);
         guideVisible = false;
-        movieControls.hide();
-        video.setMediaController(null);
+        video.hideController();
+        video.setUseController(false);
         video.setFocusable(true);
         video.requestFocus();
         video.removeCallbacks(continueLive);
@@ -872,19 +984,20 @@ public class MainActivity extends Activity {
 
     private void playUrl(String title, String url) {
         tunedChannel = null;
+        video.removeCallbacks(upcomingProgram);
+        video.removeCallbacks(liveProgramBoundary);
         streamTitle = title;
         activeMovieUrl = url;
         clearPlaybackDeadline();
         video.removeCallbacks(continueLive);
         guide.setVisibility(View.GONE);
         guideVisible = false;
-        video.setMediaController(movieControls);
+        video.setUseController(true);
         video.setFocusable(true);
         video.requestFocus();
         showBuffering("Connecting to the studio…", true);
         waitForPlayback();
-        video.setVideoURI(Uri.parse(url));
-        video.start();
+        startStream(url, false);
         showBanner("REWIND CINEMA   •   " + title);
     }
     private String displayNumber(Channel channel, int index) {
@@ -961,7 +1074,7 @@ public class MainActivity extends Activity {
                 return true;
             }
             if (select) {
-                movieControls.show();
+                video.showController();
                 return true;
             }
             if (tunedChannel != null && (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_CHANNEL_UP)) {
@@ -997,9 +1110,11 @@ public class MainActivity extends Activity {
         activeMovieUrl = "";
         playbackFailed = false;
         clearPlaybackDeadline();
-        movieControls.hide();
+        video.hideController();
         video.removeCallbacks(continueLive);
-        video.stopPlayback();
+        video.removeCallbacks(upcomingProgram);
+        video.removeCallbacks(liveProgramBoundary);
+        player.stop();
         video.setFocusable(false);
         guideVisible = true;
         guide.setVisibility(View.VISIBLE);
@@ -1018,7 +1133,8 @@ public class MainActivity extends Activity {
         posterLoader.shutdownNow();
         studioLoader.shutdownNow();
         clearPlaybackDeadline();
-        video.stopPlayback();
+        video.setPlayer(null);
+        player.release();
         super.onDestroy();
     }
 
@@ -1034,7 +1150,7 @@ public class MainActivity extends Activity {
     }
     private static class Channel {
         final String name, url;
-        String number = "", logo = "";
+        String number = "", logo = "", guideUrl = "";
         JSONArray programs;
         Channel(String name, String url) { this.name = name; this.url = url; }
     }

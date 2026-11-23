@@ -20,7 +20,7 @@ from pathlib import Path
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.21"
+VERSION = "3.5.22"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -883,7 +883,11 @@ function setPlayerState(message,error=false,canRetry=error){
         state.append(' ',retry);
     }
 }
-let playbackGeneration=0, liveRetryTimer, liveRetries=0, playbackTimer, lastPlaybackTime=-1;
+function showChannelOffline(){
+    clearTimeout(liveBoundaryTimer);
+    setPlayerState('This channel is offline.',true);
+}
+let playbackGeneration=0, liveRetryTimer, liveBoundaryTimer, liveRetries=0, playbackTimer, lastPlaybackTime=-1;
 function armPlaybackDeadline(generation, delay){
     if(playbackTimer)return;
     playbackTimer=setTimeout(()=>{
@@ -891,6 +895,7 @@ function armPlaybackDeadline(generation, delay){
         if(generation!==playbackGeneration||!activeStreamUrl)return;
         ++playbackGeneration;
         clearTimeout(liveRetryTimer);liveRetryTimer=null;
+        clearTimeout(liveBoundaryTimer);
         const video=$('#player');
         if(hls){hls.destroy();hls=null}
         video.removeAttribute('src');video.load();
@@ -916,6 +921,7 @@ function showNativePlayback(){
 }
 function advanceLive(failed=false, failureMessage='COULD NOT PLAY THIS CHANNEL'){
     if(!liveMode||!activeStreamUrl||liveRetryTimer)return;
+    clearTimeout(liveBoundaryTimer);
     if(failed&&++liveRetries>2){setPlayerState(failureMessage,true);return}
     const generation=playbackGeneration;
     const channel=liveChannels.find(item=>item.stream_url===activeStreamUrl)||activeMedia.channel;
@@ -932,6 +938,7 @@ function advanceLive(failed=false, failureMessage='COULD NOT PLAY THIS CHANNEL')
 }
 function play(url,media=null,continuing=false){
     clearTimeout(liveRetryTimer);liveRetryTimer=null;
+    clearTimeout(liveBoundaryTimer);
     clearTimeout(playbackTimer);playbackTimer=null;
     const generation=++playbackGeneration,v=$('#player'),shell=ensurePlayerShell();
     const source='/stream?url='+encodeURIComponent(url);
@@ -950,11 +957,19 @@ function play(url,media=null,continuing=false){
         const current=programAt(activeMedia.channel,Date.now());
         activeMedia.programStart=current?.start;
         activeMedia.title=current?.title||activeMedia.title;
+        if(current){
+            const remaining=Date.parse(current.stop)-Date.now();
+            liveBoundaryTimer=setTimeout(()=>{
+                if(generation===playbackGeneration)advanceLive();
+            },Math.max(0,remaining)+1700);
+        }
     }
     $('#close').hidden=liveMode&&!playerMini;
     $('#close').textContent=playerMini?'✕ CLOSE PLAYER':media?.cinema?'✕ STOP MOVIE':'✕ CLOSE MOVIE';
     v.controls=!liveMode;updateTunedIndicator(activeMedia,'CONNECTING…');setBuffering(true,'Connecting to the studio…');showPlayerControls();renderLiveGuide();
+    v.classList.add('playing');$('#close').classList.add('show');
     v.removeAttribute('src');v.load();
+    if(liveMode&&activeMedia.channel?.online===false){showChannelOffline();return}
     armPlaybackDeadline(generation,24000);
     const start=()=>{if(generation===playbackGeneration)v.play().catch(error=>{
         if(generation===playbackGeneration)setPlayerState(error.message||'PRESS PLAY TO START',true);
@@ -976,8 +991,12 @@ function play(url,media=null,continuing=false){
         player.on(Hls.Events.ERROR,(_event,data)=>{
             if(!data.fatal||generation!==playbackGeneration)return;
             if(liveMode){
+                const status=Number(data.response?.code);
+                if(data.details===Hls.ErrorDetails.MANIFEST_LOAD_ERROR&&(status===404||status===410)){
+                    player.destroy();hls=null;showChannelOffline();return;
+                }
                 const stalled=data.details===Hls.ErrorDetails.FRAG_LOAD_TIMEOUT;
-                const upstream=Number(data.response?.code)>=500;
+                const upstream=status>=500;
                 advanceLive(true,upstream?'THE STUDIO COULD NOT START THIS CHANNEL':stalled?'VIDEO DOWNLOAD TIMED OUT · TRY AGAIN SHORTLY':undefined);
                 return;
             }
@@ -987,7 +1006,6 @@ function play(url,media=null,continuing=false){
         player.loadSource(source);player.attachMedia(v);
     }else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=source;start()}
     else showNativePlayback();
-    v.classList.add('playing');$('#close').classList.add('show');
 }
 function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}
 function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeMedia=null;let v=$('#player');v.classList.remove('playing','mini');v.pause();if(hls){hls.destroy();hls=null}v.removeAttribute('src');v.load();setBuffering(false);document.body.classList.remove('has-mini-player');$('#close').classList.remove('show');$('#close').textContent='✕ CLOSE PLAYER';updateTunedIndicator(null);renderLiveGuide()}
@@ -998,6 +1016,19 @@ function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeM
         if(video!==$('#player')||!activeStreamUrl||video.paused||video.seeking||video.currentTime<=lastPlaybackTime)return;
         const progressed=lastPlaybackTime>=0;
         lastPlaybackTime=video.currentTime;
+        if(liveMode&&progressed&&!activeMedia.nextAnnounced){
+            const channel=liveChannels.find(channel=>channel.stream_url===activeStreamUrl)||activeMedia.channel;
+            const program=programAt(channel);
+            const duration=Date.parse(program?.stop)-Date.parse(program?.start);
+            const left=Date.parse(program?.stop)-Date.now();
+            const next=channel?.programs?.[channel.programs.indexOf(program)+1];
+            if(program&&program.start===activeMedia.programStart&&next&&left<=Math.min(12000,duration/3)){
+                activeMedia.nextAnnounced=true;
+                activeMedia.channel=channel;
+                updateTunedIndicator(activeMedia,'LIVE');
+                showPlayerControls();
+            }
+        }
         if(progressed&&playbackTimer){
             clearTimeout(playbackTimer);playbackTimer=null;
             setBuffering(false);showPlayerControls();liveRetries=0;
@@ -1283,7 +1314,7 @@ HTML = HTML.replace('<button id="update" class="update">', '<button id="desktop-
 HTML = HTML.replace('</main><video id="player"', f'{EXTRA_SCREENS}</main><aside id="player-hud" class="player-hud" hidden></aside><aside id="player-bug" class="player-bug" hidden></aside><div id="player-buffer" class="player-buffer" role="status" aria-live="polite" hidden><span class="buffer-spinner" aria-hidden="true"></span><b></b><small></small></div><dialog id="program-dialog" class="program-dialog"><button class="program-close" onclick="this.closest(\'dialog\').close()">×</button><div id="program-dialog-body" class="program-dialog-body"></div></dialog><video id="player"', 1)
 HTML = HTML.replace("let playbackGeneration=0", PLAYER_DOCK_JS + "\nlet playbackGeneration=0", 1)
 HTML = HTML.replace("function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}", "function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').hidden=false;$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');dockMiniPlayer('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}", 1)
-HTML = HTML.replace("function stopPlayer(){liveMode=false;", "function stopPlayer(){++playbackGeneration;clearTimeout(liveRetryTimer);liveRetryTimer=null;clearTimeout(playbackTimer);playbackTimer=null;$('#cinema-monitor').hidden=true;$('#cinema-expand').hidden=true;let shell=ensurePlayerShell();document.body.append(shell);shell.className='mini-player-shell';document.body.classList.remove('player-controls-hidden');liveMode=false;", 1)
+HTML = HTML.replace("function stopPlayer(){liveMode=false;", "function stopPlayer(){++playbackGeneration;clearTimeout(liveRetryTimer);liveRetryTimer=null;clearTimeout(liveBoundaryTimer);clearTimeout(playbackTimer);playbackTimer=null;$('#cinema-monitor').hidden=true;$('#cinema-expand').hidden=true;let shell=ensurePlayerShell();document.body.append(shell);shell.className='mini-player-shell';document.body.classList.remove('player-controls-hidden');liveMode=false;", 1)
 HTML = HTML.replace("async function checkUpdate(onLaunch=false)", SCREEN_NAV_JS + "\nasync function checkUpdate(onLaunch=false)", 1)
 HTML = HTML.replace("b.onclick=()=>studio(c)", "b.onclick=()=>{studio(c);showScreen('cinema')}", 1)
 HTML = HTML.replace("$('#close').onclick", "ensurePlayerShell();$('#menu-toggle').onclick=()=>{if(innerWidth<=900)document.body.classList.toggle('menu-open');else document.body.classList.toggle('menu-collapsed')};document.querySelectorAll('[data-screen]').forEach(button=>button.onclick=event=>{event.preventDefault();const screen=button.dataset.screen;showScreen(screen);if(playerMini)dockMiniPlayer(screen);if(screen==='updates')checkUpdate(false)});$('#screen-check-update').onclick=()=>checkUpdate(false);$('#close').onclick", 1)
