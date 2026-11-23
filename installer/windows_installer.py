@@ -11,6 +11,11 @@ import time
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    import winreg
+except ImportError:  # pragma: no cover - Windows installer runtime only
+    winreg = None
+
 BUNDLED = hasattr(sys, "_MEIPASS")
 ROOT = Path(sys._MEIPASS) if BUNDLED else Path(__file__).resolve().parents[1]
 
@@ -239,10 +244,41 @@ class Installer(tk.Tk):
         )
         subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True, env=environment, creationflags=0x08000000)
 
+    def clean_legacy_shortcuts(self):
+        roots = [
+            Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop",
+            Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+            Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup",
+        ]
+        legacy_names = {
+            "ChannelForge.lnk", "ChannelForge_Creator.lnk", "Public ChannelForge.lnk",
+            "Public_ChannelForge.lnk", "ChannelForge Creator.lnk", "ChannelForge TV.lnk",
+        }
+        for root in roots:
+            for name in legacy_names:
+                (root / name).unlink(missing_ok=True)
+
+    def configure_autostart(self, target: Path):
+        startup_shortcut = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "ChannelForge Creator.lnk"
+        startup_shortcut.unlink(missing_ok=True)
+        if winreg is None:
+            return
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            if self.autostart.get():
+                winreg.SetValueEx(key, "ChannelForge Creator", 0, winreg.REG_SZ, f'"{target}"')
+            else:
+                try:
+                    winreg.DeleteValue(key, "ChannelForge Creator")
+                except FileNotFoundError:
+                    pass
+
     def install(self):
         try:
             destination = Path(self.destination.get()).expanduser().resolve()
             destination.mkdir(parents=True, exist_ok=True)
+            self.clean_legacy_shortcuts()
+            for legacy in ("Public_ChannelForge.exe", "Public ChannelForge.exe", "ChannelForge.exe"):
+                (destination / legacy).unlink(missing_ok=True)
             targets = {}
             for key in INSTALL_PRODUCT_KEYS:
                 definition = PRODUCTS[key]
@@ -256,10 +292,7 @@ class Installer(tk.Tk):
                     desktop = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop" / f"{definition['name']}.lnk"
                     self.shortcut_file(desktop, target, installed_icon)
                 targets[key] = target
-            if self.autostart.get():
-                definition = PRODUCTS["creator"]
-                startup = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{definition['name']}.lnk"
-                self.shortcut_file(startup, targets["creator"], destination / definition["icon"])
+            self.configure_autostart(targets["creator"])
             messagebox.showinfo("Installation complete", "ChannelForge Creator and ChannelForge TV are installed together. Both shortcuts are ready on your Desktop.")
             subprocess.Popen([str(targets["creator"])], cwd=str(destination))
             self.destroy()

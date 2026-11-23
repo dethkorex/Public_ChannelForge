@@ -30,7 +30,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.1"
+VERSION = "3.5.2"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -66,6 +66,7 @@ UPDATE_JOBS: dict[str, dict] = {}
 PLAYBACK_ERRORS: dict[str, str] = {}
 FFMPEG_SESSIONS: dict[str, dict] = {}
 LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
+AUDIO_SELECTION_CACHE: dict[str, int] = {}
 PLEX_RESOURCE_CACHE: dict[str, object] = {"expires": 0.0, "servers": {}}
 STREAM_DIR = DATA_DIR / "streams"
 TUNNEL_LOCK = threading.RLock()
@@ -913,9 +914,33 @@ def plex_items(section: str) -> list[dict]:
     library = next((item for item in libraries if item["key"] == section), None)
     if not library:
         raise ValueError("Plex library was not found.")
-    # TV libraries must expose playable episodes, not non-playable show folders.
-    path = f"/library/sections/{section_id}/all?type=4" if library["type"] == "show" else f"/library/sections/{section_id}/all"
-    root = plex_server_request(path, server_id)
+    # TV libraries must expose playable episodes, but Plex normally keeps genres,
+    # the premiere year, and the content rating on the non-playable show folder.
+    # Load both views and inherit that metadata so Smart Channels can filter whole
+    # series instead of seeing thousands of genre-less episodes.
+    show_metadata: dict[str, dict] = {}
+    show_metadata_by_title: dict[str, dict] = {}
+    if library["type"] == "show":
+        show_root = plex_server_request(f"/library/sections/{section_id}/all?type=2", server_id)
+        for show in list(show_root):
+            title = str(show.get("title", "")).strip()
+            metadata = {
+                "rating_key": str(show.get("ratingKey", "")),
+                "year": show.get("year", ""),
+                "content_rating": show.get("contentRating", ""),
+                "rating": show.get("rating", ""),
+                "genres": sorted({genre.get("tag", "").strip() for genre in show.findall("Genre") if genre.get("tag", "").strip()}),
+                "summary": show.get("summary", "")[:600],
+                "thumb": show.get("thumb", ""),
+                "art": show.get("art", ""),
+            }
+            if metadata["rating_key"]:
+                show_metadata[metadata["rating_key"]] = metadata
+            if title:
+                show_metadata_by_title[title.casefold()] = metadata
+        root = plex_server_request(f"/library/sections/{section_id}/all?type=4", server_id)
+    else:
+        root = plex_server_request(f"/library/sections/{section_id}/all", server_id)
     result = []
     for node in list(root):
         rating_key = node.get("ratingKey")
@@ -923,27 +948,37 @@ def plex_items(section: str) -> list[dict]:
             continue
         media_node = node.find("Media")
         part_node = node.find("./Media/Part")
+        audio_streams = [stream for stream in node.findall("./Media/Part/Stream") if stream.get("streamType") == "2"]
+        english_audio = next((stream for stream in audio_streams if str(stream.get("languageCode", "")).casefold() in {"en", "eng"} or str(stream.get("language", "")).casefold().startswith("english")), None)
+        selected_audio = next((stream for stream in audio_streams if stream.get("selected") == "1"), None)
+        preferred_audio = english_audio if english_audio is not None else selected_audio if selected_audio is not None else audio_streams[0] if audio_streams else None
+        series_title = node.get("grandparentTitle", "")
+        parent_metadata = show_metadata.get(str(node.get("grandparentRatingKey", ""))) or show_metadata_by_title.get(str(series_title).casefold(), {})
+        episode_genres = sorted({genre.get("tag", "").strip() for genre in node.findall("Genre") if genre.get("tag", "").strip()})
         result.append({
             "id": rating_key,
             "title": (f'{node.get("grandparentTitle", "")} · S{int(node.get("parentIndex", "0") or 0):02d}E{int(node.get("index", "0") or 0):02d} · {node.get("title", "Untitled")}' if node.get("type") == "episode" else node.get("title", "Untitled")),
-            "year": node.get("year", ""),
+            "year": parent_metadata.get("year") or node.get("year", ""),
             "type": node.get("type", "video"),
             "duration_ms": int(node.get("duration", "1800000") or 1800000),
             "key": node.get("key", f"/library/metadata/{rating_key}"),
             "thumb": node.get("thumb", ""),
-            "series_thumb": node.get("grandparentThumb", ""),
-            "art": node.get("art", "") or node.get("grandparentArt", ""),
-            "summary": node.get("summary", "")[:600],
-            "content_rating": node.get("contentRating", ""),
-            "rating": node.get("rating", ""),
-            "genres": sorted({genre.get("tag", "").strip() for genre in node.findall("Genre") if genre.get("tag", "").strip()}),
-            "series": node.get("grandparentTitle", ""),
+            "series_thumb": node.get("grandparentThumb", "") or parent_metadata.get("thumb", ""),
+            "art": node.get("art", "") or node.get("grandparentArt", "") or parent_metadata.get("art", ""),
+            "summary": (node.get("summary", "") or parent_metadata.get("summary", ""))[:600],
+            "content_rating": node.get("contentRating", "") or parent_metadata.get("content_rating", ""),
+            "rating": node.get("rating", "") or parent_metadata.get("rating", ""),
+            "genres": episode_genres or list(parent_metadata.get("genres", [])),
+            "series": series_title,
             "season": int(node.get("parentIndex", "0") or 0),
             "episode": int(node.get("index", "0") or 0),
             "part_key": part_node.get("key", "") if part_node is not None else "",
             "container": media_node.get("container", "") if media_node is not None else "",
             "video_codec": media_node.get("videoCodec", "") if media_node is not None else "",
             "audio_codec": media_node.get("audioCodec", "") if media_node is not None else "",
+            "audio_stream_index": audio_streams.index(preferred_audio) if preferred_audio is not None else 0,
+            "audio_stream_id": preferred_audio.get("id", "") if preferred_audio is not None else "",
+            "audio_language": (preferred_audio.get("languageCode", "") or preferred_audio.get("language", "")) if preferred_audio is not None else "",
             "plex_server_id": server_id,
         })
     return result
@@ -1077,6 +1112,7 @@ def local_items(section: str) -> list[dict]:
             "content_rating": "", "rating": "", "genres": [], "series": relative.parts[0] if len(relative.parts) > 1 else "",
             "season": 0, "episode": 0, "part_key": "", "container": resolved.suffix.lstrip("."),
             "video_codec": "", "audio_codec": "", "source": "local", "file_path": str(resolved),
+            "audio_stream_index": 0, "audio_stream_id": "", "audio_language": "",
         })
     LOCAL_LIBRARY_CACHE[section] = (time.time(), result)
     return result
@@ -1161,6 +1197,8 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "season": max(0, int(item.get("season", 0) or 0)), "episode": max(0, int(item.get("episode", 0) or 0)),
             "part_key": str(item.get("part_key", ""))[:500], "container": str(item.get("container", ""))[:30],
             "video_codec": str(item.get("video_codec", ""))[:30], "audio_codec": str(item.get("audio_codec", ""))[:30],
+            "audio_stream_index": max(0, int(item.get("audio_stream_index", 0) or 0)),
+            "audio_stream_id": str(item.get("audio_stream_id", ""))[:40], "audio_language": str(item.get("audio_language", ""))[:40],
             "source": "local" if item.get("source") == "local" else "plex",
             "file_path": str(item.get("file_path", ""))[:4000] if item.get("source") == "local" else "",
             "plex_server_id": str(item.get("plex_server_id", ""))[:300] if item.get("source") != "local" else "",
@@ -1199,7 +1237,13 @@ def save_channel(payload: dict, channel_id: str = "") -> dict:
         generate_exports(values)
         plex_posters = [(str(media.get("thumb", "")), str(media.get("plex_server_id", ""))) for media in item["items"] if media.get("source") != "local" and media.get("thumb")]
         if plex_posters:
-            threading.Thread(target=lambda: [plex_binary(path, server_id) for path, server_id in plex_posters], daemon=True, name="channel-forge-poster-cache").start()
+            def cache_posters() -> None:
+                for path, server_id in plex_posters:
+                    try:
+                        plex_binary(path, server_id)
+                    except ValueError:
+                        continue
+            threading.Thread(target=cache_posters, daemon=True, name="channel-forge-poster-cache").start()
         return item
 
 
@@ -1285,7 +1329,13 @@ def scheduled_items(channel: dict) -> list[dict]:
         return sorted(items, key=stable_key)
     if mode in {"shuffle_in_order", "marathon", "franchise"}:
         groups: dict[str, list[dict]] = {}
+        seen_ids: set[str] = set()
         for item in items:
+            item_id = str(item.get("id", ""))
+            if item_id and item_id in seen_ids:
+                continue
+            if item_id:
+                seen_ids.add(item_id)
             title = str(item.get("title") or item.get("id"))
             franchise = re.split(r"\s*(?:\d+|:| - )\s*", title, maxsplit=1)[0] if mode == "franchise" else ""
             group = str(item.get("series") or franchise or title)
@@ -1293,7 +1343,16 @@ def scheduled_items(channel: dict) -> list[dict]:
         group_names = list(groups)
         if mode in {"shuffle_in_order", "franchise"}:
             group_names.sort(key=lambda name: hashlib.sha256(f"{seed}:{name}".encode()).hexdigest())
-        return [item for name in group_names for item in sorted(groups[name], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", ""))))]
+        ordered_groups = {
+            name: sorted(groups[name], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", ""))))
+            for name in group_names
+        }
+        if mode == "shuffle_in_order":
+            # Rotate between the shuffled shows, advancing each show's episodes
+            # in sequence. This keeps variety without scrambling episode order or
+            # repeating the same episode/show twice when another show is available.
+            return [episode for episode_index in range(max(map(len, ordered_groups.values()), default=0)) for name in group_names for episode in ordered_groups[name][episode_index:episode_index + 1]]
+        return [item for name in group_names for item in ordered_groups[name]]
     return items
 
 
@@ -1399,6 +1458,8 @@ def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
         "X-Plex-Device-Name": APP_NAME, "X-Plex-Model": "hosted",
         "X-Plex-Client-Profile-Extra": "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
     }
+    if item.get("audio_stream_id"):
+        parameters["audioStreamID"] = str(item["audio_stream_id"])
     return credentials["url"] + "/video/:/transcode/universal/start.m3u8?" + urllib.parse.urlencode(parameters)
 
 
@@ -1413,6 +1474,41 @@ def ffmpeg_path() -> str:
     if not found or not Path(found).is_file():
         raise ValueError("FFmpeg is required for standalone playback but was not found. Reinstall ChannelForge using the latest package.")
     return found
+
+
+def ffprobe_path() -> str:
+    ffmpeg = Path(ffmpeg_path())
+    probe_name = "ffprobe.exe" if sys.platform == "win32" else "ffprobe"
+    bundled = ffmpeg.with_name(probe_name)
+    found = str(bundled) if bundled.is_file() else shutil.which(probe_name)
+    if not found or not Path(found).is_file():
+        raise ValueError("FFprobe is required to inspect audio tracks but was not found.")
+    return found
+
+
+def preferred_audio_index(item: dict, media_input: str) -> int:
+    """Prefer an English audio track, then the file default, then track zero."""
+    recorded_language = str(item.get("audio_language", "")).casefold()
+    recorded_index = max(0, int(item.get("audio_stream_index", 0) or 0))
+    if recorded_language in {"en", "eng"} or recorded_language.startswith("english"):
+        return recorded_index
+    identity = hashlib.sha256(f'{item.get("source")}:{item.get("id")}:{media_input}'.encode()).hexdigest()
+    if identity in AUDIO_SELECTION_CACHE:
+        return AUDIO_SELECTION_CACHE[identity]
+    try:
+        completed = subprocess.run(
+            [ffprobe_path(), "-v", "error", "-select_streams", "a", "-show_entries", "stream=index:stream_tags=language:stream_disposition=default", "-of", "json", media_input],
+            capture_output=True, text=True, timeout=15, creationflags=0x08000000 if sys.platform == "win32" else 0,
+        )
+        streams = json.loads(completed.stdout or "{}").get("streams", [])
+        choice = next((index for index, stream in enumerate(streams) if str(stream.get("tags", {}).get("language", "")).casefold() in {"en", "eng"}), None)
+        if choice is None:
+            choice = next((index for index, stream in enumerate(streams) if int(stream.get("disposition", {}).get("default", 0) or 0) == 1), None)
+        recorded_index = int(choice if choice is not None else recorded_index)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError, json.JSONDecodeError):
+        pass
+    AUDIO_SELECTION_CACHE[identity] = recorded_index
+    return recorded_index
 
 
 def ffmpeg_status() -> dict:
@@ -1495,10 +1591,10 @@ def start_ffmpeg_session(channel: dict) -> str:
     command = [
         ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin", "-re",
         "-ss", f'{position["offset_ms"] / 1000:.3f}', "-i", media_input, "-t", str(remaining),
-        "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast",
-        "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*2)",
+        "-map", "0:v:0", "-map", f"0:a:{preferred_audio_index(item, media_input)}?", "-c:v", "libx264", "-preset", "ultrafast",
+        "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*1)",
         "-c:a", "aac", "-ac", "2", "-ar", "48000",
-        "-f", "hls", "-hls_time", "2", "-hls_list_size", "6",
+        "-f", "hls", "-hls_time", "1", "-hls_list_size", "5",
         "-hls_flags", "delete_segments+append_list+omit_endlist+independent_segments",
         "-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8"),
     ]
@@ -1683,6 +1779,8 @@ def vault_items() -> list[dict]:
             result.append({
                 "id": item_id, "title": item.get("title", "Untitled"), "year": item.get("year", ""),
                 "type": item.get("type", "video"), "summary": item.get("summary", ""),
+                "genres": list(item.get("genres", [])), "content_rating": item.get("content_rating", "") or "Unrated",
+                "library": item.get("library", ""),
                 "poster_url": poster_url, "stream_url": f"{base}/vault/{item_id}.m3u8",
                 "duration_ms": item.get("duration_ms", 1800000),
             })
@@ -2159,8 +2257,23 @@ def main() -> None:
         return
     port = args.port or config()["port"]
     bind_host = config()["bind_host"]
-    server = ThreadingHTTPServer((bind_host, port), Handler)
     url = f"http://{HOST if bind_host in {'0.0.0.0', '::'} else bind_host}:{port}"
+    try:
+        server = ThreadingHTTPServer((bind_host, port), Handler)
+    except OSError:
+        # The Linux package can keep Creator hosting through its user service.
+        # Opening the desktop icon should attach to that existing service instead
+        # of failing with "address already in use" or spawning another copy.
+        if args.no_browser:
+            print(f"ChannelForge Creator is already running at {url}")
+            return
+        try:
+            import webview
+            APP_WINDOW = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(1100, 720), background_color="#08111f")
+            webview.start(debug=False)
+        except ImportError:
+            webbrowser.open(url)
+        return
     print(f"{APP_NAME} {VERSION} is running at {url}")
     print(f"Data directory: {DATA_DIR}")
     threading.Thread(target=reap_idle_sessions, daemon=True, name="channel-forge-idle-reaper").start()

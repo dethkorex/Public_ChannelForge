@@ -16,15 +16,15 @@ sub catalogLoaded()
     if paired <> ""
       connectPaired(paired)
     else
-      m.status.text = "No public creators found. Select PAIR CREATOR to enter a secure Creator URL."
+      m.status.text = "No public studios are online. The TV app is standalone; optional direct pairing is available for recovery."
       m.pair.SetFocus(true)
     end if
   end if
 end sub
 sub showPairing()
   dialog = CreateObject("roSGNode", "KeyboardDialog")
-  dialog.title = "Pair ChannelForge Creator"
-  dialog.message = "Enter the HTTPS pairing URL shown in Creator under Publish worldwide."
+  dialog.title = "Optional direct Creator pairing"
+  dialog.message = "Normally public studios appear automatically. Enter a Creator HTTPS URL only when direct recovery is needed."
   dialog.buttons = ["PAIR", "CANCEL"]
   dialog.observeField("buttonSelected", "pairingSelected")
   m.top.dialog = dialog

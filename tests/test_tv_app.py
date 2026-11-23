@@ -36,7 +36,9 @@ class TvAppTests(unittest.TestCase):
         manifest = (root / "tv/firetv/app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
         gradle = (root / "tv/firetv/app/build.gradle").read_text(encoding="utf-8")
         self.assertIn("showPairingDialog", activity)
-        self.assertIn("RETRY PUBLIC DIRECTORY", activity)
+        self.assertIn("SCAN PUBLIC DIRECTORY", activity)
+        self.assertIn("checkUpdates(updateButton)", activity)
+        self.assertIn("if(!guideVisible&&", activity)
         self.assertIn("DIRECTORY_FALLBACK_URL", activity)
         self.assertIn("android:icon=\"@mipmap/channel_forge_tv_icon\"", manifest)
         self.assertIn("android:banner=\"@drawable/channel_forge_tv_banner\"", manifest)
@@ -67,20 +69,26 @@ class TvAppTests(unittest.TestCase):
         self.assertIn('channelforge-tv"', installer)
         self.assertIn("Installed both apps", installer)
 
-    def test_tv_prefers_hls_js_and_batches_large_movie_shelves(self):
+    def test_tv_prefers_hls_js_and_continuously_scrolls_movie_shelves(self):
         hls_branch = "if(window.Hls&&Hls.isSupported())"
         native_fallback = "else if(v.canPlayType('application/vnd.apple.mpegurl'))"
         self.assertIn(hls_branch, tv.HTML)
         self.assertIn(native_fallback, tv.HTML)
         self.assertLess(tv.HTML.index(hls_branch), tv.HTML.index(native_fallback))
         self.assertIn("function renderVaultPage", tv.HTML)
-        self.assertIn('id="vault-next"', tv.HTML)
+        self.assertNotIn('id="vault-next"', tv.HTML)
+        self.assertNotIn("NEXT SHELF", tv.HTML)
+        self.assertIn('id="movie-genre"', tv.HTML)
+        self.assertIn('id="movie-rating"', tv.HTML)
+        self.assertIn('id="movie-sort"', tv.HTML)
         self.assertNotIn("overflow-y:auto;overscroll-behavior", tv.TV_OVERHAUL_CSS)
         self.assertIn("INSERT MOVIE", tv.HTML)
         self.assertIn("overflow-x:hidden", tv.VAULT_CSS)
         self.assertIn("v.controls=!liveMode", tv.HTML)
         self.assertIn("if(liveMode&&event.currentTarget.classList.contains('playing'))", tv.HTML)
         self.assertIn("backBufferLength:120", tv.HTML)
+        self.assertIn("liveSyncDurationCount:1", tv.HTML)
+        self.assertIn("backBufferLength:2", tv.HTML)
         self.assertIn(".tv-guide::-webkit-scrollbar{display:none}", tv.GUIDE_STAGE_CSS)
 
     def test_tv_scans_online_channels_into_guide_and_keeps_home_focused(self):

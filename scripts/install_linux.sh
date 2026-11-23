@@ -1,25 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "FFmpeg is required for standalone playback."
-  echo "Arch/Omarchy: sudo pacman -S --needed ffmpeg"
-  echo "Debian/Ubuntu: sudo apt install ffmpeg"
-  exit 1
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+install_dependencies() {
+  local elevate=()
+  if [[ "$(id -u)" -ne 0 ]]; then
+    command -v sudo >/dev/null 2>&1 || { echo "Install sudo or run this installer as root once so dependencies can be installed."; exit 1; }
+    elevate=(sudo)
+  fi
+  if command -v pacman >/dev/null 2>&1; then
+    echo "Installing ChannelForge dependencies for Arch/Omarchy…"
+    "${elevate[@]}" pacman -S --needed python ffmpeg python-pywebview python-gobject webkit2gtk-4.1
+  elif command -v apt-get >/dev/null 2>&1; then
+    echo "Installing ChannelForge dependencies for Debian/Ubuntu…"
+    "${elevate[@]}" apt-get update
+    "${elevate[@]}" apt-get install -y python3 ffmpeg python3-webview gir1.2-webkit2-4.1
+  else
+    echo "Unsupported package manager. Install Python 3, FFmpeg, PyWebView, GTK and WebKitGTK, then rerun install.sh."
+    exit 1
+  fi
+}
+
+if ! command -v ffmpeg >/dev/null 2>&1 || ! python3 -c 'import webview' >/dev/null 2>&1; then
+  install_dependencies
 fi
-if ! python3 -c 'import webview' >/dev/null 2>&1; then
-  echo "PyWebView is required for the Creator and TV desktop windows."
-  echo "Arch/Omarchy: sudo pacman -S --needed python-pywebview python-gobject webkit2gtk-4.1"
-  echo "Debian/Ubuntu: sudo apt install python3-webview"
-  exit 1
-fi
+command -v ffmpeg >/dev/null 2>&1 || { echo "FFmpeg is still unavailable after dependency installation."; exit 1; }
+python3 -c 'import webview' >/dev/null 2>&1 || { echo "PyWebView is still unavailable after dependency installation."; exit 1; }
 
 APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/public-channelforge/app"
 BIN_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$SYSTEMD_DIR"
-cp -R Public_ChannelForge.py ChannelForge_TV.py web plugins assets PLUGIN_DEVELOPMENT.md "$APP_DIR/"
+cp -R "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$ROOT/PLUGIN_DEVELOPMENT.md" "$APP_DIR/"
 cat > "$BIN_DIR/public-channelforge" <<EOF
 #!/usr/bin/env bash
 exec python3 "$APP_DIR/Public_ChannelForge.py" "\$@"
@@ -35,6 +49,7 @@ cat > "$DESKTOP_DIR/public-channelforge.desktop" <<EOF
 Name=ChannelForge Creator
 Comment=Build personal channels from local folders or Plex
 Exec=$BIN_DIR/public-channelforge
+Icon=$APP_DIR/assets/channel-forge-creator.png
 Terminal=false
 Type=Application
 Categories=AudioVideo;Utility;
@@ -72,6 +87,9 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
   fi
 else
   echo "User service installed. Start it with: systemctl --user enable --now public-channelforge"
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 fi
 echo "Installed both apps. Run Creator: public-channelforge"
 echo "Run the TV viewer: channelforge-tv"

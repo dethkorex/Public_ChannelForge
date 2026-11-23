@@ -32,6 +32,12 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(tv["app"], "ChannelForge_TV")
         self.assertEqual(windows_installer.INSTALL_PRODUCT_KEYS, ("creator", "tv"))
 
+    def test_installer_removes_legacy_shortcuts_and_uses_registry_autostart(self):
+        source = (Path(__file__).parents[1] / "installer" / "windows_installer.py").read_text(encoding="utf-8")
+        self.assertIn("clean_legacy_shortcuts", source)
+        self.assertIn("Software\\Microsoft\\Windows\\CurrentVersion\\Run", source)
+        self.assertIn("startup_shortcut.unlink", source)
+
     def test_silent_update_reuses_existing_creator_executable(self):
         folder = Path(tempfile.mkdtemp(prefix="channel-forge-installed-"))
         target = folder / "ChannelForge_Creator.exe"

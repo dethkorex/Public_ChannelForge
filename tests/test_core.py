@@ -95,15 +95,37 @@ class CoreTests(unittest.TestCase):
             episodes = [item["episode"] for item in lineup if item["series"] == series]
             self.assertEqual(episodes, sorted(episodes))
 
+    def test_shuffle_shows_rotates_series_and_never_repeats_an_episode(self):
+        items = [
+            {"id": "a1", "title": "A 1", "series": "Show A", "season": 1, "episode": 1},
+            {"id": "a2", "title": "A 2", "series": "Show A", "season": 1, "episode": 2},
+            {"id": "b1", "title": "B 1", "series": "Show B", "season": 1, "episode": 1},
+            {"id": "b2", "title": "B 2", "series": "Show B", "season": 1, "episode": 2},
+            {"id": "a1", "title": "A 1 duplicate", "series": "Show A", "season": 1, "episode": 1},
+        ]
+        channel = app.clean_channel({"name": "Series Mix", "number": "6", "playback_mode": "shuffle_in_order", "items": items})
+        lineup = app.scheduled_items(channel)
+        self.assertEqual(len(lineup), 4)
+        self.assertEqual(len({item["id"] for item in lineup}), 4)
+        self.assertTrue(all(left["series"] != right["series"] for left, right in zip(lineup, lineup[1:])))
+        for series in {item["series"] for item in lineup}:
+            self.assertEqual([item["episode"] for item in lineup if item["series"] == series], [1, 2])
+
     def test_tv_library_returns_playable_episodes(self):
         libraries = [{"key": "2", "title": "TV", "type": "show"}]
-        root = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentTitle="Example Show" grandparentThumb="/library/metadata/10/thumb/1" parentIndex="1" index="1" duration="1800000" key="/library/metadata/99"><Media container="mkv" videoCodec="hevc" audioCodec="aac"><Part key="/library/parts/99/file.mkv"/></Media></Video></MediaContainer>')
-        with mock.patch.object(app, "plex_libraries", return_value=libraries), mock.patch.object(app, "plex_request", return_value=root) as request:
+        shows = app.ET.fromstring('<MediaContainer><Directory ratingKey="10" type="show" title="Example Show" year="1999" contentRating="TV-14" thumb="/library/metadata/10/thumb/1"><Genre tag="Anime"/><Genre tag="Adventure"/></Directory></MediaContainer>')
+        episodes = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentRatingKey="10" grandparentTitle="Example Show" grandparentThumb="/library/metadata/10/thumb/1" parentIndex="1" index="1" duration="1800000" key="/library/metadata/99"><Media container="mkv" videoCodec="hevc" audioCodec="aac"><Part key="/library/parts/99/file.mkv"><Stream id="11" streamType="2" language="Japanese" languageCode="jpn"/><Stream id="12" streamType="2" language="English" languageCode="eng"/></Part></Media></Video></MediaContainer>')
+        with mock.patch.object(app, "plex_libraries", return_value=libraries), mock.patch.object(app, "plex_server_request", side_effect=[shows, episodes]) as request:
             items = app.plex_items("2")
-        request.assert_called_once_with("/library/sections/2/all?type=4")
+        self.assertEqual(request.call_args_list, [mock.call("/library/sections/2/all?type=2", ""), mock.call("/library/sections/2/all?type=4", "")])
         self.assertEqual(items[0]["key"], "/library/metadata/99")
         self.assertEqual(items[0]["series"], "Example Show")
         self.assertEqual(items[0]["series_thumb"], "/library/metadata/10/thumb/1")
+        self.assertEqual(items[0]["genres"], ["Adventure", "Anime"])
+        self.assertEqual(items[0]["year"], "1999")
+        self.assertEqual(items[0]["content_rating"], "TV-14")
+        self.assertEqual(items[0]["audio_language"], "eng")
+        self.assertEqual(items[0]["audio_stream_index"], 1)
         self.assertIn("S01E01", items[0]["title"])
         self.assertEqual(items[0]["part_key"], "/library/parts/99/file.mkv")
 
@@ -241,14 +263,16 @@ class CoreTests(unittest.TestCase):
     def test_shared_plex_libraries_and_items_keep_token_server_side(self):
         server = {"id": "dad-server", "name": "Dad's Server", "url": "https://dad.example", "token": "shared-token", "owned": False}
         libraries = app.ET.fromstring('<MediaContainer><Directory key="7" title="Classic TV" type="show" uuid="shared-lib"/></MediaContainer>')
-        episodes = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentTitle="Shared Show" parentIndex="1" index="1" duration="1200000" key="/library/metadata/99"><Media container="mkv" videoCodec="h264" audioCodec="aac"><Part key="/library/parts/99/file.mkv"/></Media></Video></MediaContainer>')
-        with mock.patch.object(app, "plex_resource_servers", return_value={"dad-server": server}), mock.patch.object(app, "plex_request", side_effect=[libraries, libraries, episodes]) as request:
+        shows = app.ET.fromstring('<MediaContainer><Directory ratingKey="22" type="show" title="Shared Show" year="2005"><Genre tag="Drama"/></Directory></MediaContainer>')
+        episodes = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentRatingKey="22" grandparentTitle="Shared Show" parentIndex="1" index="1" duration="1200000" key="/library/metadata/99"><Media container="mkv" videoCodec="h264" audioCodec="aac"><Part key="/library/parts/99/file.mkv"/></Media></Video></MediaContainer>')
+        with mock.patch.object(app, "plex_resource_servers", return_value={"dad-server": server}), mock.patch.object(app, "plex_request", side_effect=[libraries, libraries, shows, episodes]) as request:
             shared = app.plex_libraries("dad-server")
             items = app.plex_items("plex:dad-server:7")
         self.assertEqual(shared[0]["key"], "plex:dad-server:7")
         self.assertIn("shared by Dad's Server", shared[0]["title"])
         self.assertEqual(items[0]["plex_server_id"], "dad-server")
         self.assertEqual(items[0]["title"], "Shared Show · S01E01 · Pilot")
+        self.assertEqual(items[0]["genres"], ["Drama"])
         self.assertTrue(all(call.args[1]["plex_token"] == "shared-token" for call in request.call_args_list))
         channel = app.clean_channel({"name": "Shared TV", "number": "77", "section": "plex:dad-server:7", "items": items})
         self.assertEqual(channel["items"][0]["plex_server_id"], "dad-server")

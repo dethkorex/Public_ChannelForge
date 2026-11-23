@@ -48,6 +48,7 @@ cat > "$DEB/usr/share/applications/public-channelforge.desktop" <<'EOF'
 Name=ChannelForge Creator
 Comment=Build personal channels from local folders or Plex
 Exec=public-channelforge
+Icon=/opt/public-channelforge/assets/channel-forge-creator.png
 Terminal=false
 Type=Application
 Categories=AudioVideo;Utility;
