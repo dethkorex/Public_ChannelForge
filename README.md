@@ -52,6 +52,8 @@ ChannelForge v3.5.13 adds a compact desktop live guide with the preview on the l
 
 ChannelForge v3.5.14 gives each Creator its own relay identity and verifies the public address before publishing. Automatic sharing continues to use the creator’s machine and the free relay.
 
+ChannelForge v3.5.15 removes the scanline overlay, deinterlaces older sources, and adds an intermediate 480p rendition with more bitrate available for 720p. All renditions use the same stereo AAC format so changing quality leaves the audio format consistent.
+
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
 ![ChannelForge TV home hub](preview/channel-forge-tv-v346-home.png)
@@ -104,7 +106,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.14-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.5.15-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation

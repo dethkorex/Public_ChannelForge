@@ -36,7 +36,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.14"
+VERSION = "3.5.15"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -82,7 +82,9 @@ PLAYBACK_ERROR_COOLDOWN = 30
 FFMPEG_SESSIONS: dict[str, dict] = {}
 LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
 AUDIO_SELECTION_CACHE: dict[str, tuple[int, bool]] = {}
-ENCODER_FILE = r"(?:index(?:_(?:economy|hd))?\.m3u8|segment(?:(?:economy|hd)_)?\d+\.ts)"
+ENCODER_FILE = r"(?:index(?:_(?:economy|balanced|hd))?\.m3u8|segment(?:(?:economy|balanced|hd)_)?\d+\.ts)"
+DEINTERLACE_VIDEO = "bwdif=mode=send_frame:parity=auto:deint=interlaced"
+AAC_FORMAT = ["-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-ar", "48000", "-b:a", "64k"]
 PLEX_RESOURCE_CACHE: dict[str, object] = {"expires": 0.0, "servers": {}}
 STREAM_DIR = DATA_DIR / "streams"
 TUNNEL_LOCK = threading.RLock()
@@ -1843,21 +1845,41 @@ def start_ffmpeg_session(channel: dict) -> str:
 
 
 def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool) -> tuple[list[str], list[str]]:
-    filters = (
-        "[0:v:0]split=2[economy_in][hd_in];"
-        "[economy_in]scale=w='min(480,iw)':h='min(270,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2[economy];"
-        "[hd_in]scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2[hd]"
-    )
-    maps = ["-filter_complex_threads", "2", "-filter_complex", filters, "-map", "[economy]", "-map", "[hd]"]
-    if has_audio:
-        maps += ["-map", f"0:a:{audio_index}", "-map", f"0:a:{audio_index}",
-                 "-b:a:0", "32k", "-ac:a:0", "1", "-b:a:1", "64k", "-ac:a:1", "2"]
-    variants = "v:0,a:0,name:economy v:1,a:1,name:hd" if has_audio else "v:0,name:economy v:1,name:hd"
-    maps += ["-b:v:0", "110k", "-maxrate:v:0", "145k", "-bufsize:v:0", "160k", "-threads:v:0", "1",
-             "-b:v:1", "420k", "-maxrate:v:1", "500k", "-bufsize:v:1", "500k", "-threads:v:1", "2"]
-    output = ["-master_pl_name", "index.m3u8", "-var_stream_map", variants,
+    renditions = [("economy", 480, 270, 128, 165, 1), ("balanced", 854, 480, 430, 540, 1),
+                  ("hd", 1280, 720, 1150, 1450, 2)]
+    inputs = "".join(f"[{name}_in]" for name, *_ in renditions)
+    filters = [f"[0:v:0]{DEINTERLACE_VIDEO},split={len(renditions)}{inputs}"]
+    maps, variants = [], []
+    for index, (name, width, height, bitrate, maximum, threads) in enumerate(renditions):
+        filters.append(
+            f"[{name}_in]scale=w='min({width},iw)':h='min({height},ih)':"
+            f"force_original_aspect_ratio=decrease:force_divisible_by=2[{name}]"
+        )
+        maps += ["-map", f"[{name}]", f"-b:v:{index}", f"{bitrate}k",
+                 f"-maxrate:v:{index}", f"{maximum}k", f"-bufsize:v:{index}", f"{maximum}k",
+                 f"-threads:v:{index}", str(threads)]
+        variant = f"v:{index}"
+        if has_audio:
+            maps += ["-map", f"0:a:{audio_index}"]
+            variant += f",a:{index}"
+        variants.append(f"{variant},name:{name}")
+    maps = ["-filter_complex_threads", "2", "-filter_complex", ";".join(filters), *maps]
+    output = ["-master_pl_name", "index.m3u8", "-var_stream_map", " ".join(variants),
               "-hls_segment_filename", str(directory / "segment%v_%06d.ts"), str(directory / "index_%v.m3u8")]
     return maps, output
+
+
+def stream_audio_options(has_audio: bool | None, on_demand: bool, remaining: float) -> list[str]:
+    if has_audio is False:
+        return []
+    filters = [
+        "aresample=48000:async=100:first_pts=0",
+        "alimiter=limit=0.94:attack=4:release=35:level=0",
+        "afade=t=in:st=0:d=0.025",
+    ]
+    if not on_demand:
+        filters.append(f"afade=t=out:st={max(0, remaining - 0.035):.3f}:d=0.035")
+    return [*AAC_FORMAT, "-af", ",".join(filters)]
 
 
 def start_or_reuse_encoder(channel: dict) -> str:
@@ -1894,17 +1916,21 @@ def start_or_reuse_encoder(channel: dict) -> str:
     if relay and has_audio is not None:
         encoding, output = adaptive_relay_options(directory, audio_index, has_audio)
     else:
-        encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?", "-ac", "2"]
+        encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?"]
         if relay:
-            encoding += ["-vf", "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-                         "-b:v", "420k", "-maxrate", "500k", "-bufsize", "500k", "-b:a", "64k"]
+            encoding += ["-vf", f"{DEINTERLACE_VIDEO},scale=w='min(1280,iw)':h='min(720,ih)':"
+                         "force_original_aspect_ratio=decrease:force_divisible_by=2",
+                         "-b:v", "800k", "-maxrate", "1000k", "-bufsize", "1000k"]
+        else:
+            encoding += ["-vf", DEINTERLACE_VIDEO, "-crf", "19"]
         output = ["-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8")]
+    latency = [] if on_demand else ["-tune", "zerolatency"]
     command = [
         ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin",
         *input_timing, "-i", media_input, *output_timing,
-        *encoding, "-c:v", "libx264", "-preset", "ultrafast",
-        "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*1)",
-        "-c:a", "aac", "-ar", "48000",
+        *encoding, "-c:v", "libx264", "-preset", "veryfast", *latency,
+        "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*1)",
+        *stream_audio_options(has_audio, on_demand, remaining),
         "-f", "hls", "-hls_time", "1", *hls_options,
         *output,
     ]

@@ -124,6 +124,7 @@ jobs:
               subprocess.run([
                   apksigner, "sign", "--ks", key, "--ks-type", "PKCS12",
                   "--ks-key-alias", "channelforge-tv", "--ks-pass", "env:CHANNELFORGE_STORE_PASSWORD",
+                  "--v4-signing-enabled", "false",
                   "--out", apk, "tv/firetv/app/build/outputs/apk/release/app-release-unsigned.apk",
               ], check=True, env=signing_env)
           subprocess.run([apksigner, "verify", "--print-certs", apk], check=True)

@@ -101,7 +101,8 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("if(liveMode&&!video.ended&&video.readyState>=2", tv.HTML)
         self.assertIn("addEventListener('ended',()=>advanceLive())", tv.HTML)
         self.assertIn("backBufferLength:120", tv.HTML)
-        self.assertIn("liveSyncDurationCount:1", tv.HTML)
+        self.assertIn("liveSyncDurationCount:2", tv.HTML)
+        self.assertNotIn('body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:50', tv.HTML)
         self.assertIn("backBufferLength:2", tv.HTML)
         self.assertIn(".tv-guide::-webkit-scrollbar{display:none}", tv.GUIDE_STAGE_CSS)
 
