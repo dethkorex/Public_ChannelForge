@@ -4,7 +4,6 @@ const slugify = value => text(value).toLowerCase().replace(/[^a-z0-9]+/g,"-").re
 const token = () => [...crypto.getRandomValues(new Uint8Array(32))].map(value=>value.toString(16).padStart(2,"0")).join("");
 const hash = async value => [...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value)))].map(byte=>byte.toString(16).padStart(2,"0")).join("");
 const safeUrl = value => {const url=new URL(text(value));if(url.protocol!=="https:"||url.username||url.password)throw new Error("Published endpoints must use public HTTPS.");return url.toString().slice(0,1000)};
-const publicCreator = value => {const {key_hash,failures,...visible}=value;return visible};
 const MIN_CREATOR = [3, 5, 19];
 
 function isSupportedCreator(version) {
@@ -16,6 +15,13 @@ function isSupportedCreator(version) {
     if (parts[index] !== MIN_CREATOR[index]) return parts[index] > MIN_CREATOR[index];
   }
   return true;
+}
+
+function publicCreator(value) {
+  const {key_hash, failures, ...visible} = value;
+  const version = text(visible.creator_version);
+  return {...visible, cinema_supported: Boolean(/^v?\d+\.\d+\.\d+$/.test(version)
+    && isSupportedCreator(version) && visible.vault_url)};
 }
 
 async function readBody(request){const value=await request.json();if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("Expected an object.");return value}
@@ -48,7 +54,7 @@ function validate(value) {
   };
 }
 async function owned(request,env,id){const creator=await env.CREATORS.get(`creator:${id}`,"json"),provided=text(request.headers.get("authorization")).replace(/^Bearer\s+/i,"");if(!creator||!provided||await hash(provided)!==creator.key_hash)return null;return creator}
-async function endpointOk(url, content) {
+async function endpointOk(url, content, observed) {
   let reader;
   try {
     const response = await fetch(url, {
@@ -62,6 +68,7 @@ async function endpointOk(url, content) {
     if (!response.ok || !reader) return false;
     const installed = response.headers.get("x-channelforge-version")
       || response.headers.get("server")?.match(/Public_ChannelForge\/(\d+\.\d+\.\d+)/i)?.[1];
+    if (observed && installed && /^\d+\.\d+\.\d+$/.test(installed)) observed.version = installed;
     if (!isSupportedCreator(installed)) return false;
     const decoder = new TextDecoder();
     let sample = "";
@@ -189,13 +196,16 @@ export default {
     for(const key of selected){
       const creator=await env.CREATORS.get(key.name,"json");if(!creator)continue;
       // A slow movie catalog or full guide should not hide reachable studios.
-      const healthy = (creator.status_url && await endpointOk(creator.status_url + "?guide=brief", "json"))
-        || await endpointOk(creator.playlist_url, "m3u");
+      const observed = {};
+      const healthy = (creator.status_url && await endpointOk(creator.status_url + "?guide=brief", "json", observed))
+        || await endpointOk(creator.playlist_url, "m3u", observed);
       const wasOnline=Boolean(creator.online),previousFailures=Number(creator.failures||0),now=Math.floor(Date.now()/1000);
       if(healthy){
         // Healthy creators cause no recurring KV writes. Only recovery or a
         // cleared failure counter is persisted.
-        if(!wasOnline||previousFailures){creator.failures=0;creator.online=true;creator.last_ok=now;await saveCreator(env,creator)}
+        const changedVersion = observed.version && observed.version !== creator.creator_version;
+        if (changedVersion) creator.creator_version = observed.version;
+        if(!wasOnline||previousFailures||changedVersion){creator.failures=0;creator.online=true;creator.last_ok=now;await saveCreator(env,creator)}
       }else if(wasOnline&&previousFailures<1){
         // One missed probe is tolerated so a transient network hiccup does not
         // make a channel vanish from every TV guide.

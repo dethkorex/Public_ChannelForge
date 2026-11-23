@@ -192,7 +192,7 @@ sub insertSelectedMovie()
   m.programBoundaryTimer.control = "stop"
   hideChannelBanner()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
-  m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
+  m.video.content = item : m.video.visible = true : m.guide.visible = false : m.video.SetFocus(true)
   animateTape(true)
 end sub
 sub animateTape(inserting as boolean)
@@ -204,8 +204,11 @@ sub animateTape(inserting as boolean)
   m.top.findNode("ejectTapeMotion").control = "stop"
   if inserting
     m.top.findNode("insertTapeMotion").control = "start"
+    m.tapeTimer.duration = 1.25
   else
+    m.video.control = "pause"
     m.top.findNode("ejectTapeMotion").control = "start"
+    m.tapeTimer.duration = 0.76
   end if
   m.tapeTimer.control = "stop"
   m.tapeTimer.control = "start"
@@ -219,6 +222,8 @@ sub tapeMotionDone()
     m.guide.visible = true
     m.bufferPanel.visible = false
     m.insertMovie.SetFocus(true)
+  else if not m.guide.visible and m.liveItem = invalid
+    m.video.control = "play"
   end if
 end sub
 sub checkUpdates()

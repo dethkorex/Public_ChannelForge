@@ -124,7 +124,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.26-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.5.27-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation

@@ -379,7 +379,8 @@ public class MainActivity extends Activity {
                         String playlist = o.optString("playlist_url");
                         if (!playlist.isEmpty() && !hasCreator(discovered, playlist)) {
                             discovered.add(new Creator(o.optString("name", "Creator"), o.optString("description"),
-                                    playlist, o.optString("vault_url"), o.optString("status_url")));
+                                    playlist, o.optString("vault_url"), o.optString("status_url"),
+                                    o.optBoolean("cinema_supported")));
                         }
                     }
                     if(!discovered.isEmpty())break;
@@ -448,7 +449,9 @@ public class MainActivity extends Activity {
         JSONObject state=new JSONObject(get(base+"/api/public/channels?guide=brief"));
         if(!state.has("channels"))throw new IOException("That URL is not a ChannelForge Creator");
         String host=Uri.parse(base).getHost();
-        return new Creator(host==null?"Paired Creator":host,"Paired directly with this Fire TV",base+"/exports/channels.m3u",base+"/api/public/vault",base+"/api/public/channels");
+        return new Creator(host==null?"Paired Creator":host,"Paired directly with this Fire TV",
+                base+"/exports/channels.m3u",base+"/api/public/vault",base+"/api/public/channels",
+                state.optBoolean("cinema_supported"));
     }
 
     private void renderDirectoryRecovery(Exception error){
@@ -488,13 +491,14 @@ public class MainActivity extends Activity {
         Creator selected = creators.get(0);
         for (Creator creator : creators) {
             TextView button = focusButton(creator.name + "\n" + creator.description);
+            button.setTag(creator);
             button.setOnClickListener(view -> loadCreator(creator));
             LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
             layout.setMargins(0, 0, 0, dp(9));
             creatorRail.addView(button, layout);
             if (creator.playlist.equals(selectedPlaylist)) selected = creator;
         }
-        loadCreator(selected);
+        loadCreator(cinemaScreen && !selected.cinemaSupported ? firstCinemaStudio(selected) : selected);
     }
 
     private void loadCreator(Creator creator) {
@@ -559,7 +563,8 @@ public class MainActivity extends Activity {
                 if (activePage == Page.FAVORITES) syncStudioScreen();
             });
         });
-        if (cinemaScreen && !movieShelfLoaded && !moviePageLoading) loadMoviePage(creator, 0);
+        if (cinemaScreen && creator.cinemaSupported && !movieShelfLoaded && !moviePageLoading)
+            loadMoviePage(creator, 0);
     }
 
     private TextView navigationButton(String label) {
@@ -599,21 +604,38 @@ public class MainActivity extends Activity {
     private void openPage(Page page) {
         activePage = page;
         cinemaScreen = page == Page.CINEMA;
+        if (cinemaScreen && currentStudio != null && !currentStudio.cinemaSupported) {
+            Creator supported = firstCinemaStudio(currentStudio);
+            if (supported != currentStudio) { loadCreator(supported); return; }
+        }
         syncStudioScreen();
-        if (cinemaScreen && currentStudio != null && !movieShelfLoaded && !moviePageLoading)
+        if (cinemaScreen && currentStudio != null && currentStudio.cinemaSupported && !movieShelfLoaded && !moviePageLoading)
             loadMoviePage(currentStudio, 0);
+    }
+
+    private Creator firstCinemaStudio(Creator fallback) {
+        for (Creator item : creators) if (item.cinemaSupported) return item;
+        return fallback;
     }
 
     private void syncStudioScreen() {
         if (channelRail == null) return;
         screenSwitcher.setText(cinemaScreen ? "LIVE TV GUIDE" : "REWIND CINEMA");
         if (liveRail != null) liveRail.setVisibility(activePage == Page.LIVE ? View.VISIBLE : View.GONE);
-        if (movieRail != null) movieRail.setVisibility(cinemaScreen ? View.VISIBLE : View.GONE);
+        boolean showMovies = cinemaScreen && currentStudio != null && currentStudio.cinemaSupported;
+        if (movieRail != null) movieRail.setVisibility(showMovies ? View.VISIBLE : View.GONE);
+        for (int i = 0; i < creatorRail.getChildCount(); i++) {
+            View child = creatorRail.getChildAt(i);
+            if (child.getTag() instanceof Creator) {
+                Creator item = (Creator) child.getTag();
+                child.setVisibility(cinemaScreen && !item.cinemaSupported ? View.GONE : View.VISIBLE);
+            }
+        }
         if (auxiliaryPage != null && renderedAuxiliary == activePage
                 && (activePage == Page.HOME || activePage == Page.CONTINUE)) return;
         if (auxiliaryPage != null) channelRail.removeView(auxiliaryPage);
         auxiliaryPage = null;
-        if ((activePage == Page.LIVE && liveRail != null) || (cinemaScreen && movieRail != null)) return;
+        if ((activePage == Page.LIVE && liveRail != null) || (showMovies && movieRail != null)) return;
         auxiliaryPage = new LinearLayout(this);
         renderedAuxiliary = activePage;
         auxiliaryPage.setOrientation(LinearLayout.VERTICAL);
@@ -648,7 +670,8 @@ public class MainActivity extends Activity {
             auxiliaryPage.addView(sectionTitle("CONTINUE WATCHING", "#63EFFF"));
             auxiliaryPage.addView(text("No unfinished movies yet.", 13, false));
         } else {
-            auxiliaryPage.addView(text("Waiting for a public studio. Select Scan for Channels to retry.", 14, false));
+            auxiliaryPage.addView(text(cinemaScreen ? "No compatible movie studios are online."
+                    : "Waiting for a public studio. Select Scan for Channels to retry.", 14, false));
             TextView retry = focusButton("↻ SCAN FOR CHANNELS");
             retry.setOnClickListener(v -> loadDirectory());
             auxiliaryPage.addView(retry);
@@ -1228,8 +1251,8 @@ public class MainActivity extends Activity {
         } else {
             player.setMediaItem(media.build(), 0);
         }
+        player.setPlayWhenReady(live);
         player.prepare();
-        player.play();
     }
 
     private void failPlayback() {
@@ -1272,7 +1295,9 @@ public class MainActivity extends Activity {
         showBuffering("Connecting to the studio…", true);
         waitForPlayback();
         startStream(url, false);
-        animateCassette(true, title, () -> {});
+        animateCassette(true, title, () -> {
+            if (!ejectingTape && activeMovieUrl.equals(url)) player.play();
+        });
         showBanner("REWIND CINEMA   •   " + title);
     }
     private String displayNumber(Channel channel, int index) {
@@ -1334,7 +1359,7 @@ public class MainActivity extends Activity {
                 else if (!activeMovieUrl.isEmpty()) playUrl(streamTitle, activeMovieUrl);
                 return true;
             }
-            if (key == KeyEvent.KEYCODE_BACK || (select && tunedChannel != null)) {
+            if (key == KeyEvent.KEYCODE_BACK || key == KeyEvent.KEYCODE_BUTTON_B || (select && tunedChannel != null)) {
                 if (!activeMovieUrl.isEmpty()) ejectMovie();
                 else {
                     returnToGuide();
@@ -1378,25 +1403,37 @@ public class MainActivity extends Activity {
         return Settings.Global.getFloat(getContentResolver(), Settings.Global.ANIMATOR_DURATION_SCALE, 1f) != 0f;
     }
 
+    @Override public void onBackPressed() {
+        if (!guideVisible && !activeMovieUrl.isEmpty()) ejectMovie();
+        else if (!guideVisible) returnToGuide();
+        else super.onBackPressed();
+    }
+
     private void animateCassette(boolean inserting, String title, Runnable complete) {
         if (cassetteMotion != null) activityRoot.removeView(cassetteMotion);
         if (!motionEnabled()) { complete.run(); return; }
         FrameLayout layer = new FrameLayout(this);
-        layer.setBackgroundColor(color("#100D22"));
+        layer.setBackground(surface(new int[]{color("#090914"), color("#3E2153"), color("#100D22")}, 0, 0, 0));
         TextView slot = text("", 13, true);
         slot.setBackground(surface(new int[]{color("#08060C"), color("#211F33")}, color("#9F76AA"), 2, 6));
-        layer.addView(slot, new FrameLayout.LayoutParams(dp(310), dp(42), Gravity.CENTER));
+        layer.addView(slot, new FrameLayout.LayoutParams(dp(362), dp(48), Gravity.CENTER));
         TextView tape = text("VHS   •   " + title, 15, true);
         tape.setGravity(Gravity.CENTER);
         tape.setTextColor(color("#FFE2B2"));
-        tape.setBackground(surface(new int[]{color("#392540"), color("#171222")}, color("#C6A475"), 2, 8));
-        layer.addView(tape, new FrameLayout.LayoutParams(dp(275), dp(71), Gravity.CENTER));
+        tape.setBackground(surface(new int[]{color("#674860"), color("#392641"), color("#161222")}, color("#C6A475"), 3, 8));
+        tape.setElevation(dp(9));
+        layer.addView(tape, new FrameLayout.LayoutParams(dp(307), dp(86), Gravity.CENTER));
         activityRoot.addView(layer, new FrameLayout.LayoutParams(-1, -1));
         cassetteMotion = layer;
-        tape.setTranslationY(inserting ? dp(90) : 0);
-        tape.setRotationX(inserting ? 18 : 75);
-        tape.animate().translationY(inserting ? 0 : dp(90)).rotationX(inserting ? 75 : 18)
-                .setDuration(310).withEndAction(() -> {
+        tape.setCameraDistance(dp(6500));
+        tape.setTranslationY(inserting ? dp(104) : 0);
+        tape.setRotationX(inserting ? 22 : 82);
+        tape.setRotation(inserting ? -12f : 0f);
+        tape.setRotationY(inserting ? -16f : 0f);
+        tape.setAlpha(inserting ? 1f : .2f);
+        tape.animate().translationY(inserting ? 0 : dp(104)).rotationX(inserting ? 82 : 22)
+                .rotation(inserting ? 0f : -12f).rotationY(inserting ? 0f : -16f).alpha(inserting ? .12f : 1f)
+                .setDuration(inserting ? 1250 : 760).withEndAction(() -> {
                     if (cassetteMotion != layer) return;
                     activityRoot.removeView(layer);
                     cassetteMotion = null;
@@ -1451,12 +1488,14 @@ public class MainActivity extends Activity {
 
     private static class Creator {
         final String name, description, playlist, vault, channelStatus;
-        Creator(String name, String description, String playlist, String vault, String channelStatus) {
+        final boolean cinemaSupported;
+        Creator(String name, String description, String playlist, String vault, String channelStatus, boolean cinemaSupported) {
             this.name = name;
             this.description = description;
             this.playlist = playlist;
             this.vault = vault;
             this.channelStatus = channelStatus;
+            this.cinemaSupported = cinemaSupported;
         }
     }
     private static class Channel {

@@ -20,7 +20,7 @@ from pathlib import Path
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.26"
+VERSION = "3.5.27"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -121,6 +121,7 @@ def local_creator() -> dict:
             request = urllib.request.Request(f"{LOCAL_CREATOR}/api/local-creator", headers=headers)
             with urllib.request.urlopen(request, timeout=1) as response:
                 status = json.load(response)
+                server_version = response.headers.get("Server", "")
         except urllib.error.HTTPError as error:
             if error.code != 404:
                 raise
@@ -128,12 +129,17 @@ def local_creator() -> dict:
             request = urllib.request.Request(f"{LOCAL_CREATOR}/api/status", headers=headers)
             with urllib.request.urlopen(request, timeout=2) as response:
                 status = json.load(response)
+                server_version = response.headers.get("Server", "")
         count = status.get("channel_count")
         if not isinstance(count, int):
             count = len(status.get("channels") or [])
         config = status.get("config") or {}
         name = (status.get("name") or (config.get("creator_profile") or {}).get("name")
                 or (config.get("plex_profile") or {}).get("server_name") or "My ChannelForge Studio")
+        installed = re.search(r"Public_ChannelForge/(\d+\.\d+\.\d+)", str(server_version))
+        creator_version = str(status.get("version") or (installed.group(1) if installed else ""))
+        compatible = bool(re.fullmatch(r"\d+\.\d+\.\d+", creator_version)
+                          and tuple(map(int, creator_version.split("."))) >= (3, 5, 19))
     except Exception:
         return {"available": False}
     return {"available": True, "creator": {
@@ -143,6 +149,7 @@ def local_creator() -> dict:
         "playlist_url": f"{LOCAL_CREATOR}/exports/channels.m3u",
         "status_url": f"{LOCAL_CREATOR}/api/public/channels",
         "vault_url": f"{LOCAL_CREATOR}/api/public/vault",
+        "cinema_supported": compatible,
         "public_id": status.get("creator_id") or config.get("creator_id", ""),
         "public_playlist_url": (str(status.get("public_url") or config.get("public_url")).rstrip("/") + "/exports/channels.m3u"
                                 if status.get("public_url") or config.get("public_url") else ""),
@@ -465,10 +472,14 @@ function creatorArtwork(url, creator){
     const address=creatorMedia(url,creator);
     return address?'/proxy?url='+encodeURIComponent(address):'';
 }
+function supportsCinema(creator){
+    return Boolean(creator?.vault_url&&creator.cinema_supported===true);
+}
 function adoptCreators(creators){
     allCreators=creators;
-    const current=creators.find(creator=>creator.playlist_url===selectedCreator?.playlist_url);
-    const next=current||creators[0]||null;
+    const cinemaCreators=creators.filter(supportsCinema);
+    const current=cinemaCreators.find(creator=>creator.playlist_url===selectedCreator?.playlist_url||creator.id===selectedCreator?.id);
+    const next=current||cinemaCreators[0]||null;
     if(next?.vault_url!==selectedCreator?.vault_url){
         vaultController?.abort();
         vaultPaging?.controller?.abort();
@@ -482,12 +493,12 @@ function adoptCreators(creators){
     selectedCreator=next;
     const urls=new Set(creators.map(creator=>creator.playlist_url));
     for(const key of channelsByStudio.keys())if(!urls.has(key))channelsByStudio.delete(key);
-    const signature=JSON.stringify(creators.map(c=>[c.id,c.playlist_url,c.vault_url,c.name,c.description,c.logo_url,c.local]));
+    const signature=JSON.stringify(cinemaCreators.map(c=>[c.id,c.playlist_url,c.vault_url,c.name,c.description,c.logo_url,c.local]));
     if(signature!==creatorsSignature || !$('#creators').hasChildNodes()){
         creatorsSignature=signature;
         const list=$('#creators'),fragment=document.createDocumentFragment();
         list.textContent='';
-        for(const c of creators){
+        for(const c of cinemaCreators){
             const b=document.createElement('button');
             b.className='creator';
             b.innerHTML=(c.logo_url?'<img loading="lazy" src="'+esc(c.logo_url)+'" style="width:46px;height:46px;object-fit:contain;float:left;margin-right:12px">':'')+'<b>'+esc(c.name)+'</b><br><small>'+esc(c.description)+(c.local?' • THIS PC':'')+'</small>';
@@ -495,7 +506,7 @@ function adoptCreators(creators){
             b.onclick=()=>selectCinemaStudio(c);
             fragment.append(b);
         }
-        if(!creators.length)list.innerHTML='<span class="empty">No public creator studios are online right now.</span>';
+        if(!cinemaCreators.length)list.innerHTML='<span class="empty">No compatible movie studios are online.</span>';
         else list.append(fragment);
     }
     updateCinemaStudios();
@@ -508,11 +519,11 @@ function adoptCreators(creators){
 function updateCinemaStudios(){
     const select=$('#cinema-studio-select');
     if(select){
-        const options=allCreators.map(creator=>[creator.name,creator.playlist_url]);
+        const options=allCreators.filter(supportsCinema).map(creator=>[creator.name,creator.playlist_url]);
         const rendered=[...select.options].map(option=>[option.text,option.value]);
         if(JSON.stringify(options)!==JSON.stringify(rendered))
             select.replaceChildren(...options.map(([name,url])=>new Option(name,url)));
-        select.disabled=!allCreators.length;
+        select.disabled=!options.length;
         select.value=selectedCreator?.playlist_url||'';
     }
     for(const button of $('#creators').querySelectorAll('[data-playlist]')){
@@ -521,7 +532,7 @@ function updateCinemaStudios(){
     }
 }
 function selectCinemaStudio(creator){
-    if(!creator)return;
+    if(!supportsCinema(creator))return;
     selectedCreator=creator;
     updateCinemaStudios();
     showScreen('cinema');
@@ -874,8 +885,12 @@ function playCinemaMovie(movie){
         movieOwnsFullscreen=true;
         setApplicationFullscreen(true);
     }
-    play(movie.stream_url,{kind:'movie',title:movie.title,movie,cinema:true});
-    animateCinemaTape(true,movie.title);
+    const media={kind:'movie',title:movie.title,movie,cinema:true,transportPending:true};
+    play(movie.stream_url,media);
+    animateCinemaTape(true,movie.title,()=>{
+        media.transportPending=false;
+        if(activeMedia===media)media.startAfterTransport?.();
+    });
 }
 let cinemaTapeTimer;
 function animateCinemaTape(inserting,title,done=()=>{}){
@@ -885,7 +900,10 @@ function animateCinemaTape(inserting,title,done=()=>{}){
         stage=document.createElement('div');
         stage.id='cinema-tape-animation';
         stage.setAttribute('aria-hidden','true');
-        stage.innerHTML='<div class="cinema-tape-slot"></div><div class="cinema-tape-prop"><span></span><b></b></div>';
+        stage.innerHTML='<div class="cinema-tape-deck"><span class="cinema-deck-brand">CHANNELFORGE HOME VIDEO</span>'
+            +'<div class="cinema-tape-slot"></div><span class="cinema-deck-light"></span></div>'
+            +'<div class="cinema-tape-prop"><div class="cinema-tape-face"><span></span><b></b></div>'
+            +'<div class="cinema-tape-front"></div><div class="cinema-tape-side"></div></div>';
         document.body.append(stage);
     }
     if(matchMedia('(prefers-reduced-motion: reduce)').matches){stage.hidden=true;done();return}
@@ -894,7 +912,7 @@ function animateCinemaTape(inserting,title,done=()=>{}){
     stage.className='';
     void stage.offsetWidth;
     stage.className=inserting?'inserting':'ejecting';
-    cinemaTapeTimer=setTimeout(()=>{stage.hidden=true;done()},330);
+    cinemaTapeTimer=setTimeout(()=>{stage.hidden=true;done()},inserting?1250:760);
 }
 function restoreCinemaWindow(){
     if(!movieOwnsFullscreen)return;
@@ -1014,13 +1032,18 @@ function play(url,media=null,continuing=false){
     $('#close').hidden=liveMode&&!playerMini;
     $('#close').textContent=playerMini?'✕ CLOSE PLAYER':'✕ CLOSE MOVIE';
     v.controls=!liveMode;updateTunedIndicator(activeMedia,'CONNECTING…');setBuffering(true,'Connecting to the studio…');showPlayerControls();renderLiveGuide();
+    v.autoplay=!activeMedia.transportPending;
     v.classList.add('playing');$('#close').classList.add('show');
     v.removeAttribute('src');v.load();
     if(liveMode&&activeMedia.channel?.online===false){showChannelOffline();return}
     armPlaybackDeadline(generation,24000);
-    const start=()=>{if(generation===playbackGeneration)v.play().catch(error=>{
-        if(generation===playbackGeneration)setPlayerState(error.message||'PRESS PLAY TO START',true);
-    })};
+    const start=()=>{
+        if(generation!==playbackGeneration)return;
+        if(activeMedia.transportPending){activeMedia.startAfterTransport=start;return}
+        v.play().catch(error=>{
+            if(generation===playbackGeneration)setPlayerState(error.message||'PRESS PLAY TO START',true);
+        });
+    };
     if(window.Hls&&Hls.isSupported()){
         const local=['127.0.0.1','localhost','[::1]'].includes(new URL(url,location.href).hostname);
         const liveBuffer=local?{liveSyncDurationCount:2,liveMaxLatencyDurationCount:8,maxBufferLength:8,maxMaxBufferLength:12}
@@ -1306,7 +1329,7 @@ CONTROLLER_JS = r'''
 function tvFocusTargets(){let dialog=document.querySelector('dialog[open]'),scope=dialog||document;return[...scope.querySelectorAll('button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(element=>!element.hidden&&element.offsetParent!==null&&getComputedStyle(element).visibility!=='hidden')}
 function tvMoveFocus(direction){if(liveMode&&$('#player').classList.contains('playing')&&!playerMini&&(direction==='up'||direction==='down')){surfChannel(direction==='up'?-1:1);return}let targets=tvFocusTargets(),current=targets.includes(document.activeElement)?document.activeElement:null;if(!targets.length)return;if(!current){targets[0].focus();return}let origin=current.getBoundingClientRect(),ox=origin.left+origin.width/2,oy=origin.top+origin.height/2,best=null,score=Infinity;for(let target of targets){if(target===current)continue;let rect=target.getBoundingClientRect(),dx=rect.left+rect.width/2-ox,dy=rect.top+rect.height/2-oy,primary=direction==='left'?-dx:direction==='right'?dx:direction==='up'?-dy:dy,secondary=direction==='left'||direction==='right'?Math.abs(dy):Math.abs(dx);if(primary<=4)continue;let candidate=primary+secondary*2.25;if(candidate<score){score=candidate;best=target}}if(best){best.focus({preventScroll:true});best.scrollIntoView({behavior:'smooth',block:'nearest',inline:'nearest'})}}
 function tvBack(){let dialog=document.querySelector('dialog[open]');if(dialog){dialog.close();return}if($('#player').classList.contains('playing')){closeVideoView();return}showScreen('home');document.querySelector('[data-screen="home"]')?.focus()}
-document.addEventListener('keydown',event=>{let editable=event.target.matches?.('input,textarea,select,[contenteditable="true"]');if(editable&&event.key!=='Escape')return;let direction={ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down'}[event.key];if(direction){event.preventDefault();tvMoveFocus(direction)}else if(event.key==='Escape'){event.preventDefault();tvBack()}});
+document.addEventListener('keydown',event=>{let editable=event.target.matches?.('input,textarea,select,[contenteditable="true"]');if(editable&&event.key!=='Escape')return;let direction={ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down'}[event.key];if(direction){event.preventDefault();tvMoveFocus(direction)}else if(event.key==='Escape'||(event.key.toLowerCase()==='b'&&activeMedia?.cinema)){event.preventDefault();tvBack()}});
 let tvGamepadState={},tvGamepadRepeat=0;function pollTvGamepads(now){let pad=[...(navigator.getGamepads?.()||[])].find(Boolean);if(pad){let state={up:pad.buttons[12]?.pressed||pad.axes[1]<-.55,down:pad.buttons[13]?.pressed||pad.axes[1]>.55,left:pad.buttons[14]?.pressed||pad.axes[0]<-.55,right:pad.buttons[15]?.pressed||pad.axes[0]>.55,activate:pad.buttons[0]?.pressed,back:pad.buttons[1]?.pressed};for(let action of Object.keys(state)){let repeatable=['up','down','left','right'].includes(action),repeat=repeatable&&state[action]&&tvGamepadState[action]&&now-tvGamepadRepeat>190;if(state[action]&&(!tvGamepadState[action]||repeat)){showPlayerControls();if(repeatable){tvMoveFocus(action);tvGamepadRepeat=now}else if(action==='activate')document.activeElement?.click();else tvBack()}}tvGamepadState=state}else tvGamepadState={};requestAnimationFrame(pollTvGamepads)}requestAnimationFrame(pollTvGamepads);
 '''
 HOME_DETAILS = r'''<section class="home-panels" data-section-block="home"><article class="home-card"><span class="eyebrow">WELCOME</span><h3>Your community television hub</h3><p>ChannelForge TV brings creator-made live channels and shared movie shelves into one remote-friendly application. Open Live TV to browse the automatic channel guide, or Rewind Cinema to explore movies from connected studios.</p></article><article class="home-card"><div class="release-heading"><div><span class="eyebrow">LATEST UPDATE</span><h3>Release notes</h3></div><strong id="home-release-version">v__VERSION__</strong></div><p id="home-update-state">Checking the official release…</p><pre id="home-changelog" class="home-changelog">Loading changelog…</pre></article></section>'''.replace("__VERSION__", VERSION)

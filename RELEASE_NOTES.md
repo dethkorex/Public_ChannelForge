@@ -5,3 +5,6 @@
 - Live TV continues into the next program and shows when a channel is offline.
 - Fullscreen Guide and Cinema use the whole screen. Fire TV has a collapsible sidebar with the same navigation as desktop.
 - The worldwide directory hides unsupported Creator versions until the studio updates and reconnects.
+- Rewind Cinema switches cleanly between compatible studios. The 3D tape seats before the movie plays, and Back or B ejects it.
+- Creator shows connected libraries while shared Plex libraries load and previews channel logos, backgrounds, and corner overlays.
+- Previously indexed Plex movies open from the Creator library cache. Public adaptive streams start with one fewer network request.

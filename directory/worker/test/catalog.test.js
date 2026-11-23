@@ -24,13 +24,16 @@ test("simultaneous publications remain independently discoverable and removable"
   }};
   let vaultAvailable = true;
   let originAvailable = true;
+  let originVersion = "";
   t.mock.method(globalThis, "fetch", async url => {
     const path = new URL(url).pathname;
     if (!originAvailable || (!vaultAvailable && path === "/api/public/vault")) {
       return new Response(null, {status: 504});
     }
     return new Response(path.endsWith(".xml") ? "<tv></tv>" : path.endsWith(".m3u") ? "#EXTM3U" :
-      path === "/api/public/channels" ? '{"channels":[]}' : '{"items":[]}');
+      path === "/api/public/channels" ? '{"channels":[]}' : '{"items":[]}', {
+        headers: originVersion ? {"Server": "Public_ChannelForge/" + originVersion} : {},
+      });
   });
   const directory = "https://example.com";
   const catalog = async () => (await (await worker.fetch(new Request(directory + "/v1/catalog"), env)).json()).creators;
@@ -49,6 +52,7 @@ test("simultaneous publications remain independently discoverable and removable"
     publish("Test studio 2", "https://second.example.com"),
   ]);
   assert.deepEqual(await catalog(), [creator, rival.creator]);
+  assert.equal(creator.cinema_supported, false);
   const removal = await worker.fetch(new Request(directory + "/v1/creators/" + creator.id, {
     method: "DELETE", headers: {Authorization: "Bearer " + key},
   }), env);
@@ -70,6 +74,12 @@ test("simultaneous publications remain independently discoverable and removable"
   await probe();
   assert.deepEqual(await catalog(), []);
   originAvailable = true;
+  originVersion = "3.5.18";
   await probe();
-  assert.deepEqual((await catalog()).map(studio => studio.id), [rival.creator.id]);
+  assert.deepEqual(await catalog(), []);
+  originVersion = "3.5.27";
+  await probe();
+  const [recovered] = await catalog();
+  assert.equal(recovered.id, rival.creator.id);
+  assert.equal(recovered.cinema_supported, true);
 });

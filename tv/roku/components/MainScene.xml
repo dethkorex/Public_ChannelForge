@@ -8,7 +8,7 @@
       <Rectangle width="1920" height="1080" color="0x050a11ee"/>
       <Label text="CHANNELFORGE  /  REWIND CINEMA  /  LIVE TV" translation="[55,35]" width="1300" height="48" color="0x67f0c2ff" font="font:LargeBoldSystemFont"/>
       <Button id="pair" text="OPTIONAL PAIR" translation="[1270,28]" width="225" height="58"/>
-      <Button id="updates" text="UPDATES  •  v3.5.26" translation="[1510,28]" width="350" height="58"/>
+      <Button id="updates" text="UPDATES  •  v3.5.27" translation="[1510,28]" width="350" height="58"/>
       <Label id="status" text="Finding creator studios…" translation="[58,88]" width="1500" height="35" color="0xa9b7c8ff"/>
       <MarkupList id="creators" translation="[55,145]" itemComponentName="CreatorCard" itemSize="[570,92]" itemSpacing="[0,10]"/>
       <MarkupList id="channels" translation="[680,145]" width="760" height="390" itemComponentName="ChannelCard" itemSize="[760,88]" itemSpacing="[0,10]"/>
@@ -47,11 +47,13 @@
         <Label id="tapeTitle" translation="[12,35]" width="516" height="48" color="0xffe1abff" horizAlign="center" font="font:MediumBoldSystemFont"/>
       </Group>
     </Group>
-    <Animation id="insertTapeMotion" duration="0.32" repeat="false">
-      <Vector2DFieldInterpolator key="[0,1]" keyValue="[[690,650],[690,480]]" fieldToInterp="tapeProp.translation"/>
+    <Animation id="insertTapeMotion" duration="1.24" repeat="false">
+      <Vector2DFieldInterpolator key="[0,0.32,0.7,1]" keyValue="[[725,685],[693,610],[690,545],[690,475]]" fieldToInterp="tapeProp.translation"/>
+      <Vector2DFieldInterpolator key="[0,0.4,0.72,1]" keyValue="[[1,1],[0.98,0.85],[0.96,0.48],[0.94,0.1]]" fieldToInterp="tapeProp.scale"/>
     </Animation>
-    <Animation id="ejectTapeMotion" duration="0.32" repeat="false">
+    <Animation id="ejectTapeMotion" duration="0.75" repeat="false">
       <Vector2DFieldInterpolator key="[0,1]" keyValue="[[690,480],[690,650]]" fieldToInterp="tapeProp.translation"/>
+      <Vector2DFieldInterpolator key="[0,1]" keyValue="[[0.94,0.1],[1,1]]" fieldToInterp="tapeProp.scale"/>
     </Animation>
     <Timer id="tapeTimer" duration="0.34" repeat="false"/>
   </children>

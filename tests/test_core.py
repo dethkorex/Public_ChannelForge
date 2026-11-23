@@ -613,6 +613,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(json.loads(gzip.decompress(body)), payload)
         self.assertLess(len(body) * 5, len(gzip.decompress(body)))
 
+    def test_adaptive_tune_sends_master_without_redirecting(self):
+        handler = object.__new__(app.Handler)
+        handler.send_bytes = mock.Mock()
+        handler.redirect = mock.Mock()
+        route = "/ffmpeg-stream/test-session/index.m3u8"
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest = directory / "index.m3u8"
+            manifest.write_bytes(b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=192000\nindex_economy.m3u8\n")
+            with mock.patch.object(app, "FFMPEG_SESSIONS", {"test-session": {"directory": directory}}):
+                handler.send_playback_manifest(route)
+                handler.send_bytes.assert_called_once_with(
+                    200, b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=192000\n/ffmpeg-stream/test-session/index_economy.m3u8\n",
+                    "application/vnd.apple.mpegurl",
+                )
+                handler.redirect.assert_not_called()
+                manifest.write_bytes(b"#EXTM3U\n#EXTINF:1,\nsegment000001.ts\n")
+                handler.send_playback_manifest(route)
+                handler.redirect.assert_called_once_with(route)
+
     def test_rewind_cinema_automatically_indexes_all_plex_movies(self):
         libraries = [{"key": "1", "title": "Movies", "type": "movie", "source": "plex"}, {"key": "2", "title": "TV", "type": "show", "source": "plex"}]
         movies = [{"id": "10", "title": "Movie One", "type": "movie", "thumb": "/library/metadata/10/thumb/1", "key": "/library/metadata/10"}]
@@ -638,6 +658,26 @@ class CoreTests(unittest.TestCase):
         shared = next(item for item in app.cached_plex_movies() if item["source"] == "plex-shared")
         self.assertEqual(shared["section"], "plex:dad-server:7")
         self.assertEqual(shared["plex_server_id"], "dad-server")
+
+    def test_connected_library_list_does_not_wait_for_shared_discovery(self):
+        personal = {"key": "1", "title": "Movies", "type": "movie"}
+        with mock.patch.object(app, "plex_libraries", return_value=[personal]), \
+             mock.patch.object(app, "plex_resource_servers") as discover:
+            self.assertEqual(app.all_libraries(include_shared=False), [{**personal, "source": "plex"}])
+        discover.assert_not_called()
+
+    def test_library_workspace_reads_the_current_movie_index_without_plex(self):
+        section = "plex:shared-server:3"
+        first = {"id": "1", "title": "First movie", "type": "movie", "section": section}
+        second = {**first, "id": "2", "title": "A newly indexed movie"}
+        with mock.patch.object(app, "plex_items", return_value=[]) as fetch:
+            app.atomic_json(app.VAULT_CATALOG_FILE, {"items": [first]})
+            self.assertEqual(app.library_items(section, prefer_index=True), [first])
+            app.atomic_json(app.VAULT_CATALOG_FILE, {"items": [second]})
+            self.assertEqual(app.library_items(section, prefer_index=True), [second])
+            fetch.assert_not_called()
+            self.assertEqual(app.library_items("44", prefer_index=True), [])
+            fetch.assert_called_once_with("44")
 
     def test_idle_playback_session_is_stopped(self):
         process = mock.Mock()

@@ -13,7 +13,7 @@ sub load()
       node.url = creator.playlist_url
       node.AddField("statusUrl", "string", false)
       if creator.status_url <> invalid then node.statusUrl = creator.status_url
-      node.shortDescriptionLine2 = creator.vault_url
+      if creator.cinema_supported = true then node.shortDescriptionLine2 = creator.vault_url
       node.hdPosterUrl = creator.logo_url
     end for
   end if

@@ -32,6 +32,7 @@ import urllib.request
 import webbrowser
 import zlib
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -40,7 +41,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.26"
+VERSION = "3.5.27"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -1190,7 +1191,16 @@ def scan_plex_movies() -> dict:
 
 
 def cached_plex_movies() -> list[dict]:
-    payload = load_json(VAULT_CATALOG_FILE, {})
+    try:
+        changed = VAULT_CATALOG_FILE.stat()
+    except OSError:
+        return []
+    return read_indexed_plex_movies(VAULT_CATALOG_FILE, changed.st_mtime_ns, changed.st_size)
+
+
+@lru_cache(maxsize=2)
+def read_indexed_plex_movies(path: Path, _modified: int, _length: int) -> list[dict]:
+    payload = load_json(path, {})
     items = payload.get("items", []) if isinstance(payload, dict) else []
     return items if isinstance(items, list) else []
 
@@ -1216,7 +1226,7 @@ def sync_plex_movies_async() -> None:
     threading.Thread(target=worker, daemon=True, name="channel-forge-rewind-sync").start()
 
 
-def all_libraries() -> list[dict]:
+def all_libraries(*, include_shared: bool = True) -> list[dict]:
     local = [{"key": item["key"], "title": item["title"], "type": "local", "source": "local"} for item in local_libraries()]
     result = []
     if config()["plex_token"]:
@@ -1224,10 +1234,12 @@ def all_libraries() -> list[dict]:
             result.extend({**item, "source": "plex"} for item in plex_libraries())
         except ValueError:
             pass
-        try:
-            shared_servers = plex_resource_servers()
-        except ValueError:
-            shared_servers = {}
+        shared_servers = {}
+        if include_shared:
+            try:
+                shared_servers = plex_resource_servers()
+            except ValueError:
+                pass
         if shared_servers:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(shared_servers)), thread_name_prefix="plex-shared-library") as pool:
                 jobs = {pool.submit(plex_libraries, server_id): server_id for server_id in shared_servers}
@@ -1319,8 +1331,14 @@ def local_items(section: str) -> list[dict]:
     return result
 
 
-def library_items(section: str) -> list[dict]:
-    return local_items(section) if section.startswith("local:") else plex_items(section)
+def library_items(section: str, *, prefer_index: bool = False) -> list[dict]:
+    if section.startswith("local:"):
+        return local_items(section)
+    if prefer_index and config().get("plex_token"):
+        indexed = [item for item in cached_plex_movies() if item.get("section") == section]
+        if indexed:
+            return indexed
+    return plex_items(section)
 
 
 def local_image(section: str, media_id: str) -> tuple[bytes, str]:
@@ -2306,7 +2324,8 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
                 "stop_epoch_ms": int(slot["stop"].timestamp() * 1000),
             } for slot in slots],
         })
-    return {"version": 1, "generated_at": moment.isoformat(), "channels": result}
+    return {"version": 1, "creator_version": VERSION, "cinema_supported": True,
+            "generated_at": moment.isoformat(), "channels": result}
 
 
 def vault_source(item_id: str) -> dict:
@@ -2406,7 +2425,9 @@ class Handler(BaseHTTPRequestHandler):
     def send_json(self, status: int, payload: object) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         headers = {}
-        if len(body) >= 1024 and urllib.parse.urlsplit(self.path).path in {"/api/public/channels", "/api/public/vault"}:
+        if len(body) >= 1024 and urllib.parse.urlsplit(self.path).path in {
+            "/api/public/channels", "/api/public/vault", "/api/library/items",
+        }:
             headers["Vary"] = "Accept-Encoding"
             if any(part.strip().lower() == "gzip" for part in self.headers.get("Accept-Encoding", "").split(",")):
                 body = gzip.compress(body, compresslevel=3)
@@ -2421,6 +2442,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+
+    def send_playback_manifest(self, route: str) -> None:
+        match = re.fullmatch(r"(/ffmpeg-stream/([a-zA-Z0-9_-]+)/)index\.m3u8", route)
+        if match:
+            with LOCK:
+                session = FFMPEG_SESSIONS.get(match[2])
+            if session:
+                try:
+                    manifest = (session["directory"] / "index.m3u8").read_bytes()
+                except OSError:
+                    manifest = b""
+                if b"#EXT-X-STREAM-INF:" in manifest:
+                    # Keep the media playlists at their session URLs. Only the
+                    # master is inlined so a tune saves one network round trip.
+                    manifest = re.sub(rb"(?m)^index_(economy|balanced|hd)\.m3u8$",
+                                      lambda line: match[1].encode() + line[0], manifest)
+                    return self.send_bytes(200, manifest, "application/vnd.apple.mpegurl")
+        self.redirect(route)
 
     def body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -2437,7 +2476,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/local-creator":
                 settings = config()
                 name = settings["creator_profile"].get("name") or settings["plex_profile"].get("server_name")
-                self.send_json(200, {"app": APP_NAME, "name": name, "channel_count": len(channels()),
+                self.send_json(200, {"app": APP_NAME, "version": VERSION, "name": name, "channel_count": len(channels()),
                                      "creator_id": settings["creator_id"], "public_url": settings["public_url"]})
             elif parsed.path == "/api/status":
                 if urllib.parse.parse_qs(parsed.query).get("brief") == ["1"]:
@@ -2461,10 +2500,12 @@ class Handler(BaseHTTPRequestHandler):
                 section = urllib.parse.parse_qs(parsed.query).get("section", [""])[0]
                 self.send_json(200, {"items": plex_items(section)})
             elif parsed.path == "/api/libraries":
-                self.send_json(200, {"libraries": all_libraries()})
+                query = urllib.parse.parse_qs(parsed.query)
+                self.send_json(200, {"libraries": all_libraries(include_shared=query.get("scope") != ["connected"])})
             elif parsed.path == "/api/library/items":
-                section = urllib.parse.parse_qs(parsed.query).get("section", [""])[0]
-                self.send_json(200, {"items": library_items(section)})
+                query = urllib.parse.parse_qs(parsed.query)
+                section = query.get("section", [""])[0]
+                self.send_json(200, {"items": library_items(section, prefer_index=query.get("indexed") == ["1"])})
             elif parsed.path == "/api/local/image":
                 query = urllib.parse.parse_qs(parsed.query)
                 data, content_type = local_image(query.get("section", [""])[0], query.get("id", [""])[0])
@@ -2541,12 +2582,12 @@ class Handler(BaseHTTPRequestHandler):
                     with LOCK:
                         PLAYBACK_ERRORS[channel_id] = (time.monotonic(), sanitized_playback_error(exc))
                     raise
-                self.redirect(route)
+                self.send_playback_manifest(route)
             elif parsed.path.startswith("/vault/") and parsed.path.endswith(".m3u8"):
                 item_id = Path(parsed.path).stem
                 if not re.fullmatch(r"[a-f0-9]{24}", item_id):
                     raise FileNotFoundError
-                self.redirect(start_vault_session(item_id))
+                self.send_playback_manifest(start_vault_session(item_id))
             elif parsed.path.startswith("/ffmpeg-stream/"):
                 parts = parsed.path.strip("/").split("/")
                 if len(parts) != 3 or not re.fullmatch(ENCODER_FILE, parts[2]):

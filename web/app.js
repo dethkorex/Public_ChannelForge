@@ -1,6 +1,9 @@
 let state={channels:[],assets:[],tools:[],config:{}},libraries=[],mediaChoices=[],workspaceMedia=[],libraryMediaCache=new Map(),hlsPlayer=null,activeChannel="",draggedChannel="",builderStep=1,retuneTimer=0,updateRelease=null,plexSigninTimer=0,guideOffsetHours=0;
 const selectedLineup = new Map();
-let mediaLoadRequest = 0;
+let mediaLoadRequest = 0, workspaceLibraryRequest = 0, workspaceMediaRequest = 0;
+let libraryRequest, libraryFetchedAt = 0;
+const workspaceBatchSize = 96;
+let workspaceDisplayLimit = workspaceBatchSize;
 const $=s=>document.querySelector(s),escapeHtml=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const mediaThumb=(item,section)=>item.source==="local"?`/api/local/image?section=${encodeURIComponent(section)}&id=${encodeURIComponent(item.id)}`:`/api/plex/image?path=${encodeURIComponent(item.thumb)}&server=${encodeURIComponent(item.plex_server_id||"")}`;
 const nextChannelNumber=()=>String(Math.max(0,...state.channels.map(channel=>Number.parseInt(channel.number,10)||0))+1);
@@ -14,8 +17,68 @@ function renderStudioSummary(){
   $("#overview-channel-count").textContent=`${count} channel${count===1?"":"s"}`;
   $("#creator-overview-title").textContent=state.config.creator_profile?.name||"Your ChannelForge studio";
   const checks=[{name:"Plex connection",ok:state.config.token_saved,detail:state.config.plex_profile?.server_name||"Not connected"},{name:"Standalone encoder",ok:state.playback_engine?.available!==false,detail:state.playback_engine?.source||"FFmpeg HLS engine"},{name:"Hosted guide",ok:true,detail:`${state.channels.length} channels published`},{name:"Branding library",ok:state.assets.length>0,detail:`${state.assets.length} assets available`}].map(check=>`<article class="${check.ok?"ok":""}"><span class="check-icon">${check.ok?"✓":"!"}</span><div><b>${check.name}</b><small>${escapeHtml(check.detail)}</small></div></article>`).join("");if($("#system-checks").innerHTML!==checks)$("#system-checks").innerHTML=checks;const now=state.channels.map(channel=>{const live=state.now_playing?.[channel.id],logo=state.assets.find(asset=>asset.id===channel.logo_asset_id);return `<article>${logo?`<img class="channel-logo-small" src="/user-assets/${encodeURIComponent(logo.filename)}" alt="">`:""}<span class="channel-number">CH ${escapeHtml(channel.number)}</span><h3>${escapeHtml(channel.name)}</h3><p>${escapeHtml(live?.title||"Ready to play")}</p><div class="actions"><button data-watch="${channel.id}" data-view="watch">Watch now</button><button data-edit="${channel.id}">Edit lineup</button></div></article>`}).join("")||'<div class="empty">Create a channel to begin your live lineup.</div>';if($("#overview-now-playing").innerHTML!==now)$("#overview-now-playing").innerHTML=now;const artwork=state.channels.map(channel=>{const logo=state.assets.find(asset=>asset.id===channel.logo_asset_id);return `<article class="guide-artwork-card">${logo?`<img src="/user-assets/${encodeURIComponent(logo.filename)}" alt="">`:'<span class="poster-placeholder">CF</span>'}<b>CH ${escapeHtml(channel.number)} · ${escapeHtml(channel.name)}</b><small>${logo?"Published in XMLTV":"Uses text identity — assign a logo in Channels"}</small></article>`}).join("");if($("#guide-artwork-grid").innerHTML!==artwork)$("#guide-artwork-grid").innerHTML=artwork}
-async function loadWorkspaceLibraries(){const data=await api("/api/libraries");libraries=data.libraries;$("#workspace-library").innerHTML='<option value="">Choose a library</option>'+libraries.map(item=>`<option value="${escapeHtml(item.key)}">${escapeHtml(item.title)} (${item.source==="local"?"local folder":escapeHtml(item.type)})</option>`).join("")}
-function renderWorkspaceMedia(){const query=$("#workspace-library-search").value.trim().toLowerCase(),visible=workspaceMedia.filter(item=>`${item.title} ${item.year}`.toLowerCase().includes(query)),section=$("#workspace-library").value;$("#workspace-library-count").textContent=`${visible.length} playable titles`;$("#workspace-library-grid").innerHTML=visible.length?visible.map(item=>`<article class="studio-media-card">${item.thumb?`<img src="${mediaThumb(item,section)}" alt="" loading="lazy">`:'<span class="poster-placeholder">CF</span>'}<div><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.type)}${item.year?` · ${escapeHtml(item.year)}`:""}</small></div></article>`).join(""):'<div class="empty">No matching titles.</div>'}
+function libraryOptions(items) {
+  return '<option value="">Choose a library</option>' + items.map(item =>
+    `<option value="${escapeHtml(item.key)}">${escapeHtml(item.title)} (${item.source === "local" ? "local folder" : escapeHtml(item.type)})</option>`
+  ).join("");
+}
+function requestLibraries(force = false) {
+  if (libraryRequest) return libraryRequest;
+  if (!force && libraryFetchedAt && Date.now() - libraryFetchedAt < 60000) return Promise.resolve(libraries);
+  libraryRequest = api("/api/libraries").then(data => {
+    libraries = data.libraries;
+    libraryFetchedAt = Date.now();
+    return libraries;
+  }).finally(() => { libraryRequest = null; });
+  return libraryRequest;
+}
+async function loadWorkspaceLibraries(force = false) {
+  const request = ++workspaceLibraryRequest;
+  const select = $("#workspace-library"), status = $("#workspace-library-status");
+  const render = items => {
+    if (request !== workspaceLibraryRequest) return;
+    const selected = select.value;
+    select.innerHTML = libraryOptions(items);
+    if (items.some(item => item.key === selected)) select.value = selected;
+  };
+  let finished = false;
+  status.textContent = "Finding local and shared libraries…";
+  if (libraries.length) render(libraries);
+  else api("/api/libraries?scope=connected").then(data => {
+    if (!finished && data.libraries.length) render(data.libraries);
+  }).catch(() => {});
+  try {
+    const items = await requestLibraries(force);
+    finished = true;
+    if (request !== workspaceLibraryRequest) return;
+    render(items);
+    status.textContent = items.length ? "" : "Add a media source to browse your library.";
+  } catch (error) {
+    finished = true;
+    if (request === workspaceLibraryRequest) status.textContent = error.message;
+  }
+}
+function renderWorkspaceMedia(){
+  const query=$("#workspace-library-search").value.trim().toLowerCase();
+  const visible=workspaceMedia.filter(item=>`${item.title} ${item.year}`.toLowerCase().includes(query));
+  const grid=$("#workspace-library-grid"),section=$("#workspace-library").value;
+  $("#workspace-library-count").textContent=`${visible.length} playable titles`;
+  grid.innerHTML=visible.length?visible.slice(0,workspaceDisplayLimit).map(item=>
+    `<article class="studio-media-card">${item.thumb?`<img src="${mediaThumb(item,section)}" alt="" loading="lazy" decoding="async">`:'<span class="poster-placeholder">CF</span>'}<div><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.type)}${item.year?` · ${escapeHtml(item.year)}`:""}</small></div></article>`
+  ).join(""):'<div class="empty">No matching titles.</div>';
+  if(visible.length>workspaceDisplayLimit){
+    const more=document.createElement("button");
+    more.textContent=`Show ${Math.min(workspaceBatchSize,visible.length-workspaceDisplayLimit)} more titles`;
+    more.className="workspace-more-media";
+    more.onclick=()=>{
+      const previous=workspaceDisplayLimit;
+      workspaceDisplayLimit+=workspaceBatchSize;
+      renderWorkspaceMedia();
+      grid.children[previous]?.scrollIntoView({block:"nearest"});
+    };
+    grid.append(more);
+  }
+}
 function updateMediaSelection() {
   const choices = [...selectedLineup.values()];
   const videos = choices.reduce((total, choice) => total + choice.items.length, 0);
@@ -85,7 +148,7 @@ async function startPlexSignin(event){
     plexSigninTimer=setInterval(async()=>{
       try{
         const result=await api(`/api/plex/signin/status?pin_id=${encodeURIComponent(signin.pin_id)}`);
-        if(result.complete){clearInterval(plexSigninTimer);plexSigninTimer=0;await refresh();status.textContent="Plex connected. Movie scanning is automatic.";button.disabled=false;toast("Plex connected.");return}
+        if(result.complete){clearInterval(plexSigninTimer);plexSigninTimer=0;await refresh();status.textContent="Plex connected. Movie scanning is automatic.";button.disabled=false;libraryFetchedAt=0;if($("#library").classList.contains("active"))loadWorkspaceLibraries(true);toast("Plex connected.");return}
         if(Date.now()-started>(signin.expires_in||900)*1000){clearInterval(plexSigninTimer);plexSigninTimer=0;button.disabled=false;status.textContent="The Plex sign-in expired. Select Sign in with Plex to try again."}
       }catch(error){clearInterval(plexSigninTimer);plexSigninTimer=0;button.disabled=false;status.textContent=error.message;toast(error.message,true)}
     },1200);
@@ -100,7 +163,9 @@ async function loadGuide(){try{const guide=await api(`/api/guide?offset=${guideO
 async function showPlaybackError(channelId,fallback="Playback could not start."){let message=fallback;try{const status=await api(`/api/playback/status?channel=${encodeURIComponent(channelId||"")}`);if(status.error)message=status.error}catch(_error){}const box=$("#playback-status");box.className="danger";box.textContent=message;toast(message,true)}
 function watchChannel(channelId){const channel=state.channels.find(item=>item.id===channelId);if(!channel)return;activeChannel=channelId;$("#playback-status").textContent="";clearTimeout(retuneTimer);renderWatchChannels();applyChannelOverlays(channel);const live=state.now_playing?.[channel.id];$("#playing-channel").textContent=`CH ${channel.number} · ${channel.name}`;$("#playing-title").textContent=live?.title||"Live stream";if(live){const start=Date.parse(live.start),stop=Date.parse(live.stop),percent=Math.max(0,Math.min(100,(Date.now()-start)/(stop-start)*100));$("#playing-progress").style.width=`${percent}%`;$("#playing-time").textContent=`${new Date(start).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})} – ${new Date(stop).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`;retuneTimer=setTimeout(async()=>{await refresh();watchChannel(channelId)},Math.max(1000,stop-Date.now()+500))}const video=$("#tv-player"),url=`/live/${encodeURIComponent(channelId)}.m3u8`;$("#player-placeholder").hidden=true;video.style.display="block";video.pause();video.removeAttribute("src");video.load();if(hlsPlayer){hlsPlayer.destroy();hlsPlayer=null}if(window.Hls&&Hls.isSupported()){hlsPlayer=new Hls({enableWorker:true,startPosition:-1,liveSyncDurationCount:3});hlsPlayer.loadSource(url);hlsPlayer.attachMedia(video);hlsPlayer.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{}));hlsPlayer.on(Hls.Events.ERROR,(_event,data)=>{if(!data.fatal)return;if(data.type===Hls.ErrorTypes.MEDIA_ERROR){hlsPlayer.recoverMediaError();return}showPlaybackError(channelId,`Playback error: ${data.details}`)})}else if(video.canPlayType("application/vnd.apple.mpegurl")){video.src=url;video.play().catch(()=>{})}else{showPlaybackError(channelId,"This browser cannot play HLS video.")}}
 async function refresh(){state=await api("/api/status");$("#version").textContent=`v${state.version}`;$("#plex-url").value=state.config.plex_url;$("#guide-hours").value=state.config.guide_hours;$("#bind-host").value=state.config.bind_host;$("#public-url").value=state.config.public_url;$("#token-status").textContent=state.config.token_saved?"Connected and ready.":"Plex is optional and not connected.";const hasMedia=state.config.token_saved||state.config.local_libraries?.length;$("#step-connect-status").textContent=state.config.local_libraries?.length?`${state.config.local_libraries.length} local folder(s) ready${state.config.token_saved?" · Plex connected":""}.`:state.config.token_saved?`Connected to ${state.config.plex_profile?.server_name||"Plex"}.`:"Add a local folder or connect Plex.";$("#data-dir").textContent=`Application data: ${state.data_dir}`;const base=state.server_base||location.origin;$("#xmltv-url").textContent=`${base}/exports/guide.xml`;$("#m3u-url").textContent=`${base}/exports/channels.m3u`;renderChannels();renderWatchChannels();renderAssets();renderTools();renderPlexProfile();renderLocalLibraries();renderStudioSummary();if(document.querySelector("#watch.active"))loadGuide();const onboarding=$("#plex-onboarding");if(hasMedia&&onboarding.open)onboarding.close()}
-async function loadLibraries(){const data=await api("/api/libraries");libraries=data.libraries;$("#channel-library").innerHTML='<option value="">Choose a library</option>'+libraries.map(l=>`<option value="${escapeHtml(l.key)}">${escapeHtml(l.title)} (${l.source==="local"?"local folder":escapeHtml(l.type)})</option>`).join("")}
+async function loadLibraries() {
+  $("#channel-library").innerHTML = libraryOptions(await requestLibraries());
+}
 function smartMatches(choice){const type=$("#smart-type").value,genre=$("#smart-genre").value.toLocaleLowerCase(),rating=$("#smart-rating").value.toLocaleLowerCase(),min=Number($("#smart-year-min").value)||0,max=Number($("#smart-year-max").value)||9999,year=Number(choice.year)||0,genres=(choice.genres||[]).map(value=>String(value).toLocaleLowerCase()),contentRating=String(choice.content_rating||"Unrated").toLocaleLowerCase();return(type==="all"||choice.type===type)&&(genre==="all"||genres.includes(genre))&&(rating==="all"||contentRating===rating)&&(!year||year>=min&&year<=max)}
 function mediaSearchMatches(choice){const query=$("#media-filter").value.trim().toLocaleLowerCase();return!query||`${choice.title} ${choice.year||""} ${choice.content_rating||""} ${(choice.genres||[]).join(" ")} ${choice.summary||""}`.toLocaleLowerCase().includes(query)}
 function filteredMediaChoices(){return mediaChoices.filter(choice=>smartMatches(choice)&&mediaSearchMatches(choice))}
@@ -178,7 +243,21 @@ async function loadMedia(section) {
     updateMediaSelection();
   }
 }
-async function openChannel(channel=null){try{if(!state.config.token_saved&&!state.config.local_libraries?.length)throw new Error("Add a local folder or connect Plex in Media Sources first.");$("#channel-form").reset();$("#channel-id").value=channel?.id||"";$("#channel-name").value=channel?.name||"";$("#channel-number").value=channel?.number||nextChannelNumber();$("#playback-mode").value=channel?.playback_mode||"ordered";$("#channel-logo").innerHTML='<option value="">No logo</option>'+state.assets.filter(a=>a.kind==="logo").map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");$("#channel-background").innerHTML='<option value="">Default background</option>'+state.assets.filter(a=>a.kind==="guide-background").map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");$("#channel-corner-bug").innerHTML='<option value="">No corner bug</option>'+state.assets.filter(a=>a.kind==="corner-bug").map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");$("#channel-logo").value=channel?.logo_asset_id||"";$("#channel-background").value=channel?.background_asset_id||"";$("#channel-corner-bug").value=channel?.corner_bug_asset_id||"";$("#dialog-title").textContent=channel?"Edit channel":"Create channel";++mediaLoadRequest;mediaChoices=[];selectedLineup.clear();for(const choice of buildMediaChoices(channel?.items||[],channel?.section||""))selectedLineup.set(choice.key,choice);$("#media-list").innerHTML="";$("#selected-media-list").innerHTML='<div class="muted">Loading current selections…</div>';$("#media-status").textContent="Opening Channel Builder…";$("#media-filter").value="";for(const selector of ["#smart-type","#smart-genre","#smart-rating"])$(selector).value="all";$("#smart-year-min").value="";$("#smart-year-max").value="";$("#worldwide-on-save").hidden=Boolean(channel);$("#publish-on-save").checked=state.config.creator_published||state.config.auto_publish_channels!==false;$("#publish-on-save").disabled=Boolean(state.config.creator_published);$("#channel-dialog").showModal();setBuilderStep(channel?2:1);await loadLibraries();if(channel?.section){$("#channel-library").value=channel.section;await loadMedia($("#channel-library").value)}else{$("#media-status").textContent="Choose a media library to load titles.";updateMediaSelection()}}catch(error){toast(error.message,true);$("#media-status").textContent=error.message}}
+function renderChannelBrandingPreview(){
+  for(const [input,target] of [["#channel-background","#branding-preview-background"],
+    ["#channel-logo","#branding-preview-logo"],["#channel-corner-bug","#branding-preview-bug"]]){
+    const asset=state.assets.find(entry=>entry.id===$(input).value), image=$(target);
+    image.hidden=!asset;
+    if(asset)image.src=`/user-assets/${encodeURIComponent(asset.filename)}`;
+    else image.removeAttribute("src");
+  }
+  $("#branding-preview-name").textContent=$("#channel-name").value.trim()||"Your channel";
+  $("#branding-preview-number").textContent="CH "+($("#channel-number").value.trim()||"1");
+}
+for(const control of ["#channel-background","#channel-logo","#channel-corner-bug","#channel-name","#channel-number"]){
+  $(control).addEventListener("input",renderChannelBrandingPreview);
+}
+async function openChannel(channel=null){try{if(!state.config.token_saved&&!state.config.local_libraries?.length)throw new Error("Add a local folder or connect Plex in Media Sources first.");$("#channel-form").reset();$("#channel-id").value=channel?.id||"";$("#channel-name").value=channel?.name||"";$("#channel-number").value=channel?.number||nextChannelNumber();$("#playback-mode").value=channel?.playback_mode||"ordered";$("#channel-logo").innerHTML='<option value="">No logo</option>'+state.assets.filter(a=>a.kind==="logo").map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");$("#channel-background").innerHTML='<option value="">Default background</option>'+state.assets.filter(a=>a.kind==="guide-background").map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");$("#channel-corner-bug").innerHTML='<option value="">No corner bug</option>'+state.assets.filter(a=>a.kind==="corner-bug").map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");$("#channel-logo").value=channel?.logo_asset_id||"";$("#channel-background").value=channel?.background_asset_id||"";$("#channel-corner-bug").value=channel?.corner_bug_asset_id||"";$("#dialog-title").textContent=channel?"Edit channel":"Create channel";++mediaLoadRequest;mediaChoices=[];selectedLineup.clear();for(const choice of buildMediaChoices(channel?.items||[],channel?.section||""))selectedLineup.set(choice.key,choice);$("#media-list").innerHTML="";$("#selected-media-list").innerHTML='<div class="muted">Loading current selections…</div>';$("#media-status").textContent="Opening Channel Builder…";$("#media-filter").value="";for(const selector of ["#smart-type","#smart-genre","#smart-rating"])$(selector).value="all";$("#smart-year-min").value="";$("#smart-year-max").value="";$("#worldwide-on-save").hidden=Boolean(channel);$("#publish-on-save").checked=state.config.creator_published||state.config.auto_publish_channels!==false;$("#publish-on-save").disabled=Boolean(state.config.creator_published);renderChannelBrandingPreview();$("#channel-dialog").showModal();setBuilderStep(channel?2:1);await loadLibraries();if(channel?.section){$("#channel-library").value=channel.section;await loadMedia($("#channel-library").value)}else{$("#media-status").textContent="Choose a media library to load titles.";updateMediaSelection()}}catch(error){toast(error.message,true);$("#media-status").textContent=error.message}}
 document.addEventListener("click",async event=>{const button=event.target.closest("button,article[data-watch]");if(!button)return;if(button.dataset.watch)watchChannel(button.dataset.watch);if(button.dataset.view){document.querySelectorAll(".view,nav button").forEach(e=>e.classList.remove("active"));$(`#${button.dataset.view}`).classList.add("active");button.classList.add("active")}if(button.id==="refresh-guide")loadGuide();if(button.id==="new-channel")openChannel();if(button.dataset.edit)openChannel(state.channels.find(c=>c.id===button.dataset.edit));if(button.dataset.delete&&confirm("Delete this channel?")){try{await api(`/api/channels/${button.dataset.delete}`,{method:"DELETE"});await refresh();toast("Channel deleted.")}catch(e){toast(e.message,true)}}if(button.dataset.deleteAsset&&confirm("Delete this artwork? Channels using it will keep working without the logo.")){try{await api(`/api/assets/${button.dataset.deleteAsset}`,{method:"DELETE"});await refresh();toast("Artwork deleted.")}catch(e){toast(e.message,true)}}if(button.dataset.tool){try{const data=await api(`/api/tools/${button.dataset.tool}`,{method:"POST",body:"{}"});toast(typeof data.result==="string"?data.result:"Tool finished.")}catch(e){toast(e.message,true)}}});
 $("#setup-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/setup",{method:"POST",body:JSON.stringify({plex_url:$("#plex-url").value,plex_token:$("#plex-token").value,guide_hours:$("#guide-hours").value,bind_host:$("#bind-host").value,public_url:$("#public-url").value,directory_url:$("#directory-url").value})});$("#plex-token").value="";await refresh();toast("Standalone TV server settings saved.")}catch(e){toast(e.message,true)}});
 async function publishStudio(event){
@@ -218,9 +297,9 @@ $("#resume-publishing").onclick=async()=>{
     await refresh();
   }catch(error){toast(error.message,true)}
 };
-$("#local-library-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/local/libraries",{method:"POST",body:JSON.stringify({name:$("#local-library-name").value,path:$("#local-library-path").value})});event.target.reset();await refresh();await loadWorkspaceLibraries();toast("Local media library added.")}catch(error){toast(error.message,true)}});
+$("#local-library-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/local/libraries",{method:"POST",body:JSON.stringify({name:$("#local-library-name").value,path:$("#local-library-path").value})});event.target.reset();await refresh();await loadWorkspaceLibraries(true);toast("Local media library added.")}catch(error){toast(error.message,true)}});
 $("#movie-upload-form").addEventListener("submit",event=>{event.preventDefault();const file=$("#movie-upload-file").files[0],section=$("#upload-library").value;if(!file||!section)return;const wrap=$("#movie-upload-progress"),bar=$("#movie-upload-bar"),percent=$("#movie-upload-percent"),button=event.target.querySelector("button[type=submit],button:not([type])");wrap.hidden=false;bar.value=0;button.disabled=true;const request=new XMLHttpRequest();request.open("POST",`/api/local/upload?section=${encodeURIComponent(section)}`);request.setRequestHeader("X-File-Name",encodeURIComponent(file.name));request.upload.onprogress=progress=>{if(!progress.lengthComputable)return;const value=Math.round(progress.loaded/progress.total*100);bar.value=value;percent.textContent=`${value}%`;$("#movie-upload-stage").textContent=`Uploading ${file.name}…`};request.onload=async()=>{button.disabled=false;if(request.status>=200&&request.status<300){event.target.reset();await refresh();toast("Movie uploaded and added to the library.")}else{try{toast(JSON.parse(request.responseText).error,true)}catch{toast("Movie upload failed.",true)}}};request.onerror=()=>{button.disabled=false;toast("Movie upload failed.",true)};request.send(file)});
-document.addEventListener("click",async event=>{const button=event.target.closest("[data-delete-local]");if(!button||!confirm("Remove this local library? Existing channels keep their lineup, but files cannot play until the folder is added again."))return;try{await api(`/api/local/libraries/${button.dataset.deleteLocal}`,{method:"DELETE"});await refresh();await loadWorkspaceLibraries();toast("Local library removed.")}catch(error){toast(error.message,true)}});
+document.addEventListener("click",async event=>{const button=event.target.closest("[data-delete-local]");if(!button||!confirm("Remove this local library? Existing channels keep their lineup, but files cannot play until the folder is added again."))return;try{await api(`/api/local/libraries/${button.dataset.deleteLocal}`,{method:"DELETE"});await refresh();await loadWorkspaceLibraries(true);toast("Local library removed.")}catch(error){toast(error.message,true)}});
 $("#guide-earlier").onclick=()=>{guideOffsetHours=Math.max(-24,guideOffsetHours-6);loadGuide()};
 $("#guide-now").onclick=()=>{guideOffsetHours=0;loadGuide()};
 $("#guide-later").onclick=()=>{guideOffsetHours=Math.min(168,guideOffsetHours+6);loadGuide()};
@@ -266,10 +345,26 @@ $("#selected-media-list").addEventListener("click", event => {
 $("#overview-create").onclick=$("#library-create-channel").onclick=()=>openChannel();
 $("#builder-next").onclick=()=>{if(builderStep===1&&(!$("#channel-name").reportValidity()||!$("#channel-number").reportValidity()))return;if(builderStep===2&&!selectedLineup.size){toast("Select at least one playable title.",true);return}setBuilderStep(builderStep+1)};
 $("#builder-back").onclick=()=>setBuilderStep(builderStep-1);
-$("#workspace-library").addEventListener("change",async event=>{if(!event.target.value)return;$("#workspace-library-grid").innerHTML='<div class="empty">Loading playable media…</div>';try{const data=await api(`/api/library/items?section=${encodeURIComponent(event.target.value)}`);workspaceMedia=data.items;renderWorkspaceMedia()}catch(error){toast(error.message,true)}});
-$("#workspace-library-search").addEventListener("input",renderWorkspaceMedia);
+$("#workspace-library").addEventListener("change", async event => {
+  const request = ++workspaceMediaRequest, section = event.target.value;
+  const grid = $("#workspace-library-grid");
+  workspaceMedia = [];
+  workspaceDisplayLimit = workspaceBatchSize;
+  $("#workspace-library-count").textContent = "";
+  if (!section) { grid.textContent = "Choose a media library to browse."; return; }
+  grid.textContent = "Loading playable media…";
+  try {
+    const data = await api(`/api/library/items?indexed=1&section=${encodeURIComponent(section)}`);
+    if (request !== workspaceMediaRequest) return;
+    workspaceMedia = data.items;
+    renderWorkspaceMedia();
+  } catch (error) {
+    if (request === workspaceMediaRequest) grid.textContent = error.message;
+  }
+});
+$("#workspace-library-search").addEventListener("input",()=>{workspaceDisplayLimit=workspaceBatchSize;renderWorkspaceMedia()});
 $("#channel-search").addEventListener("input",event=>{const query=event.target.value.trim().toLowerCase();document.querySelectorAll("[data-channel-card]").forEach(card=>card.hidden=!card.dataset.search.includes(query))});
-$("#topbar-scan").onclick=async()=>{const button=$("#topbar-scan");button.disabled=true;button.textContent="Scanning…";libraryMediaCache.clear();try{await loadWorkspaceLibraries();if(state.config.token_saved){const result=await api("/api/rewind/refresh",{method:"POST",body:"{}"});toast(`Libraries refreshed · ${result.movies} Plex movies added to Rewind Cinema.`)}else toast("Media libraries refreshed.");await refresh()}catch(error){toast(error.message,true)}finally{button.disabled=false;button.textContent="Scan libraries"}};
+$("#topbar-scan").onclick=async()=>{const button=$("#topbar-scan");button.disabled=true;button.textContent="Scanning…";libraryMediaCache.clear();try{await loadWorkspaceLibraries(true);if(state.config.token_saved){const result=await api("/api/rewind/refresh",{method:"POST",body:"{}"});toast(`Libraries refreshed · ${result.movies} Plex movies added to Rewind Cinema.`)}else toast("Media libraries refreshed.");if($("#workspace-library").value)$("#workspace-library").dispatchEvent(new Event("change"));await refresh()}catch(error){toast(error.message,true)}finally{button.disabled=false;button.textContent="Scan libraries"}};
 $("#copy-install-command").onclick=async()=>{try{await navigator.clipboard.writeText($("#install-command").textContent);toast("Install command copied.")}catch{toast("Could not copy automatically. Select the command and copy it manually.",true)}};
 document.addEventListener("click",async event=>{const button=event.target.closest("[data-copy-target]");if(!button)return;try{await navigator.clipboard.writeText($(`#${button.dataset.copyTarget}`).textContent);button.textContent="✓ Copied";setTimeout(()=>button.textContent=button.dataset.copyTarget==="xmltv-url"?"Copy XMLTV URL":"Copy M3U URL",1800)}catch{toast("Could not copy automatically.",true)}});
 $("#tv-player").addEventListener("loadstart",()=>{$("#playback-status").className="muted";$("#playback-status").textContent="Connecting through ChannelForge…"});
@@ -280,7 +375,7 @@ $("#manual-plex-setup").onclick=()=>{clearInterval(plexSigninTimer);plexSigninTi
 $("#add-local-onboarding").onclick=()=>{$("#plex-onboarding").close();showView("setup");$("#local-library-path").focus()};
 refresh().then(()=>{$("#installed-version").textContent=`v${state.version}`;checkForUpdate(true)}).catch(e=>toast(e.message,true));
 document.addEventListener("click",event=>{const target=event.target.closest("[data-watch],[data-view]");if(target?.dataset.watch)diagnosePlayback(target.dataset.watch);});
-document.addEventListener("click",event=>{const target=event.target.closest("[data-view]");if(!target)return;const names={start:"Overview",watch:"Watch TV",channels:"Channels",library:"Library",assets:"Branding",exports:"Guide artwork",system:"System",setup:"Sources & sharing",updates:"Updates",tools:"Tools"};showView(target.dataset.view);$("#workspace-title").textContent=names[target.dataset.view]||"ChannelForge";if(target.dataset.view==="watch")loadGuide();if(target.dataset.view==="library"&&!libraries.length)loadWorkspaceLibraries().catch(error=>toast(error.message,true))});
+document.addEventListener("click",event=>{const target=event.target.closest("[data-view]");if(!target)return;const names={start:"Overview",watch:"Watch TV",channels:"Channels",library:"Library",assets:"Branding",exports:"Guide artwork",system:"System",setup:"Sources & sharing",updates:"Updates",tools:"Tools"};showView(target.dataset.view);$("#workspace-title").textContent=names[target.dataset.view]||"ChannelForge";if(target.dataset.view==="watch")loadGuide();if(target.dataset.view==="library")loadWorkspaceLibraries()});
 document.addEventListener("click",event=>{if(event.target.closest("#new-channel,#overview-create,#library-create-channel"))setTimeout(()=>setBuilderStep(1),0)});
 setInterval(()=>{const localCount=state.config.local_libraries?.length||0;$("#topbar-status").textContent=state.config.token_saved&&localCount?`Plex + ${localCount} local`:state.config.token_saved?"Plex connected":localCount?`${localCount} local folder${localCount===1?"":"s"} ready`:"No media source"},1000);
 setInterval(()=>{$("#backup-count").textContent=`${state.backup_count||0} backups available`},1000);
