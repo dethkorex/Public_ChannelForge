@@ -30,7 +30,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.4.6"
+VERSION = "3.5.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -71,6 +71,7 @@ STREAM_DIR = DATA_DIR / "streams"
 TUNNEL_LOCK = threading.RLock()
 TUNNEL_PROCESS: subprocess.Popen | None = None
 TUNNEL_URL = ""
+APP_WINDOW = None
 DEFAULT_ASSET_THEMES = {
     "kids": ("Kids Club", "#ffea3d", "#ff5ebc", "star"),
     "anime": ("Anime Pulse", "#ff4d7d", "#6de8ff", "anime"),
@@ -177,7 +178,7 @@ def update_asset_name(release: dict) -> tuple[str, str]:
     elif Path("/etc/debian_version").exists():
         candidate = f"Public_ChannelForge-{version}-linux-all.deb"
     else:
-        candidate = f"Public_ChannelForge-{version}-linux-x64.tar.gz"
+        candidate = f"ChannelForge-{version}-linux-x64.tar.gz" if f"ChannelForge-{version}-linux-x64.tar.gz" in names else f"Public_ChannelForge-{version}-linux-x64.tar.gz"
     if candidate not in names:
         raise ValueError("The latest release does not contain an installer for this platform.")
     return candidate, "SHA256SUMS-Linux.txt"
@@ -829,6 +830,18 @@ def start_plex_signin() -> dict:
     return {"pin_id": pin_id, "auth_url": "https://app.plex.tv/auth#?" + fragment, "expires_in": int(pin.get("expiresIn", 900) or 900)}
 
 
+def start_plex_signin_external() -> dict:
+    """Open Plex in the real system browser so Linux WebKit never blocks sign-in."""
+    result = start_plex_signin()
+    def open_browser() -> None:
+        try:
+            webbrowser.open(result["auth_url"], new=2, autoraise=True)
+        except Exception:
+            pass
+    threading.Thread(target=open_browser, daemon=True, name="channel-forge-plex-browser").start()
+    return {**result, "opened_external": True}
+
+
 def discover_plex_server(token: str) -> str:
     identifier = persistent_client_identifier()
     url = "https://plex.tv/api/resources?" + urllib.parse.urlencode({"includeHttps": "1", "includeRelay": "1", "X-Plex-Token": token, "X-Plex-Client-Identifier": identifier})
@@ -919,9 +932,11 @@ def plex_items(section: str) -> list[dict]:
             "key": node.get("key", f"/library/metadata/{rating_key}"),
             "thumb": node.get("thumb", ""),
             "series_thumb": node.get("grandparentThumb", ""),
+            "art": node.get("art", "") or node.get("grandparentArt", ""),
             "summary": node.get("summary", "")[:600],
             "content_rating": node.get("contentRating", ""),
             "rating": node.get("rating", ""),
+            "genres": sorted({genre.get("tag", "").strip() for genre in node.findall("Genre") if genre.get("tag", "").strip()}),
             "series": node.get("grandparentTitle", ""),
             "season": int(node.get("parentIndex", "0") or 0),
             "episode": int(node.get("index", "0") or 0),
@@ -1058,7 +1073,8 @@ def local_items(section: str) -> list[dict]:
             "id": f"local-{identity}", "title": title, "year": "", "type": "video",
             "duration_ms": local_duration_ms(resolved), "key": f"local:{identity}",
             "thumb": f"local:{identity}" if poster else "", "summary": str(relative.parent) if relative.parent != Path(".") else "Local media",
-            "content_rating": "", "rating": "", "series": relative.parts[0] if len(relative.parts) > 1 else "",
+            "art": f"local:{identity}" if poster else "",
+            "content_rating": "", "rating": "", "genres": [], "series": relative.parts[0] if len(relative.parts) > 1 else "",
             "season": 0, "episode": 0, "part_key": "", "container": resolved.suffix.lstrip("."),
             "video_codec": "", "audio_codec": "", "source": "local", "file_path": str(resolved),
         })
@@ -1138,8 +1154,9 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "year": str(item.get("year", ""))[:10], "type": str(item.get("type", "video"))[:30],
             "duration_ms": max(60000, min(86400000, int(item.get("duration_ms", 1800000)))),
             "key": str(item.get("key", f"/library/metadata/{item['id']}"))[:500],
-            "thumb": str(item.get("thumb", ""))[:500], "summary": str(item.get("summary", ""))[:600],
+            "thumb": str(item.get("thumb", ""))[:500], "art": str(item.get("art", ""))[:500], "summary": str(item.get("summary", ""))[:600],
             "content_rating": str(item.get("content_rating", ""))[:40], "rating": str(item.get("rating", ""))[:20],
+            "genres": [str(value)[:80] for value in item.get("genres", []) if str(value).strip()][:20],
             "series": str(item.get("series", ""))[:200],
             "season": max(0, int(item.get("season", 0) or 0)), "episode": max(0, int(item.get("episode", 0) or 0)),
             "part_key": str(item.get("part_key", ""))[:500], "container": str(item.get("container", ""))[:30],
@@ -1479,8 +1496,9 @@ def start_ffmpeg_session(channel: dict) -> str:
         ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin", "-re",
         "-ss", f'{position["offset_ms"] / 1000:.3f}', "-i", media_input, "-t", str(remaining),
         "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast",
-        "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-ar", "48000",
-        "-f", "hls", "-hls_time", "4", "-hls_list_size", "8",
+        "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*2)",
+        "-c:a", "aac", "-ac", "2", "-ar", "48000",
+        "-f", "hls", "-hls_time", "2", "-hls_list_size", "6",
         "-hls_flags", "delete_segments+append_list+omit_endlist+independent_segments",
         "-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8"),
     ]
@@ -1501,10 +1519,7 @@ def start_ffmpeg_session(channel: dict) -> str:
 
 
 def start_playback_route(channel: dict) -> str:
-    """Use Plex's authenticated HLS transcoder for Plex media and local FFmpeg for files."""
-    position = schedule_position(channel)
-    if position["item"].get("source") != "local":
-        return register_hls_url(plex_live_url(channel), str(channel.get("id", "")))
+    """Start a demand-driven, browser-safe H.264/AAC encoder for every source."""
     return f"/ffmpeg-stream/{start_ffmpeg_session(channel)}/index.m3u8"
 
 
@@ -1682,6 +1697,13 @@ def public_channel_catalog() -> dict:
     assets = {item.get("id"): item for item in asset_manifest()}
     result = []
     settings = config()
+    def image_url(item: dict, section: str, field: str = "thumb") -> str:
+        image_path = str(item.get(field, "") or item.get("thumb", ""))
+        if not image_path:
+            return ""
+        if item.get("source") == "local":
+            return f"{base}/api/local/image?section={urllib.parse.quote(section, safe='')}&id={urllib.parse.quote(str(item.get('id', '')), safe='')}"
+        return f"{base}/api/plex/image?path={urllib.parse.quote(image_path, safe='')}&server={urllib.parse.quote(str(item.get('plex_server_id', '')), safe='')}"
     for channel in channels():
         try:
             position = schedule_position(channel, moment)
@@ -1706,6 +1728,9 @@ def public_channel_catalog() -> dict:
             "programs": [{
                 "title": str(slot["item"].get("title", "Untitled")),
                 "year": str(slot["item"].get("year", "")), "type": str(slot["item"].get("type", "video")),
+                "summary": str(slot["item"].get("summary", ""))[:600],
+                "poster_url": image_url(slot["item"], str(channel.get("section", ""))),
+                "backdrop_url": image_url(slot["item"], str(channel.get("section", "")), "art"),
                 "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat(),
             } for slot in slots],
         })
@@ -1931,7 +1956,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/tasks.css", "/studio.css", "/desk.css", "/guide.css", "/wizard.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/tasks.css", "/studio.css", "/desk.css", "/guide.css", "/wizard.css", "/tv-theme.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
@@ -1984,7 +2009,12 @@ class Handler(BaseHTTPRequestHandler):
                 libraries_root = plex_request("/library/sections", candidate)
                 self.send_json(200, {"ok": True, "profile": plex_profile(root), "libraries": len(libraries_root.findall("Directory"))})
             elif parsed.path == "/api/plex/signin/start":
-                self.send_json(200, start_plex_signin())
+                self.send_json(200, start_plex_signin_external())
+            elif parsed.path == "/api/update/prepare":
+                self.send_json(200, {"ok": True})
+                threading.Timer(0.4, self.server.shutdown).start()
+                if APP_WINDOW is not None:
+                    threading.Timer(0.7, APP_WINDOW.destroy).start()
             elif parsed.path == "/api/rewind/refresh":
                 self.send_json(200, refresh_plex_movie_catalog())
             elif parsed.path == "/api/local/libraries":
@@ -2117,6 +2147,7 @@ def restore_public_sharing() -> None:
 
 
 def main() -> None:
+    global APP_WINDOW
     parser = argparse.ArgumentParser(description="Public_ChannelForge standalone TV server")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--no-browser", action="store_true")
@@ -2142,6 +2173,7 @@ def main() -> None:
         thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server")
         thread.start()
         window = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(1100, 720), background_color="#08111f")
+        APP_WINDOW = window
         state = {"quitting": False, "notified": False}
         tray: pystray.Icon | None = None
 
@@ -2178,7 +2210,19 @@ def main() -> None:
             server.server_close()
         return
     if not args.no_browser:
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+        try:
+            import webview
+            thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server")
+            thread.start()
+            APP_WINDOW = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(1100, 720), background_color="#08111f")
+            try:
+                webview.start(debug=False)
+            finally:
+                server.shutdown()
+                server.server_close()
+            return
+        except ImportError:
+            threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

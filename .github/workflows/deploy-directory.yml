@@ -2,6 +2,11 @@ name: Deploy global Creator Directory
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "directory/worker/**"
+      - ".github/workflows/deploy-directory.yml"
 
 permissions:
   contents: read

@@ -62,12 +62,15 @@ jobs:
         run: |
           TEST_HOME="$RUNNER_TEMP/channel-forge-home"
           mkdir -p "$TEST_HOME"
+          sudo apt-get install -y python3-webview
           HOME="$TEST_HOME" XDG_DATA_HOME="$TEST_HOME/.local/share" XDG_CONFIG_HOME="$TEST_HOME/.config" bash scripts/install_linux.sh
           HOME="$TEST_HOME" XDG_DATA_HOME="$TEST_HOME/.local/share" XDG_CONFIG_HOME="$TEST_HOME/.config" "$TEST_HOME/.local/bin/public-channelforge" --help
+          test -x "$TEST_HOME/.local/bin/channelforge-tv"
+          test -f "$TEST_HOME/.local/share/applications/channelforge-tv.desktop"
       - name: Inspect Debian package
         run: dpkg-deb --info release/Public_ChannelForge-*-linux-all.deb
       - name: Inspect Arch package
-        run: tar --zstd -tf release/public-channelforge-*-any.pkg.tar.zst | grep -E 'usr/bin/public-channelforge|opt/public-channelforge/Public_ChannelForge.py'
+        run: tar --zstd -tf release/public-channelforge-*-any.pkg.tar.zst | grep -E 'usr/bin/(public-channelforge|channelforge-tv)|opt/public-channelforge/(Public_ChannelForge|ChannelForge_TV).py'
       - uses: actions/upload-artifact@v4
         with:
           name: Public_ChannelForge-Linux

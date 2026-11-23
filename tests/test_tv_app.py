@@ -30,14 +30,27 @@ class TvAppTests(unittest.TestCase):
     def test_version_comparison_handles_double_digit_minor(self):
         self.assertGreater(tv.version_tuple("v3.10.0"), tv.version_tuple("3.9.9"))
 
+    def test_fire_tv_has_directory_recovery_pairing_and_branding(self):
+        root = Path(__file__).resolve().parents[1]
+        activity = (root / "tv/firetv/app/src/main/java/tv/channelforge/viewer/MainActivity.java").read_text(encoding="utf-8")
+        manifest = (root / "tv/firetv/app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
+        gradle = (root / "tv/firetv/app/build.gradle").read_text(encoding="utf-8")
+        self.assertIn("showPairingDialog", activity)
+        self.assertIn("RETRY PUBLIC DIRECTORY", activity)
+        self.assertIn("DIRECTORY_FALLBACK_URL", activity)
+        self.assertIn("android:icon=\"@drawable/channel_forge_tv_icon\"", manifest)
+        self.assertIn("DIRECTORY_FALLBACK_URL", gradle)
+        self.assertTrue((root / "tv/firetv/app/src/main/res/drawable/channel_forge_tv_icon.png").is_file())
+
     def test_tv_prefers_hls_js_and_batches_large_movie_shelves(self):
         hls_branch = "if(window.Hls&&Hls.isSupported())"
         native_fallback = "else if(v.canPlayType('application/vnd.apple.mpegurl'))"
         self.assertIn(hls_branch, tv.HTML)
         self.assertIn(native_fallback, tv.HTML)
         self.assertLess(tv.HTML.index(hls_branch), tv.HTML.index(native_fallback))
-        self.assertIn("function renderVaultBatch(count=40)", tv.HTML)
-        self.assertIn("renderVaultBatch()", tv.HTML)
+        self.assertIn("function renderVaultPage", tv.HTML)
+        self.assertIn('id="vault-next"', tv.HTML)
+        self.assertNotIn("overflow-y:auto;overscroll-behavior", tv.TV_OVERHAUL_CSS)
         self.assertIn("INSERT MOVIE", tv.HTML)
         self.assertIn("overflow-x:hidden", tv.VAULT_CSS)
         self.assertIn("v.controls=!liveMode", tv.HTML)
@@ -53,6 +66,18 @@ class TvAppTests(unittest.TestCase):
         self.assertIn('id="home-changelog"', tv.HTML)
         self.assertIn('data-section-block="cinema" hidden><h2>CREATOR STUDIOS', tv.HTML)
         self.assertIn("if(name==='cinema'&&selectedCreator&&!vaultItems.length)studio(selectedCreator)", tv.HTML)
+
+    def test_tv_has_program_details_favorites_and_mini_player(self):
+        self.assertIn('id="program-dialog"', tv.HTML)
+        self.assertIn("function showProgramInfo", tv.HTML)
+        self.assertIn("favoriteChannels", tv.HTML)
+        self.assertIn("function minimizePlayer", tv.HTML)
+        self.assertIn("video.mini", tv.TV_OVERHAUL_CSS)
+        self.assertIn('id="movie-search"', tv.HTML)
+        self.assertIn('data-movie-filter="80s"', tv.HTML)
+        self.assertIn("poster=current?.poster_url", tv.HTML)
+        self.assertIn("--guide-backdrop", tv.HTML)
+        self.assertIn("program-poster", tv.HTML)
 
     def test_local_creator_is_discovered_on_default_port(self):
         payload = json.dumps({

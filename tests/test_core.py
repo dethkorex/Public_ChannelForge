@@ -46,7 +46,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("web/index.html", playlist)
 
     def test_public_channel_catalog_supplies_online_guide_without_starting_playback(self):
-        channel = app.save_channel({"name": "Public Guide", "number": "12", "items": [{"id": "9", "title": "Example", "type": "movie", "duration_ms": 3600000, "key": "/library/metadata/9"}]})
+        channel = app.save_channel({"name": "Public Guide", "number": "12", "section": "1", "items": [{"id": "9", "title": "Example", "type": "movie", "duration_ms": 3600000, "key": "/library/metadata/9", "thumb": "/library/metadata/9/thumb/1", "art": "/library/metadata/9/art/1"}]})
         with mock.patch.object(app, "start_playback_route") as playback:
             catalog = app.public_channel_catalog()
         playback.assert_not_called()
@@ -54,6 +54,9 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(public["online"])
         self.assertTrue(public["stream_url"].endswith(f"/live/{channel['id']}.m3u8"))
         self.assertGreater(len(public["programs"]), 0)
+        self.assertIn("/api/plex/image?path=", public["programs"][0]["poster_url"])
+        self.assertIn("%2Fart%2F", public["programs"][0]["backdrop_url"])
+        self.assertNotIn("X-Plex-Token", json.dumps(public))
 
     def test_public_channel_catalog_hides_missing_local_source(self):
         channel = app.save_channel({"name": "Missing Local", "number": "13", "items": [{"id": "local-9", "title": "Offline", "source": "local", "file_path": str(app.DATA_DIR / "missing-video.mkv"), "duration_ms": 3600000}]})
@@ -171,16 +174,14 @@ class CoreTests(unittest.TestCase):
         registered = [url for url, _expires in app.HLS_PROXY.values()]
         self.assertIn("http://plex.local:32400/session/segment000.ts?token=private", registered)
 
-    def test_plex_channel_uses_authenticated_plex_hls_instead_of_local_ffmpeg(self):
+    def test_plex_channel_uses_demand_driven_browser_safe_ffmpeg(self):
         channel = app.clean_channel({"name": "Plex TV", "number": "11", "items": [
             {"id": "44", "title": "Show", "duration_ms": 3600000, "key": "/library/metadata/44"},
         ]})
-        with mock.patch.object(app, "plex_live_url", return_value="https://plex.example/live.m3u8") as plex_url, mock.patch.object(app, "register_hls_url", return_value="/hls-proxy/session") as proxy, mock.patch.object(app, "start_ffmpeg_session") as ffmpeg:
+        with mock.patch.object(app, "start_ffmpeg_session", return_value="encoded-session") as ffmpeg:
             route = app.start_playback_route(channel)
-        self.assertEqual(route, "/hls-proxy/session")
-        plex_url.assert_called_once_with(channel)
-        proxy.assert_called_once_with("https://plex.example/live.m3u8", channel["id"])
-        ffmpeg.assert_not_called()
+        self.assertEqual(route, "/ffmpeg-stream/encoded-session/index.m3u8")
+        ffmpeg.assert_called_once_with(channel)
 
     def test_playback_errors_remove_plex_token(self):
         error = app.sanitized_playback_error("failed https://plex/video?X-Plex-Token=test&part=1")

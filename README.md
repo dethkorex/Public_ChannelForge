@@ -12,7 +12,7 @@ Version 3.2 adds three public components without changing the owner's private Ch
 
 Publishing is activated with **Go live worldwide** in Creator. The Windows build opens an outbound encrypted Cloudflare tunnel automatically, registers the temporary HTTPS address with the global directory, and refreshes it after Creator restarts. Viewers never enter an IP address or configure the creator's router. The directory never receives Plex credentials, local filesystem paths, media databases, or video files; it stores only public studio metadata and ChannelForge endpoints.
 
-Viewers never need Plex: ChannelForge TV talks only to the creator's published ChannelForge HTTPS endpoint. Plex is an optional source used privately by ChannelForge Creator. The Creator application must remain running while its channels are online. The hosted directory at `directory.channelforge.tv` must be deployed once by the project owner before cross-house discovery is available; the repository includes a manual GitHub Actions deployment workflow for that service.
+Viewers never need Plex: ChannelForge TV talks only to the creator's published ChannelForge HTTPS endpoint. Plex is an optional source used privately by ChannelForge Creator. The Creator application must remain running while its channels are online. The global directory deploys automatically from `main` when its Cloudflare repository secrets are configured. Fire TV also includes Retry and Pair Creator controls: a viewer can enter the HTTPS pairing URL shown in Creator's **Publish worldwide** panel when the directory is unavailable.
 
 Source and deployment instructions are in [`directory/`](directory/), [`tv/firetv/`](tv/firetv/), and [`tv/roku/`](tv/roku/). Tagged releases build the installable Fire TV APK and Roku ZIP automatically.
 
@@ -20,7 +20,7 @@ Version 3 introduces the studio workspace inspired by the private ChannelForge m
 
 The built-in **Watch TV** screen includes an embedded HLS player, channel rail, now-playing progress, and six-hour visual guide. Viewers click a channel and watch immediately in ChannelForge without adding it to Plex DVR.
 
-Playback is source-aware. Approved local-library files use the bundled FFmpeg pipeline. Plex titles use Plex's authenticated universal HLS transcoder through ChannelForge's same-origin proxy, avoiding the rejected double-transcode path while keeping the Plex token server-side. Local-only users do not need a Plex account or server.
+Playback is source-aware and demand driven. Local-library and Plex titles use ChannelForge's bundled FFmpeg H.264/AAC HLS pipeline only while a viewer is actively watching. Plex credentials stay inside Creator, browser/device-safe video is produced consistently on Windows and Linux, and idle sessions are stopped automatically. Local-only users do not need a Plex account or server.
 
 The **Get Started** screen walks new users through adding a local folder or connecting Plex, creating a channel, testing it in the player, and copying the hosted stream URLs.
 
@@ -38,7 +38,7 @@ Every installation includes 60 coordinated starter assets: a logo, guide/player 
 
 All ChannelForge apps expose an update control backed by the official GitHub Releases feed. Creator and desktop TV check on launch, notify immediately, show download progress, and verify the published SHA-256 checksum before offering the update. After the user confirms, an installed Windows app performs an in-place update and restarts without reopening the first-install setup wizard; the chosen install folder, shortcuts, configuration, channels, and artwork are preserved. Fire TV detects the release and opens the exact official APK download; Android still requires the user to approve its package-installer prompt. Roku reports release availability in-app; Roku Store installs update automatically when distributed through the Store, while developer/sideload builds must be replaced through Roku's developer installer. Linux users receive the verified Debian, Arch/Omarchy, or portable package and a copyable install command. ChannelForge never downloads or launches an update without confirmation.
 
-ChannelForge TV v3.4.6 uses a collapsible hamburger sidebar. Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and Updates are separate workspaces instead of one long scrolling page. The sidebar collapses to an icon rail on desktop and becomes an overlay on smaller screens.
+ChannelForge TV v3.5.0 adds a compact artwork-rich program guide, upcoming-show details, favorite channels and creators, a live mini-player, searchable movie filters, and a paged VHS shelf without an inner scrollbar. Creator adds Smart Channel genre/year/rating/type filters, reliable whole-show scheduling, external-browser Plex authentication on Linux, and demand-driven H.264/AAC live encoding. Fire TV adds public-directory retry, direct HTTPS pairing, and proper ChannelForge launcher branding. Windows and Linux desktop packages install both Creator and TV together.
 
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
@@ -75,7 +75,7 @@ Windows may show a SmartScreen warning because community builds are not code-sig
 
 ## Linux, Arch Linux, and Omarchy
 
-Requirements: Python 3.10 or newer and FFmpeg. Debian and Arch packages install FFmpeg as a package dependency; the Windows installer bundles it. Portable Linux installs show the exact FFmpeg package command when it is missing.
+Requirements: Python 3.10 or newer, FFmpeg, and PyWebView. Every Linux package installs both native desktop applications: ChannelForge Creator and ChannelForge TV. Debian and Arch packages declare the required media and desktop runtimes; the portable installer shows the exact distro command if one is missing.
 
 ### Debian, Ubuntu, Mint, and similar distributions
 
@@ -84,6 +84,7 @@ Download the `.deb` file from the latest release, then run:
 ```bash
 sudo apt install ./Public_ChannelForge-*-linux-all.deb
 public-channelforge
+channelforge-tv
 ```
 
 ### Arch Linux and Omarchy
@@ -93,16 +94,18 @@ Download the `.pkg.tar.zst` file from the latest release, then run:
 ```bash
 sudo pacman -U ./public-channelforge-*-any.pkg.tar.zst
 public-channelforge
+channelforge-tv
 ```
 
 ### Universal Linux user installation
 
-Download and extract the `linux-x64.tar.gz` archive, open its `Public_ChannelForge` directory, and run:
+Download and extract the `ChannelForge-*-linux-x64.tar.gz` archive, open its `ChannelForge` directory, and run:
 
 ```bash
 chmod +x install.sh uninstall.sh
 ./install.sh
 public-channelforge
+channelforge-tv
 ```
 
 Developers can alternatively clone the repository:
@@ -113,12 +116,13 @@ cd Public_ChannelForge
 chmod +x scripts/install_linux.sh scripts/uninstall_linux.sh
 ./scripts/install_linux.sh
 public-channelforge
+channelforge-tv
 ```
 
 On Arch Linux or Omarchy, install prerequisites if needed:
 
 ```bash
-sudo pacman -S --needed python git
+sudo pacman -S --needed python git ffmpeg python-pywebview python-gobject webkit2gtk-4.1
 ```
 
 If `public-channelforge` is not found, add this to `~/.bashrc` or `~/.zshrc`, then open a new terminal:
@@ -131,9 +135,10 @@ The app uses XDG paths on Linux:
 
 - App files: `~/.local/share/public-channelforge/app`
 - User settings and token: `~/.config/public-channelforge`
-- Launcher: `~/.local/share/applications/public-channelforge.desktop`
+- Creator launcher: `~/.local/share/applications/public-channelforge.desktop`
+- TV launcher: `~/.local/share/applications/channelforge-tv.desktop`
 
-Wayland compositors used by Omarchy do not need special configuration because the interface runs in the default browser. If the browser does not open automatically, visit `http://127.0.0.1:8787`.
+Both apps open in dedicated PyWebView windows. Plex account approval opens in the system browser on Linux for compatibility, then Creator detects the approved PIN automatically.
 
 ## Local-folder setup
 

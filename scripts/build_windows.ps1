@@ -2,6 +2,17 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+# Never mix stale executables or checksums into a new public release.
+$buildRoot = Join-Path $root "build"
+$distRoot = Join-Path $root "dist"
+$releaseRoot = Join-Path $root "release"
+$payloadRoot = Join-Path $root "installer\payload"
+foreach ($target in @($buildRoot, $distRoot, $releaseRoot, $payloadRoot)) {
+    $resolvedParent = [IO.Path]::GetFullPath((Split-Path -Parent $target))
+    if (-not $resolvedParent.StartsWith([IO.Path]::GetFullPath($root), [StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe build cleanup path: $target" }
+    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+}
+
 python -m pip install -r requirements.txt
 $ffmpegCandidates = @()
 if ($env:ChocolateyInstall) {
@@ -27,7 +38,7 @@ Copy-Item -Force (Join-Path $root "dist\ChannelForge_Creator.exe") (Join-Path $p
 Copy-Item -Force (Join-Path $root "dist\ChannelForge_TV.exe") (Join-Path $payload "ChannelForge_TV.exe")
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Setup --icon "assets\channel-forge-creator.ico" --add-data "installer\payload\ChannelForge_Creator.exe;payload" --add-data "installer\payload\ChannelForge_TV.exe;payload" --add-data "assets\channel-forge-creator-installer.png;assets" --add-data "assets\channel-forge-tv.png;assets" --add-data "assets\channel-forge-creator.ico;assets" --add-data "assets\channel-forge-tv.ico;assets" installer\windows_installer.py
 
-$release = Join-Path $root "release"
+$release = $releaseRoot
 New-Item -ItemType Directory -Force -Path $release | Out-Null
 $suiteSetup = Join-Path $root "dist\ChannelForge_Setup.exe"
 Copy-Item -Force $suiteSetup $release

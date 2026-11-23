@@ -55,6 +55,22 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"new-version")
         launch.assert_called_once_with([str(target)], cwd=str(folder))
 
+    def test_silent_update_replaces_both_installed_apps(self):
+        folder = Path(tempfile.mkdtemp(prefix="channel-forge-suite-update-"))
+        creator = folder / "ChannelForge_Creator.exe"
+        tv = folder / "ChannelForge_TV.exe"
+        creator.write_bytes(b"old-creator")
+        tv.write_bytes(b"old-tv")
+        payloads = {"creator": folder / "creator-payload.exe", "tv": folder / "tv-payload.exe"}
+        payloads["creator"].write_bytes(b"new-creator")
+        payloads["tv"].write_bytes(b"new-tv")
+        icon = folder / "source.ico"
+        icon.write_bytes(b"icon")
+        with mock.patch.object(windows_installer, "payload_for", side_effect=lambda key: payloads[key]), mock.patch.object(windows_installer, "icon_for", return_value=icon), mock.patch.object(windows_installer.subprocess, "Popen"):
+            windows_installer.apply_silent_update(tv, 44, "tv")
+        self.assertEqual(creator.read_bytes(), b"new-creator")
+        self.assertEqual(tv.read_bytes(), b"new-tv")
+
 
 if __name__ == "__main__":
     unittest.main()

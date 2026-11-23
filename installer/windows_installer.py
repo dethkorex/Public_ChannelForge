@@ -106,23 +106,35 @@ def silent_update_target(arguments: list[str] | None = None) -> tuple[Path, int,
 
 
 def apply_silent_update(target: Path, wait_pid: int, product: str | None = None) -> None:
-    """Replace the installed executable after its current process exits."""
-    replacement = target.with_name(target.name + ".updating")
+    """Replace both installed apps after they exit, then reopen the app the user updated."""
     product = product or target_product(target)
-    shutil.copy2(payload_for(product), replacement)
+    replacements = []
+    for key in INSTALL_PRODUCT_KEYS:
+        installed = target.parent / f"{PRODUCTS[key]['app']}.exe"
+        if installed.exists() or key == product:
+            replacement = installed.with_name(installed.name + ".updating")
+            shutil.copy2(payload_for(key), replacement)
+            replacements.append((key, installed, replacement))
     deadline = time.monotonic() + 90
     last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        try:
-            os.replace(replacement, target)
-            installed_icon = target.parent / PRODUCTS[product]["icon"]
-            shutil.copy2(icon_for(product), installed_icon)
-            subprocess.Popen([str(target)], cwd=str(target.parent))
-            return
-        except PermissionError as exc:
-            last_error = exc
+    pending = list(replacements)
+    while pending and time.monotonic() < deadline:
+        still_pending = []
+        for key, installed, replacement in pending:
+            try:
+                os.replace(replacement, installed)
+                shutil.copy2(icon_for(key), target.parent / PRODUCTS[key]["icon"])
+            except PermissionError as exc:
+                last_error = exc
+                still_pending.append((key, installed, replacement))
+        pending = still_pending
+        if pending:
             time.sleep(0.5)
-    replacement.unlink(missing_ok=True)
+    if not pending:
+        subprocess.Popen([str(target)], cwd=str(target.parent))
+        return
+    for _key, _installed, replacement in replacements:
+        replacement.unlink(missing_ok=True)
     raise ValueError(f"ChannelForge did not close in time to finish the update: {last_error or wait_pid}")
 
 
