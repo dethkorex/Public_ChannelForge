@@ -122,7 +122,9 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 EOF
-if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+if [[ ${CHANNELFORGE_IN_APP_UPDATE:-0} == 1 ]]; then
+  echo "Application files updated in place."
+elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   systemctl --user daemon-reload
   if systemctl --user enable public-channelforge.service && systemctl --user restart public-channelforge.service; then
     echo "Background service enabled and started."

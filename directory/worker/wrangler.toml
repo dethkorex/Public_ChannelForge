@@ -1,7 +1,15 @@
 name = "channelforge-directory"
-main = "src/index.js"
+main = "src/worker.js"
 compatibility_date = "2026-11-01"
 workers_dev = true
+
+[[durable_objects.bindings]]
+name = "STUDIO_INDEX"
+class_name = "StudioIndex"
+
+[[migrations]]
+tag = "studio-index-v1"
+new_sqlite_classes = ["StudioIndex"]
 
 [[kv_namespaces]]
 binding = "CREATORS"

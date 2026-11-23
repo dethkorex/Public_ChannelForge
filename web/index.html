@@ -107,7 +107,7 @@
         <label class="wide">Description<input id="creator-description" maxlength="400" placeholder="Hand-built movie and animation channels"></label>
         <label>Studio logo from Asset Studio<select id="creator-logo-asset"><option value="">No studio asset</option></select></label>
         <label>Or public logo URL<input id="creator-logo-url" type="url" placeholder="https://example.com/logo.png"></label>
-        <details class="wide"><summary>Advanced sharing settings</summary><label>Custom HTTPS media origin<input id="creator-pairing-url" type="url" placeholder="Leave blank to use the free relay"></label><label>Hosted directory URL<input id="directory-url" type="url" required></label></details>
+        <details class="wide"><summary>Advanced sharing settings</summary><label>Custom HTTPS media origin<input id="creator-pairing-url" type="url" placeholder="Automatic"></label><p>For a dedicated Tailscale Funnel, point its root to the read-only ChannelForge media port, <code>http://127.0.0.1:8790</code>. Leave the origin blank and restart Creator to detect it. Viewers use the TV guide as usual.</p><label>Hosted directory URL<input id="directory-url" type="url" required></label></details>
         <div class="wide setup-actions"><button id="publish-creator" class="primary">Save &amp; publish studio</button></div>
       </form>
       </details>

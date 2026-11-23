@@ -214,9 +214,9 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("X-Plex-Token", json.dumps(public))
         brief = app.public_channel_catalog(brief=True)["channels"][0]
         self.assertEqual(brief["stream_url"], public["stream_url"])
-        self.assertEqual(len(brief["programs"]), 2)
-        current, next_program = brief["programs"]
-        self.assertEqual(current["stop_epoch_ms"], next_program["start_epoch_ms"])
+        self.assertEqual(len(brief["programs"]), 1)
+        current = brief["programs"][0]
+        self.assertEqual(current["title"], "Example")
         self.assertEqual(set(current), {"title", "start_epoch_ms", "stop_epoch_ms"})
 
     def test_public_channel_catalog_hides_missing_local_source(self):
@@ -386,7 +386,7 @@ class CoreTests(unittest.TestCase):
         with mock.patch.object(app, "start_ffmpeg_session", return_value="encoded-session") as ffmpeg:
             route = app.start_playback_route(channel)
         self.assertEqual(route, "/ffmpeg-stream/encoded-session/index.m3u8")
-        ffmpeg.assert_called_once_with(channel)
+        ffmpeg.assert_called_once_with(channel, public_delivery=False, constrained_live=False)
 
     def test_playback_errors_remove_plex_token(self):
         error = app.sanitized_playback_error("failed https://plex/video?X-Plex-Token=test&part=1")
@@ -633,6 +633,20 @@ class CoreTests(unittest.TestCase):
                 handler.send_playback_manifest(route)
                 handler.redirect.assert_called_once_with(route)
 
+    def test_constrained_live_tune_keeps_media_on_the_program_session(self):
+        handler = object.__new__(app.PublicMediaHandler)
+        handler.send_bytes = mock.Mock()
+        handler.redirect = mock.Mock()
+        route = "/ffmpeg-stream/low-bandwidth-session/index.m3u8"
+
+        handler.send_playback_manifest(route, constrained_live=True)
+
+        handler.send_bytes.assert_called_once_with(
+            200, b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=224000\n/ffmpeg-stream/low-bandwidth-session/index.m3u8\n",
+            "application/vnd.apple.mpegurl",
+        )
+        handler.redirect.assert_not_called()
+
     def test_rewind_cinema_automatically_indexes_all_plex_movies(self):
         libraries = [{"key": "1", "title": "Movies", "type": "movie", "source": "plex"}, {"key": "2", "title": "TV", "type": "show", "source": "plex"}]
         movies = [{"id": "10", "title": "Movie One", "type": "movie", "thumb": "/library/metadata/10/thumb/1", "key": "/library/metadata/10"}]
@@ -704,6 +718,183 @@ class CoreTests(unittest.TestCase):
             fetch.assert_not_called()
             self.assertEqual(app.library_items("44", prefer_index=True), [])
             fetch.assert_called_once_with("44")
+
+    def test_failed_encoder_launch_leaves_no_stream_directory_or_registry_entry(self):
+        channel = {"id": "test-launch", "items": [{"id": "local", "duration_ms": 90000, "source": "local"}]}
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(app, "STREAM_DIR", Path(temporary)), \
+                mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "ffmpeg_path", return_value="ffmpeg"), \
+                mock.patch.object(app, "playback_audio_track", return_value=(0, False)), \
+                mock.patch.object(app, "local_media_path", return_value="video.mp4"), \
+                mock.patch.object(app.subprocess, "Popen", side_effect=OSError("cannot launch")):
+            with self.assertRaisesRegex(OSError, "cannot launch"):
+                app.start_ffmpeg_session(channel)
+            self.assertFalse(app.FFMPEG_SESSIONS)
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_continuous_media_manifest_marks_transition_and_final_segment(self):
+        feed = app.LivePlayout(lambda boundary: None)
+        boundary = app.datetime.now(app.timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "index.m3u8").write_text("#EXTM3U\n#EXTINF:1.0,\nsegment000001.ts\n#EXT-X-ENDLIST\n")
+            feed.open_program = mock.Mock(side_effect=[("first", directory, None, boundary),
+                                                        ("second", directory, None, boundary), None])
+            feed.run()
+        manifest = feed.playlist("hd")
+        self.assertTrue(feed.finished)
+        self.assertEqual(manifest.count("#EXT-X-DISCONTINUITY\n"), 1)
+        self.assertIn("/ffmpeg-stream/first/segment000001.ts", manifest)
+        self.assertIn("/ffmpeg-stream/second/segment000001.ts", manifest)
+        self.assertTrue(manifest.endswith("#EXT-X-ENDLIST\n"))
+
+    def test_manually_entered_free_relay_uses_low_bandwidth_video(self):
+        for host, automatic, expected in (("studio.app.lhr.life", False, True),
+                                          ("studio.tailnet.ts.net", True, False),
+                                          ("media.example.org", False, False)):
+            with self.subTest(host=host), mock.patch.object(app, "config", return_value={
+                "public_url": "https://" + host, "public_tunnel": automatic
+            }):
+                self.assertEqual(app.constrained_public_relay(), expected)
+
+    def test_shared_movie_uses_public_delivery_on_a_custom_origin(self):
+        with mock.patch.object(app, "vault_source", return_value={"id": "movie"}), \
+                mock.patch.object(app, "start_playback_route", return_value="/playlist") as start:
+            self.assertEqual(app.start_vault_session("catalog-id", public_delivery=True), "/playlist")
+            self.assertTrue(start.call_args.args[0]["on_demand"])
+            self.assertTrue(start.call_args.kwargs["public_delivery"])
+
+    def test_funnel_detection_requires_exclusive_verified_media_mapping(self):
+        host = "studio.tailnet.ts.net:8443"
+        handlers = {"/": {"Proxy": "http://127.0.0.1:8790"}}
+        block = {"Web": {host: {"Handlers": handlers}}, "AllowFunnel": {host: True}}
+        status = {"Foreground": {"connection": block}}
+        self.assertEqual(app.media_funnel_origin(status, 8790), "https://" + host)
+        self.assertEqual(app.media_funnel_origin(status, 8787), "")
+        handlers["/other"] = {"Proxy": "http://127.0.0.1:8787"}
+        self.assertEqual(app.media_funnel_origin(status, 8790), "")
+
+    def test_encoder_cleanup_kills_stuck_child_before_removing_segments(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [app.subprocess.TimeoutExpired("ffmpeg", 2), 0]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "stream"
+            directory.mkdir()
+            (directory / "segment000001.ts").touch()
+            app.dispose_encoder({"directory": directory, "process": process})
+            self.assertFalse(directory.exists())
+        process.terminate.assert_called_once()
+        process.kill.assert_called_once()
+        process.stderr.close.assert_called_once()
+
+    def test_encoder_capacity_reserves_live_handoff_and_reuses_existing_stream(self):
+        channel = {"id": "live", "items": [{"id": "one", "duration_ms": 60000}]}
+        position = app.schedule_position(channel)
+        key = app.hashlib.sha256(f'live:one:{position["start"].isoformat()}:standard'.encode()).hexdigest()[:20]
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(app, "STREAM_DIR", Path(temporary)), \
+                mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "ENCODER_STARTING", {}):
+            directory = Path(temporary)
+            (directory / "index.m3u8").touch()
+            running = mock.Mock()
+            running.poll.return_value = None
+            for index in range(app.MAX_ENCODERS - 1):
+                app.FFMPEG_SESSIONS[key if index == 0 else str(index)] = {
+                    "process": running, "channel_id": "live" if index == 0 else str(index), "directory": directory}
+            self.assertEqual(app.start_ffmpeg_session(channel, position=position), key)
+            with self.assertRaises(app.EncoderCapacityError):
+                app.reserve_encoder("other", {"id": "other"}, 1)
+            app.reserve_encoder("next", channel, 1)
+            with self.assertRaises(app.EncoderCapacityError):
+                app.reserve_encoder("another", channel, 1)
+
+    def test_disk_admission_counts_pending_encoders(self):
+        with mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "ENCODER_STARTING", {}), \
+                mock.patch.object(app.shutil, "disk_usage", return_value=mock.Mock(free=app.STREAM_FREE_RESERVE + 150)):
+            app.reserve_encoder("first", {"id": "one"}, 100)
+            with self.assertRaisesRegex(app.EncoderCapacityError, "temporary storage"):
+                app.reserve_encoder("second", {"id": "two"}, 100)
+            self.assertEqual(app.ENCODER_STARTING, {"first": 100})
+
+    def test_stream_cleanup_preserves_seek_history_personal_files_and_pending_start(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(app, "STREAM_DIR", Path(temporary)), \
+                mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "ENCODER_STARTING", {}):
+            dirs = []
+            for digit in range(5):
+                directory = Path(temporary) / (str(digit) * 20 + "-" + "a" * 12)
+                directory.mkdir()
+                (directory / "segment000001.ts").write_bytes(b"data")
+                dirs.append(directory)
+            movie, orphan, personal, pending, fresh = dirs
+            (personal / "family.txt").touch()
+            for directory in dirs[:-1]:
+                os.utime(directory, (100, 100))
+            app.ENCODER_STARTING["3" * 20] = 10
+            app.FFMPEG_SESSIONS["movie"] = {"directory": movie, "process": mock.Mock(), "on_demand": True}
+            app.maintain_stream_storage(500)
+            self.assertFalse(orphan.exists())
+            self.assertTrue((movie / "segment000001.ts").exists())
+            self.assertTrue((personal / "family.txt").exists())
+            self.assertTrue((personal / "segment000001.ts").exists())
+            self.assertTrue(pending.exists())
+            self.assertTrue(fresh.exists())
+
+    def test_storage_pressure_evicts_idle_before_active_movie(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(app, "STREAM_DIR", Path(temporary)), \
+                mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "STREAM_CACHE_LIMIT", 6):
+            for key, access in (("active", 490), ("idle", 100)):
+                directory = Path(temporary) / key
+                directory.mkdir()
+                (directory / "segment000001.ts").write_bytes(b"data")
+                app.FFMPEG_SESSIONS[key] = {"directory": directory, "process": mock.Mock(), "last_access": access}
+            app.maintain_stream_storage(500)
+            self.assertFalse((Path(temporary) / "idle").exists())
+            self.assertIn("capacity_error", app.FFMPEG_SESSIONS["idle"])
+            self.assertTrue((Path(temporary) / "active" / "segment000001.ts").exists())
+
+    def test_completed_movie_can_seek_to_first_segment_during_disk_pressure(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(app, "STREAM_DIR", Path(temporary)), \
+                mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "STREAM_CACHE_LIMIT", 1), \
+                mock.patch.object(app, "STREAM_PRESSURE_SINCE", 10):
+            directory = Path(temporary) / "movie"
+            directory.mkdir()
+            process = mock.Mock()
+            process.poll.return_value = 0
+            app.FFMPEG_SESSIONS["movie"] = {"directory": directory, "process": process, "last_access": 490, "on_demand": True}
+            (directory / "segment000001.ts").write_bytes(b"first-segment")
+            app.maintain_stream_storage(500)
+            handler = object.__new__(app.PublicMediaHandler)
+            handler.path = "/ffmpeg-stream/movie/segment000001.ts"
+            handler.send_bytes = mock.Mock()
+            handler.do_GET()
+            handler.send_bytes.assert_called_once_with(200, b"first-segment", "video/mp2t")
+            process.terminate.assert_not_called()
+
+    def test_transient_pressure_allows_active_movie_to_keep_encoding(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(app, "STREAM_DIR", Path(temporary)), \
+                mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "STREAM_CACHE_LIMIT", 5), \
+                mock.patch.object(app, "STREAM_PRESSURE_SINCE", None):
+            directory = Path(temporary) / "movie"
+            directory.mkdir()
+            process = mock.Mock()
+            process.poll.return_value = None
+            app.FFMPEG_SESSIONS["movie"] = {"directory": directory, "process": process, "last_access": 490, "budget": 5}
+            (directory / "segment000001.ts").write_bytes(b"123456")
+            app.maintain_stream_storage(500)
+            (directory / "segment000001.ts").write_bytes(b"1234")
+            app.maintain_stream_storage(515)
+            self.assertIsNone(app.STREAM_PRESSURE_SINCE)
+            self.assertNotIn("capacity_error", app.FFMPEG_SESSIONS["movie"])
+            process.terminate.assert_not_called()
+
+    def test_feature_length_vod_receives_profile_budget_and_reserves_live_storage(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(app, "STREAM_DIR", Path(temporary)), \
+                mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "ENCODER_STARTING", {}), \
+                mock.patch.object(app.shutil, "disk_usage", return_value=mock.Mock(free=10 * 1024**3)):
+            first = app.reserve_encoder("one", {"id": "one", "on_demand": True}, 5 * 1024**3, 300_000_000)
+            second = app.reserve_encoder("two", {"id": "two", "on_demand": True}, 5 * 1024**3, 300_000_000)
+            self.assertGreater(first, second)
+            self.assertEqual(first + second + app.STREAM_ROLLING_BUDGET, app.STREAM_CACHE_LIMIT)
+            self.assertLess(app.STREAM_CACHE_LIMIT + app.STREAM_ROLLING_BUDGET, 5_000_000_000)
 
     def test_idle_playback_session_is_stopped(self):
         process = mock.Mock()

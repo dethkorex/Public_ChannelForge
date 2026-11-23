@@ -14,8 +14,8 @@ class DirectoryTests(unittest.TestCase):
 
     def test_worker_stays_within_free_tier_health_check_limits(self):
         worker = (Path(__file__).resolve().parents[1] / "directory/worker/src/index.js").read_text(encoding="utf-8")
-        self.assertIn("Math.min(8,keys.length)", worker)
-        self.assertIn("An already-offline creator causes no further writes", worker)
+        self.assertIn("index.due(now, 5)", worker)
+        self.assertIn("An already-offline creator causes no further KV writes", worker)
         self.assertIn("listCreatorKeys(env)", worker)
         self.assertIn("keys.slice(offset, offset + 100)", worker)
 

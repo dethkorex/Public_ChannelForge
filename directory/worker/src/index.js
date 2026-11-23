@@ -101,6 +101,10 @@ function saveCreator(env, creator) {
   return env.CREATORS.put(`creator:${creator.id}`, JSON.stringify(creator), {metadata: {online: creator.online}});
 }
 
+function studioIndex(env) {
+  return env.STUDIO_INDEX.getByName("published-studios");
+}
+
 async function listCreatorKeys(env) {
   const keys = [];
   let cursor;
@@ -128,6 +132,7 @@ async function register(request, env) {
   if (!await publishable(value)) return json({error: "Guide, playlist, and vault must be online before publishing."}, 422);
   const id = crypto.randomUUID(), apiKey = token(), now = Math.floor(Date.now()/1000);
   const creator = {id, ...value, key_hash: await hash(apiKey), online: true, last_ok: now, updated_at: now, failures: 0};
+  await studioIndex(env).add(`creator:${id}`, now);
   await Promise.all([
     saveCreator(env, creator),
     env.CREATORS.put(`slug:${value.slug}`, id),
@@ -140,6 +145,7 @@ async function update(request, env, id) {
   if (!creator) return json({error: "Invalid creator key."}, 403);
   if (request.method === "DELETE") {
     await Promise.all([env.CREATORS.delete(`creator:${id}`), env.CREATORS.delete(`slug:${creator.slug}`)]);
+    await studioIndex(env).remove(`creator:${id}`);
     return json({ok: true});
   }
   const value = validate(await readBody(request));
@@ -151,16 +157,13 @@ async function update(request, env, id) {
   }
   const now = Math.floor(Date.now()/1000);
   const saved = {...creator, ...value, online: true, last_ok: now, failures: 0, updated_at: now};
+  await studioIndex(env).add(`creator:${id}`, now);
   await saveCreator(env, saved);
   return json({creator: publicCreator(saved)});
 }
 
 async function catalog(env) {
-  // Each studio has an independent record. Simultaneous registrations never
-  // overwrite one another in a shared snapshot or compete for its write limit.
-  const keys = (await listCreatorKeys(env))
-    .filter(key => key.metadata?.online !== false)
-    .map(key => key.name);
+  const keys = await studioIndex(env).keys();
   const creators = [];
   for (let offset = 0; offset < keys.length; offset += 100) {
     const rows = await env.CREATORS.get(keys.slice(offset, offset + 100), {type: "json"});
@@ -173,7 +176,7 @@ async function catalog(env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
       const {pathname} = new URL(request.url);
       const {method} = request;
@@ -186,7 +189,15 @@ export default {
       if (method === "GET" && pathname === "/fire") {
         return Response.redirect("https://github.com/dethkorex/Public_ChannelForge/releases/latest/download/ChannelForgeTV-FireTV.apk", 302);
       }
-      if (method === "GET" && pathname === "/v1/catalog") return await catalog(env);
+      if (method === "GET" && pathname === "/v1/catalog") {
+        const cache = globalThis.caches?.default;
+        const key = new Request(new URL(pathname, request.url));
+        const cached = await cache?.match(key);
+        if (cached) return cached;
+        const result = await catalog(env);
+        if (cache && ctx) ctx.waitUntil(cache.put(key, result.clone()));
+        return result;
+      }
       if (method === "POST" && pathname === "/v1/creators") return await register(request, env);
       const match = pathname.match(/^\/v1\/creators\/([0-9a-f-]+)$/);
       if (match && (method === "PUT" || method === "DELETE")) return await update(request, env, match[1]);
@@ -197,18 +208,27 @@ export default {
   },
   async scheduled(_event,env,ctx){ctx.waitUntil((async()=>{
     // Workers Free permits 50 outbound subrequests per invocation. Check at most
-    // eight creators (at most three origin requests each) in a rotating batch so the public
+    // five creators (including index updates and up to three origin requests each) in a rotating batch so the public
     // directory remains usable as the community grows without paid services.
-    const keys = await listCreatorKeys(env);
-    const batchSize=Math.min(8,keys.length),slot=Math.floor(Date.now()/120000),start=(slot*batchSize)%keys.length;
-    const selected=Array.from({length:batchSize},(_,index)=>keys[(start+index)%keys.length]);
+    const index = studioIndex(env);
+    const now = Math.floor(Date.now()/1000);
+    if (await index.claimImport(now)) {
+      try {
+        const legacy = await listCreatorKeys(env);
+        await index.importLegacy(legacy.map(row => row.name), now);
+      } catch {
+        console.warn("Legacy studio import deferred. Current registrations remain available.");
+      }
+    }
+    const selected = await index.due(now, 5);
     for(const key of selected){
-      const creator=await env.CREATORS.get(key.name,"json");if(!creator)continue;
+      const creator=await env.CREATORS.get(key,"json");
+      if(!creator){await index.checked(key, false, now);continue;}
       // A slow movie catalog or full guide should not hide reachable studios.
       const observed = {};
       const healthy = (creator.status_url && await endpointOk(creator.status_url + "?guide=brief", "json", observed))
         || await endpointOk(creator.playlist_url, "m3u", observed);
-      const wasOnline=Boolean(creator.online),previousFailures=Number(creator.failures||0),now=Math.floor(Date.now()/1000);
+      const wasOnline=Boolean(creator.online),previousFailures=Number(creator.failures||0);
       if(healthy){
         // Healthy creators cause no recurring KV writes. Only recovery or a
         // cleared failure counter is persisted.
@@ -229,7 +249,8 @@ export default {
       }else if(wasOnline){
         creator.failures=2;creator.online=false;await saveCreator(env,creator);
       }
-      // An already-offline creator causes no further writes until it recovers.
+      // An already-offline creator causes no further KV writes until it recovers.
+      await index.checked(key, healthy, now);
     }
   })())}
 };

@@ -37,17 +37,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from linux_runtime import linux_install_command, linux_release_asset, start_webview
+from linux_runtime import apply_linux_update, can_apply_linux_update, restart_linux_app, linux_install_command, linux_release_asset, start_webview
+from collections import deque
 from release_metadata import read_latest_release
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.30"
+VERSION = "3.6.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
 RELAY_HOST_KEY = "localhost.run ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9"
 RELAY_INSTANCE = secrets.token_hex(20)
+BROADCAST_ROUTE = re.compile(r"/broadcast/([a-zA-Z0-9_-]+)/(?:([a-f0-9]{24})/(economy|balanced|hd)|(master))\.m3u8")
+LIVE_PLAYOUT = {}
+EXPORT_CHANNEL_IDS = None
 DEFAULT_DIRECTORY_URL = "https://channelforge-directory.fresh-anorak.workers.dev"
 OLD_DIRECTORY_URL = "https://directory.channelforge.tv"
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -86,6 +90,18 @@ UPDATE_JOBS: dict[str, dict] = {}
 PLAYBACK_ERRORS: dict[str, tuple[float, str]] = {}
 PLAYBACK_ERROR_COOLDOWN = 30
 FFMPEG_SESSIONS: dict[str, dict] = {}
+ENCODER_STARTING: dict[str, int] = {}
+MAX_ENCODERS = 4
+STREAM_CACHE_LIMIT = 3 * 1024**3
+STREAM_FREE_RESERVE = 1024**3
+STREAM_ROLLING_BUDGET = 128 * 1024**2
+STREAM_PRESSURE_SINCE = None
+STREAM_DIRECTORY_NAME = re.compile(r"[a-f0-9]{20}(?:-[a-f0-9]{12})?")
+
+
+class EncoderCapacityError(ValueError):
+    """A Creator cannot accept another encoder until local capacity recovers."""
+
 LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
 AUDIO_SELECTION_CACHE: dict[str, tuple[int, bool]] = {}
 ENCODER_FILE = r"(?:index(?:_(?:economy|balanced|hd))?\.m3u8|segment(?:(?:economy|balanced|hd)_)?\d+\.ts)"
@@ -260,9 +276,9 @@ def download_verified_update(progress=None) -> dict:
     if actual != expected:
         raise ValueError("The downloaded installer failed SHA-256 verification.")
     temporary.replace(destination)
-    command = linux_install_command(destination, Path(__file__).resolve().parent)
+    command = linux_install_command(destination, Path(__file__).resolve().parent, expected)
     progress("complete", destination.stat().st_size, destination.stat().st_size)
-    return {"version": release["latest_version"], "asset": asset_name, "path": str(destination), "sha256": actual, "command": command, "can_launch": sys.platform == "win32"}
+    return {"version": release["latest_version"], "asset": asset_name, "path": str(destination), "sha256": actual, "command": command, "can_launch": sys.platform.startswith("linux") and can_apply_linux_update(destination, Path(__file__).resolve().parent)}
 
 
 def launch_verified_windows_update(installer: str) -> None:
@@ -282,6 +298,23 @@ def exit_for_update(shutdown) -> None:
         APP_WINDOW.destroy()
 
 
+def apply_creator_update(result, shutdown):
+    if sys.platform.startswith("linux"):
+        try:
+            apply_linux_update(Path(result["path"]), result["sha256"], Path(__file__).resolve().parent)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            result.update(can_launch=False, install_error=str(exc))
+            return
+        def restart():
+            stop_public_tunnel()
+            stop_ffmpeg_sessions()
+            restart_linux_app()
+        threading.Timer(1.5, restart).start()
+    else:
+        threading.Timer(0.8, lambda: launch_verified_windows_update(result["path"])).start()
+        threading.Timer(1.5, lambda: exit_for_update(shutdown)).start()
+
+
 def start_update_job(launch: bool, shutdown) -> str:
     job_id = secrets.token_urlsafe(18)
     with LOCK:
@@ -294,11 +327,11 @@ def start_update_job(launch: bool, shutdown) -> str:
                 UPDATE_JOBS[job_id].update({"stage": stage, "downloaded": downloaded, "total": total, "percent": percent})
         try:
             result = download_verified_update(report)
+            if launch and result["can_launch"]:
+                report("installing")
+                apply_creator_update(result, shutdown)
             with LOCK:
                 UPDATE_JOBS[job_id].update({"status": "complete", "result": result, "stage": "complete", "percent": 100})
-            if launch and result["can_launch"]:
-                threading.Timer(0.8, lambda: launch_verified_windows_update(result["path"])).start()
-                threading.Timer(1.5, lambda: exit_for_update(shutdown)).start()
         except Exception as exc:
             with LOCK:
                 UPDATE_JOBS[job_id].update({"status": "error", "stage": "error", "error": str(exc)})
@@ -339,7 +372,7 @@ def config(public: bool = False) -> dict:
         result["token_saved"] = bool(value.get("plex_token"))
         result["creator_published"] = bool(result["creator_id"] and result["creator_key"])
         result["creator_key"] = ""
-        result["tunnel_active"] = bool(TUNNEL_PROCESS and TUNNEL_PROCESS.poll() is None and TUNNEL_URL)
+        result["tunnel_active"] = bool(TUNNEL_URL and (TUNNEL_PROCESS is None or TUNNEL_PROCESS.poll() is None))
         result["sharing_status"] = SHARING_STATUS
         result["movie_scan"] = MOVIE_SCAN_STATUS
         result.pop("client_identifier", None)
@@ -552,8 +585,57 @@ def queue_existing_publication(has_movies: bool = False) -> None:
 
 
 def channels() -> list[dict]:
-    value = load_json(CHANNELS_FILE, [])
-    return value if isinstance(value, list) else []
+    with LOCK:
+        value = load_json(CHANNELS_FILE, [])
+        if not isinstance(value, list):
+            return []
+        legacy = [channel for channel in value if channel.get("items") and not channel.get("air_until")]
+        if legacy:
+            for channel in legacy:
+                channel["air_until"] = current_run_end(channel).isoformat()
+            atomic_json(CHANNELS_FILE, value)
+        return value
+
+
+def lineup_duration(channel):
+    return timedelta(milliseconds=sum(max(1000, int(item.get("duration_ms", 1800000))) for item in scheduled_items(channel)))
+
+
+def current_run_end(channel):
+    anchor = parse_timestamp(channel.get("schedule_anchor", ""))
+    duration = lineup_duration(channel)
+    cycles = max(0, (datetime.now(timezone.utc) - anchor) // duration) if duration else 0
+    return anchor + (cycles + 1) * duration
+
+
+def run_finished(channel, moment=None):
+    return bool(channel.get("air_until") and (moment or datetime.now(timezone.utc)) >= parse_timestamp(channel["air_until"]))
+
+
+def update_channel_run(channel_id, action):
+    with LOCK:
+        values = channels()
+        channel = next((row for row in values if row["id"] == channel_id), None)
+        if not channel:
+            raise ValueError("Channel not found.")
+        finished = run_finished(channel)
+        if action == "shuffle":
+            previous_order = scheduled_items(channel)
+            if channel.get("playback_mode") != "shuffle_in_order":
+                channel["playback_mode"] = "shuffle"
+            for _ in range(16):
+                channel["shuffle_seed"] = secrets.token_hex(8)
+                if scheduled_items(channel) != previous_order:
+                    break
+        if (action == "reair" and finished) or (action == "shuffle" and not finished):
+            now = datetime.now(timezone.utc)
+            channel["schedule_anchor"] = now.isoformat()
+            channel["air_until"] = (now + lineup_duration(channel)).isoformat()
+        if action == "shuffle" or (action == "reair" and finished):
+            atomic_json(CHANNELS_FILE, values)
+        PLAYBACK_ERRORS.pop(channel_id, None)
+        generate_exports(values)
+        return channel
 
 
 def backup_state(reason: str) -> None:
@@ -1431,7 +1513,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         "corner_bug_asset_id": str(payload.get("corner_bug_asset_id", ""))[:80],
         "playback_mode": str(payload.get("playback_mode", "ordered")) if str(payload.get("playback_mode", "ordered")) in {"ordered", "shuffle", "shuffle_in_order", "marathon", "franchise"} else "ordered",
         "updated_at": datetime.now(timezone.utc).isoformat(),
-        "schedule_anchor": str(payload.get("schedule_anchor") or datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()),
+        "schedule_anchor": str(payload.get("schedule_anchor") or datetime.now(timezone.utc).isoformat()),
     }
 
 
@@ -1444,6 +1526,14 @@ def save_channel(payload: dict, channel_id: str = "") -> dict:
             if previous and not payload.get("schedule_anchor"):
                 payload = {**payload, "schedule_anchor": previous.get("schedule_anchor")}
         item = clean_channel(payload, channel_id)
+        if channel_id and previous:
+            if previous.get("shuffle_seed"):
+                item["shuffle_seed"] = previous["shuffle_seed"]
+            old_end = parse_timestamp(previous["air_until"])
+            item["air_until"] = (old_end if run_finished(previous) else
+                                 old_end - lineup_duration(previous) + lineup_duration(item)).isoformat()
+        else:
+            item["air_until"] = current_run_end(item).isoformat()
         if channel_id:
             index = next((i for i, value in enumerate(values) if value.get("id") == channel_id), None)
             if index is None:
@@ -1511,7 +1601,7 @@ def schedule_position(channel: dict, moment: datetime | None = None, *, items: l
     durations = [max(1000, int(item.get("duration_ms", 1_800_000))) for item in items]
     cycle_ms = sum(durations)
     anchor = parse_timestamp(str(channel.get("schedule_anchor", "")))
-    elapsed_ms = int((moment - anchor).total_seconds() * 1000)
+    elapsed_ms = (moment - anchor) // timedelta(milliseconds=1)
     cycles, within = divmod(elapsed_ms, cycle_ms)
     cursor = anchor + timedelta(milliseconds=cycles * cycle_ms)
     for index, duration in enumerate(durations):
@@ -1527,6 +1617,12 @@ def schedule_position(channel: dict, moment: datetime | None = None, *, items: l
 def schedule_window(channel: dict, start: datetime, end: datetime, *, items: list[dict] | None = None) -> list[dict]:
     if items is None:
         items = scheduled_items(channel)
+    if channel.get("air_until"):
+        finish = parse_timestamp(channel["air_until"])
+        end = min(end, finish)
+        start = max(start, finish - lineup_duration(channel))
+        if start >= end:
+            return []
     position = schedule_position(channel, start, items=items)
     cursor = position["start"]
     index = position["index"]
@@ -1578,7 +1674,7 @@ def scheduled_items(channel: dict) -> list[dict]:
     """Return a stable lineup for ordered, shuffled, or series-marathon playback."""
     items = list(channel.get("items", []))
     mode = channel.get("playback_mode", "ordered")
-    seed = str(channel.get("id", "channel"))
+    seed = str(channel.get("shuffle_seed") or channel.get("id", "channel"))
     def item_identity(item: dict) -> str:
         source = str(item.get("plex_server_id") or item.get("file_path") or "")
         return f'{source}:{item.get("id", "")}' if source else str(item.get("id", ""))
@@ -1695,12 +1791,55 @@ def relay_reaches_this_creator(origin: str) -> bool:
         return False
 
 
+def media_funnel_origin(settings, media_port):
+    """Find a public root mapping that serves only this media listener."""
+    for block in [settings, *settings.get("Foreground", {}).values()]:
+        for host, enabled in block.get("AllowFunnel", {}).items():
+            if not enabled or not re.fullmatch(r"[a-z0-9.-]+\.ts\.net:(443|8443|10000)", host):
+                continue
+            handlers = block.get("Web", {}).get(host, {}).get("Handlers", {})
+            if set(handlers) == {"/"} and handlers["/"].get("Proxy", "").rstrip("/") == f"http://127.0.0.1:{media_port}":
+                return "https://" + host.removesuffix(":443")
+    return ""
+
+
+def configured_media_funnel():
+    executable = shutil.which("tailscale")
+    if not executable:
+        return ""
+    try:
+        result = subprocess.run([executable, "funnel", "status", "--json"], capture_output=True, timeout=3,
+                                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        if result.returncode == 0:
+            return media_funnel_origin(json.loads(result.stdout), PUBLIC_MEDIA_PORT)
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
+def constrained_public_relay():
+    settings = config()
+    host = urllib.parse.urlsplit(settings.get("public_url", "")).hostname or ""
+    return host.endswith(".app.lhr.life") or (settings["public_tunnel"] and not host.endswith(".ts.net"))
+
+
 def start_public_tunnel() -> str:
     global TUNNEL_PROCESS, TUNNEL_URL, TUNNEL_URLS
     with TUNNEL_LOCK:
         if PUBLIC_MEDIA_SERVER is None:
             raise ValueError("The read-only media server is not running.")
+        if TUNNEL_URL and TUNNEL_PROCESS is None:
+            return TUNNEL_URL
         if TUNNEL_PROCESS is None or TUNNEL_PROCESS.poll() is not None:
+            funnel = configured_media_funnel()
+            if funnel:
+                try:
+                    start_public_media_server()
+                    if relay_reaches_this_creator(funnel):
+                        TUNNEL_URL = funnel
+                        return funnel
+                except OSError:
+                    pass
             ssh = openssh_tool("ssh")
             if not ssh:
                 raise ValueError("Automatic public sharing requires OpenSSH, which was not found on this computer.")
@@ -1810,6 +1949,17 @@ def ffprobe_path() -> str:
     return found
 
 
+@lru_cache(maxsize=4)
+def ffmpeg_supports_read_burst(executable: str) -> bool:
+    try:
+        help_text = subprocess.check_output([executable, "-hide_banner", "-h", "full"], timeout=4,
+                                            stderr=subprocess.STDOUT,
+                                            creationflags=0x08000000 if sys.platform == "win32" else 0)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return b"-readrate_initial_burst" in help_text
+
+
 def playback_audio_track(item: dict, media_input: str) -> tuple[int, bool | None]:
     """Resolve the preferred audio track and whether the source has audio."""
     recorded_language = str(item.get("audio_language", "")).casefold()
@@ -1887,21 +2037,24 @@ def local_media_path(item: dict) -> Path:
     raise ValueError("That media file is outside the configured local libraries.")
 
 
-def start_ffmpeg_session(channel: dict) -> str:
+def start_ffmpeg_session(channel: dict, *, public_delivery: bool = False, constrained_live: bool = False, position=None) -> str:
     """Share the startup and encoder among viewers tuning the same program."""
     channel_id = str(channel["id"])
     lock_index = zlib.crc32(channel_id.encode()) % len(ENCODER_START_LOCKS)
     with ENCODER_START_LOCKS[lock_index]:
-        return start_or_reuse_encoder(channel)
+        return start_or_reuse_encoder(channel, public_delivery=public_delivery, constrained_live=constrained_live, position=position)
 
 
-def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool) -> tuple[list[str], list[str]]:
+def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool, video_limit_kbps: int | None = None) -> tuple[list[str], list[str]]:
     renditions = [("economy", 480, 270, 128, 165, 1), ("balanced", 854, 480, 430, 540, 1),
                   ("hd", 1280, 720, 1150, 1450, 2)]
     inputs = "".join(f"[{name}_in]" for name, *_ in renditions)
     filters = [f"[0:v:0]{DEINTERLACE_VIDEO},split={len(renditions)}{inputs}"]
     maps, variants = [], []
     for index, (name, width, height, bitrate, maximum, threads) in enumerate(renditions):
+        if video_limit_kbps is not None:
+            scale = min(1, video_limit_kbps / sum(row[4] for row in renditions))
+            bitrate, maximum = max(1, int(bitrate * scale)), max(1, int(maximum * scale))
         filters.append(
             f"[{name}_in]scale=w='min({width},iw)':h='min({height},ih)':"
             f"force_original_aspect_ratio=decrease:force_divisible_by=2[{name}]"
@@ -1933,17 +2086,65 @@ def stream_audio_options(has_audio: bool | None, on_demand: bool, remaining: flo
     return [*AAC_FORMAT, "-af", ",".join(filters)]
 
 
-def start_or_reuse_encoder(channel: dict) -> str:
-    position = schedule_position(channel)
+def start_or_reuse_encoder(channel: dict, *, public_delivery: bool = False, constrained_live: bool = False, position=None) -> str:
+    position = position or schedule_position(channel)
     item = position["item"]
     on_demand = bool(channel.get("on_demand"))
     start_key = "on-demand" if on_demand else position["start"].isoformat()
-    identity = hashlib.sha256(f'{channel["id"]}:{item["id"]}:{start_key}'.encode()).hexdigest()[:20]
+    profile = "constrained" if constrained_live else "public" if public_delivery else "standard"
+    identity = hashlib.sha256(f'{channel["id"]}:{item["id"]}:{start_key}:{profile}'.encode()).hexdigest()[:20]
     with LOCK:
         existing = FFMPEG_SESSIONS.get(identity)
-        if existing and existing["process"].poll() in (None, 0) and (existing["directory"] / "index.m3u8").exists():
+        if existing and not existing.get("capacity_error") and existing["process"].poll() in (None, 0) and (existing["directory"] / "index.m3u8").exists():
             existing["last_access"] = time.time()
             return identity
+    relay = public_delivery or config()["public_tunnel"]
+    # Include audio and transport-stream overhead. VOD retains its full seek history.
+    seconds = max(1, (position["stop"] - position["start"]).total_seconds())
+    budget = int(seconds * (400_000 if relay else 1_000_000)) + 8 * 1024**2 if on_demand else STREAM_ROLLING_BUDGET
+    STREAM_DIR.mkdir(parents=True, exist_ok=True)
+    # Sustained HLS rates include audio and TS overhead. Use a smaller movie
+    # profile when needed instead of rejecting a normal feature-length film.
+    minimum = int(seconds * 40_000) + 8 * 1024**2 if on_demand else budget
+    budget = reserve_encoder(identity, channel, budget, minimum)
+    try:
+        return launch_encoder(identity, channel, position, profile, relay, budget)
+    finally:
+        with LOCK:
+            ENCODER_STARTING.pop(identity, None)
+
+
+def reserve_encoder(identity, channel, budget, minimum=None):
+    free = shutil.disk_usage(STREAM_DIR).free
+    with LOCK:
+        active = [session for session in FFMPEG_SESSIONS.values() if session["process"].poll() is None]
+        handoff = not channel.get("on_demand") and any(
+            session.get("channel_id") == channel["id"] for session in FFMPEG_SESSIONS.values())
+        if len(active) + len(ENCODER_STARTING) >= (MAX_ENCODERS if handoff else MAX_ENCODERS - 1):
+            raise EncoderCapacityError("This studio is serving other streams. Please try again shortly.")
+        committed = sum(ENCODER_STARTING.values())
+        future = committed
+        for session in FFMPEG_SESSIONS.values():
+            size = session.get("cache_bytes", session.get("budget", 0) if session["process"].poll() is not None else 0)
+            expected = session.get("budget", 0) if session["process"].poll() is None else 0
+            committed += max(size, expected)
+            future += max(0, expected - size)
+        available = min(STREAM_CACHE_LIMIT - committed, free - future - STREAM_FREE_RESERVE)
+        if channel.get("on_demand"):
+            # Keep room for the live channel's next program on a busy movie shelf.
+            available = min(available - STREAM_ROLLING_BUDGET, STREAM_CACHE_LIMIT * 3 // 4)
+        granted = min(available, budget)
+        if granted < (budget if minimum is None else minimum):
+            raise EncoderCapacityError("The studio has insufficient temporary storage for this stream.")
+        ENCODER_STARTING[identity] = granted
+        return granted
+
+
+def launch_encoder(identity, channel, position, profile, relay, budget):
+    item = position["item"]
+    on_demand = bool(channel.get("on_demand"))
+    public_delivery = profile != "standard"
+    constrained_live = profile == "constrained"
     if item.get("source") == "local":
         media_input = str(local_media_path(item))
     else:
@@ -1955,64 +2156,260 @@ def start_or_reuse_encoder(channel: dict) -> str:
         media_input += separator + urllib.parse.urlencode({"X-Plex-Token": credentials["token"]})
     # Keep the previous program's buffered segments available during the handoff.
     directory = STREAM_DIR / f"{identity}-{secrets.token_hex(6)}"
-    directory.mkdir(parents=True, exist_ok=True)
     remaining = max(0.1, (position["stop"] - position["start"]).total_seconds() - position["offset_ms"] / 1000)
     input_timing = ["-re"] if on_demand else ["-re", "-ss", f'{position["offset_ms"] / 1000:.3f}']
+    executable = ffmpeg_path()
+    if public_delivery and not on_demand and ffmpeg_supports_read_burst(executable):
+        input_timing += ["-readrate_initial_burst", "3"]
     output_timing = [] if on_demand else ["-t", f"{remaining:.3f}"]
-    relay = config()["public_tunnel"]
     # Remote players need several extra segments to absorb relay jitter.
     hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments"] if on_demand else
-                   ["-hls_list_size", "12" if relay else "5", "-hls_flags", "independent_segments+temp_file"])
+                   ["-hls_list_size", "12" if relay else "5", "-hls_delete_threshold", "45" if constrained_live else "90",
+                    "-hls_flags", "independent_segments+temp_file+delete_segments"])
     audio_index, has_audio = playback_audio_track(item, media_input)
-    if relay and has_audio is not None:
-        encoding, output = adaptive_relay_options(directory, audio_index, has_audio)
+    duration = (position["stop"] - position["start"]).total_seconds()
+    media_rate = int((budget - 8 * 1024**2) * 8 / max(1, duration) / 1000 * 0.82) if on_demand else None
+    audio_rate = 64 if has_audio is not False else 0
+    if constrained_live:
+        encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?", "-threads:v", "2",
+                    "-vf", f"{DEINTERLACE_VIDEO},scale=w='min(480,iw)':h='min(270,ih)':"
+                    "force_original_aspect_ratio=decrease:force_divisible_by=2",
+                    "-b:v", "104k", "-maxrate", "124k", "-bufsize", "124k"]
+        output = ["-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8")]
+    elif relay and has_audio is not None and (media_rate is None or media_rate >= 750):
+        video_limit = media_rate - 3 * audio_rate if media_rate is not None else None
+        encoding, output = adaptive_relay_options(directory, audio_index, has_audio, video_limit)
     else:
         encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?"]
         if relay:
+            maximum = min(1000, media_rate - audio_rate) if media_rate is not None else 1000
             encoding += ["-vf", f"{DEINTERLACE_VIDEO},scale=w='min(1280,iw)':h='min(720,ih)':"
                          "force_original_aspect_ratio=decrease:force_divisible_by=2",
-                         "-b:v", "800k", "-maxrate", "1000k", "-bufsize", "1000k"]
+                         "-b:v", f"{min(800, maximum)}k", "-maxrate", f"{maximum}k", "-bufsize", f"{maximum}k"]
         else:
-            encoding += ["-vf", DEINTERLACE_VIDEO, "-crf", "19"]
+            maximum = min(6000, media_rate - audio_rate) if media_rate is not None else 6000
+            encoding += ["-vf", DEINTERLACE_VIDEO, "-crf", "19", "-maxrate", f"{maximum}k", "-bufsize", f"{maximum * 2}k"]
         output = ["-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8")]
     latency = [] if on_demand else ["-tune", "zerolatency"]
+    segment_duration = "2" if constrained_live else "1"
+    audio = stream_audio_options(has_audio, on_demand, remaining)
+    if constrained_live and audio:
+        audio += ["-b:a", "48k"]
     command = [
-        ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin",
+        executable, "-hide_banner", "-loglevel", "error", "-nostdin",
         *input_timing, "-i", media_input, *output_timing,
-        *encoding, "-c:v", "libx264", "-preset", "veryfast", *latency,
-        "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*1)",
-        *stream_audio_options(has_audio, on_demand, remaining),
-        "-f", "hls", "-hls_time", "1", *hls_options,
+        *encoding, "-c:v", "libx264", "-preset", "superfast" if constrained_live else "veryfast", *latency,
+        "-pix_fmt", "yuv420p", "-force_key_frames", f"expr:gte(t,n_forced*{segment_duration})",
+        *audio,
+        "-f", "hls", "-hls_time", segment_duration, *hls_options,
         *output,
     ]
-    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=0x08000000 if sys.platform == "win32" else 0)
-    with LOCK:
-        FFMPEG_SESSIONS[identity] = {"process": process, "directory": directory, "channel_id": channel["id"], "created": time.time(), "last_access": time.time(), "on_demand": on_demand}
-    deadline = time.time() + 25
-    playlist = directory / "index.m3u8"
-    while time.time() < deadline:
-        if playlist.exists() and playlist.stat().st_size:
-            return identity
-        if process.poll() is not None:
-            error = (process.stderr.read(4096) if process.stderr else b"").decode("utf-8", "replace").strip()
-            raise ValueError(f"Local FFmpeg playback failed: {error or 'the media could not be decoded.'}")
-        time.sleep(0.2)
-    process.terminate()
-    raise ValueError("Local FFmpeg playback did not start within 25 seconds.")
+    directory.mkdir(parents=True, exist_ok=True)
+    session = {"directory": directory, "channel_id": channel["id"], "created": time.time(),
+               "last_access": time.time(), "on_demand": on_demand, "budget": budget}
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                   creationflags=0x08000000 if sys.platform == "win32" else 0)
+        session["process"] = process
+        # A damaged source may keep logging after startup. A full stderr pipe
+        # would otherwise block FFmpeg and leave all viewers buffering.
+        errors = deque(maxlen=4)
+        def drain_errors():
+            for chunk in iter(lambda: process.stderr.read(1024), b""):
+                errors.append(chunk)
+        reader = threading.Thread(target=drain_errors, daemon=True, name="channel-encoder-errors")
+        reader.start()
+        session["error_reader"] = reader
+        deadline = time.monotonic() + 25
+        playlist = directory / "index.m3u8"
+        while time.monotonic() < deadline:
+            if playlist.exists() and playlist.stat().st_size:
+                with LOCK:
+                    previous = FFMPEG_SESSIONS.get(identity)
+                    FFMPEG_SESSIONS[identity] = session
+                    ENCODER_STARTING.pop(identity, None)
+                if previous:
+                    dispose_encoder(previous)
+                return identity
+            if process.poll() is not None:
+                reader.join()
+                error = b"".join(errors).decode("utf-8", "replace").strip()
+                error = re.sub(r"(?i)(X-Plex-Token=)[^&\s']+", r"\1[redacted]", error)
+                raise ValueError(f"Local FFmpeg playback failed: {error or 'the media could not be decoded.'}")
+            time.sleep(0.2)
+        raise ValueError("Local FFmpeg playback did not start within 25 seconds.")
+    except Exception:
+        dispose_encoder(session)
+        raise
 
 
-def start_playback_route(channel: dict) -> str:
+def stop_encoder(session):
+    """Reap the child before releasing its files, including failed startups."""
+    process = session.get("process")
+    if process is not None:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        if session.get("error_reader"):
+            session["error_reader"].join()
+        if process.stderr:
+            process.stderr.close()
+
+
+def dispose_encoder(session):
+    stop_encoder(session)
+    if session.get("directory"):
+        remove_encoder_files(session["directory"])
+
+
+def encoder_file(name):
+    return re.fullmatch(ENCODER_FILE + r"(?:\.tmp)?", name) is not None
+
+
+def remove_encoder_files(directory):
+    if directory.is_symlink() or not directory.is_dir():
+        return
+    for file in directory.iterdir():
+        if encoder_file(file.name) and file.is_file() and not file.is_symlink():
+            try:
+                file.unlink()
+            except OSError:
+                pass
+    try:
+        directory.rmdir()
+    except OSError:
+        pass  # Files unrelated to FFmpeg must stay in place.
+
+
+class LivePlayout:
+    def __init__(self, open_program, run_anchor=None):
+        self.run_anchor = run_anchor
+        self.token = secrets.token_hex(12)
+        self.open_program = open_program
+        # Keep viewers inside the playlist through temporary relay stalls. Only
+        # segment references live here; the encoder already retains the files.
+        self.segments = deque(maxlen=30)
+        self.condition = threading.Condition()
+        self.last_request = time.monotonic()
+        self.error = None
+        self.capacity_error = None
+        self.finished = False
+        self.stopped = False
+        self.sequence = 0
+
+    def active(self):
+        return not self.stopped and self.error is None and time.monotonic() - self.last_request < 30
+
+    def playlist(self, variant):
+        with self.condition:
+            self.last_request = time.monotonic()
+            self.condition.wait_for(lambda: self.segments or self.error or self.finished or self.stopped, timeout=15)
+            if self.capacity_error:
+                raise EncoderCapacityError(self.capacity_error)
+            if self.error or not self.segments:
+                raise ValueError("The channel could not prepare its next program.")
+            first, discontinuity, _ = self.segments[0]
+            lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-INDEPENDENT-SEGMENTS",
+                     "#EXT-X-TARGETDURATION:2", f"#EXT-X-MEDIA-SEQUENCE:{first}",
+                     f"#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity}"]
+            for _, epoch, renditions in self.segments:
+                if epoch != discontinuity:
+                    lines.append("#EXT-X-DISCONTINUITY")
+                    discontinuity = epoch
+                lines.extend(renditions[variant])
+            if self.finished:
+                lines.append("#EXT-X-ENDLIST")
+            return "\n".join(lines) + "\n"
+
+    def run(self):
+        boundary = None
+        epoch = 0
+        try:
+            while self.active():
+                program = self.open_program(boundary)
+                if program is None:
+                    with self.condition:
+                        self.finished = True
+                        self.condition.notify_all()
+                    return
+                session, directory, process, boundary = program
+                self.read_program(session, directory, process, epoch)
+                # Bound the lookahead even when programs are very short.
+                while self.active() and time.time() < boundary.timestamp() - 4:
+                    time.sleep(.15)
+                epoch += 1
+        except Exception as exc:
+            with self.condition:
+                self.error = str(exc)
+                if isinstance(exc, EncoderCapacityError):
+                    self.capacity_error = str(exc)
+                self.condition.notify_all()
+        finally:
+            with self.condition:
+                self.stopped = not self.finished
+                self.condition.notify_all()
+
+    def read_program(self, session, directory, process, epoch):
+        master = (directory / "index.m3u8").read_text()
+        adaptive = "#EXT-X-STREAM-INF" in master
+        last = -1
+        while self.active():
+            snapshots = {}
+            ended = True
+            for name in (("economy", "balanced", "hd") if adaptive else ("economy",)):
+                playlist = directory / (f"index_{name}.m3u8" if adaptive else "index.m3u8")
+                content = playlist.read_text() if playlist.exists() else ""
+                ended = ended and "#EXT-X-ENDLIST" in content
+                snapshots[name] = {
+                    int(number): (duration, f"/ffmpeg-stream/{session}/{filename}")
+                    for duration, filename, number in re.findall(
+                        r"(?m)^(#EXTINF:[^\n]+)\n(segment(?:[a-z]+_)?(\d+)\.ts)$", content)
+                }
+            if not adaptive:
+                snapshots.update(balanced=snapshots["economy"], hd=snapshots["economy"])
+            common = sorted(set.intersection(*(set(items) for items in snapshots.values())))
+            with self.condition:
+                for number in common:
+                    if number > last:
+                        variants = {name: rows[number] for name, rows in snapshots.items()}
+                        self.segments.append((self.sequence, epoch, variants))
+                        self.sequence += 1
+                        last = number
+                if common:
+                    self.condition.notify_all()
+            if ended and common:
+                return
+            if process.poll() is not None:
+                if process.returncode or not common:
+                    raise ValueError("The channel encoder stopped before delivering its program.")
+                # A playlist may have been replaced between reading it and process exit.
+                if not ended:
+                    if all("#EXT-X-ENDLIST" in (directory / (f"index_{name}.m3u8" if adaptive else "index.m3u8")).read_text()
+                           for name in snapshots):
+                        continue
+                    raise ValueError("The channel encoder stopped without a final playlist.")
+            time.sleep(.12)
+
+
+def start_playback_route(channel: dict, *, public_delivery: bool = False, constrained_live: bool = False) -> str:
     """Start a demand-driven, browser-safe H.264/AAC encoder for every source."""
-    return f"/ffmpeg-stream/{start_ffmpeg_session(channel)}/index.m3u8"
+    identity = start_ffmpeg_session(channel, public_delivery=public_delivery, constrained_live=constrained_live)
+    return f"/ffmpeg-stream/{identity}/index.m3u8"
 
 
 def stop_ffmpeg_sessions() -> None:
     with LOCK:
+        for feed in LIVE_PLAYOUT.values():
+            feed.last_request = float("-inf")
+        LIVE_PLAYOUT.clear()
         sessions = list(FFMPEG_SESSIONS.values())
         FFMPEG_SESSIONS.clear()
     for session in sessions:
-        if session["process"].poll() is None:
-            session["process"].terminate()
+        dispose_encoder(session)
 
 
 def reap_idle_sessions_once(now: float | None = None) -> int:
@@ -2020,6 +2417,9 @@ def reap_idle_sessions_once(now: float | None = None) -> int:
     moment = now if now is not None else time.time()
     with LOCK:
         expired = []
+        for channel_id, feed in list(LIVE_PLAYOUT.items()):
+            if not feed.active():
+                del LIVE_PLAYOUT[channel_id]
         active_live_directories = []
         for key, value in FFMPEG_SESSIONS.items():
             # Cached, finished movies can resume without starting Plex again.
@@ -2033,24 +2433,87 @@ def reap_idle_sessions_once(now: float | None = None) -> int:
         for key, _value in expired:
             FFMPEG_SESSIONS.pop(key, None)
     for _key, session in expired:
-        process = session["process"]
-        if process.poll() is None:
-            process.terminate()
-        if session.get("directory"):
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                continue
-            shutil.rmtree(session["directory"], ignore_errors=True)
+        dispose_encoder(session)
     for directory in active_live_directories:
         prune_live_segments(directory, moment - 90)
+    if STREAM_DIR.is_dir():
+        maintain_stream_storage(moment)
     return len(expired)
+
+
+def maintain_stream_storage(moment):
+    global STREAM_PRESSURE_SINCE
+    with LOCK:
+        sessions = list(FFMPEG_SESSIONS.items())
+        tracked = {session.get("directory") for _, session in sessions}
+        starting = set(ENCODER_STARTING)
+    for directory in STREAM_DIR.iterdir():
+        if (directory in tracked or not STREAM_DIRECTORY_NAME.fullmatch(directory.name)
+                or directory.name.split("-")[0] in starting or directory.is_symlink()):
+            continue
+        try:
+            if (directory.is_dir() and directory.stat().st_mtime < moment - 120
+                    and all(encoder_file(child.name) and child.is_file() and not child.is_symlink() for child in directory.iterdir())):
+                remove_encoder_files(directory)
+        except FileNotFoundError:
+            pass
+    used = 0
+    for _, session in sessions:
+        directory = session.get("directory")
+        if not directory or not directory.is_dir():
+            continue
+        if not session.get("size_final"):
+            final = session["process"].poll() is not None
+            try:
+                with os.scandir(directory) as entries:
+                    session["cache_bytes"] = sum(entry.stat(follow_symlinks=False).st_size for entry in entries
+                                                 if entry.is_file(follow_symlinks=False) and encoder_file(entry.name))
+                session["size_final"] = final
+            except FileNotFoundError:
+                continue
+        used += session.get("cache_bytes", 0)
+    # Another application can consume the reserved space after a stream starts.
+    # Evict inactive caches before interrupting a viewer; retain an explicit error
+    # for a stopped stream rather than exposing a truncated playable movie.
+    free = shutil.disk_usage(STREAM_DIR).free
+    if free >= STREAM_FREE_RESERVE and used <= STREAM_CACHE_LIMIT:
+        STREAM_PRESSURE_SINCE = None
+        return
+    if STREAM_PRESSURE_SINCE is None:
+        STREAM_PRESSURE_SINCE = moment
+    sessions.sort(key=lambda row: (moment - row[1].get("last_access", moment) < 60,
+                                   -row[1].get("cache_bytes", 0)))
+    for key, session in sessions:
+        if free >= STREAM_FREE_RESERVE and used <= STREAM_CACHE_LIMIT:
+            break
+        with LOCK:
+            if FFMPEG_SESSIONS.get(key) is not session or session.get("capacity_error"):
+                continue
+            idle = moment - session.get("last_access", moment) >= 60
+            if not idle:
+                if session["process"].poll() is not None:
+                    continue  # An active completed movie costs no further space and remains seekable.
+                within_margin = free > STREAM_FREE_RESERVE * 3 // 4 and used < STREAM_CACHE_LIMIT + STREAM_ROLLING_BUDGET
+                if within_margin and (moment - STREAM_PRESSURE_SINCE < 30 or
+                                      free >= STREAM_FREE_RESERVE and session.get("cache_bytes", 0) <= session.get("budget", 0)):
+                    continue
+            session["capacity_error"] = "The studio ran out of temporary storage. Try again when space is available."
+            session["last_access"] = moment
+        if idle:
+            dispose_encoder(session)
+            used -= session.get("cache_bytes", 0)
+            session["cache_bytes"] = 0
+            free = shutil.disk_usage(STREAM_DIR).free
+        else:
+            # Stop growth, retaining prior segments for requests already in flight.
+            stop_encoder(session)
+            break  # Reassess growth before interrupting another active stream.
 
 
 def prune_live_segments(directory: Path, cutoff: float) -> None:
     for segment in directory.glob("segment*.ts"):
         try:
-            if segment.stat().st_mtime < cutoff:
+            if encoder_file(segment.name) and not segment.is_symlink() and segment.stat().st_mtime < cutoff:
                 segment.unlink()
         except OSError:
             continue
@@ -2059,7 +2522,10 @@ def prune_live_segments(directory: Path, cutoff: float) -> None:
 def reap_idle_sessions() -> None:
     while True:
         time.sleep(15)
-        reap_idle_sessions_once()
+        try:
+            reap_idle_sessions_once()
+        except OSError as exc:
+            print(f"Could not finish temporary stream cleanup: {exc}")
 
 
 atexit.register(stop_ffmpeg_sessions)
@@ -2124,7 +2590,9 @@ def fetch_plex_stream(url: str, range_header: str = "", channel_id: str = "") ->
 
 
 def generate_exports(values: list[dict] | None = None) -> dict:
+    global EXPORT_CHANNEL_IDS
     values = values if values is not None else channels()
+    values = [channel for channel in values if not run_finished(channel)]
     settings = config()
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     tv = ET.Element("tv", {"generator-info-name": APP_NAME})
@@ -2163,6 +2631,7 @@ def generate_exports(values: list[dict] | None = None) -> dict:
         ])
     playlist_path = EXPORT_DIR / "channels.m3u"
     playlist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    EXPORT_CHANNEL_IDS = tuple(channel["id"] for channel in values)
     return {"guide": str(guide_path), "playlist": str(playlist_path), "channels": len(values)}
 
 
@@ -2226,7 +2695,8 @@ def search_public_vault(base: str, query: dict, offset: int, limit: int) -> dict
     def value(name: str, fallback: str = "") -> str:
         return query.get(name, [fallback])[0]
 
-    bounds = {"80s": (1980, 1990), "90s": (1990, 2000), "2000s": (2000, 2010), "recent": (2010, 10000)}
+    bounds = {"60s": (1960, 1970), "70s": (1970, 1980), "80s": (1980, 1990), "90s": (1990, 2000),
+              "2000s": (2000, 2010), "recent": (2010, 10000)}
     first, last = bounds.get(value("decade"), (0, 10000))
     terms = value("q")[:240].casefold().split()
     genre, rating = value("genre").casefold(), value("rating")
@@ -2259,7 +2729,7 @@ def search_public_vault(base: str, query: dict, offset: int, limit: int) -> dict
     return result
 
 
-def public_channel_catalog(base: str | None = None, *, extended: bool = False, brief: bool = False) -> dict:
+def public_channel_catalog(base: str | None = None, *, extended: bool = False, brief: bool = False, continuous: bool = False) -> dict:
     """Return lightweight guide/status data without starting a media session."""
     base = base or server_base()
     moment = datetime.now(timezone.utc)
@@ -2277,13 +2747,16 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
             return f"{base}/api/local/image?section={urllib.parse.quote(media_section, safe='')}&id={urllib.parse.quote(str(item.get('id', '')), safe='')}"
         return f"{base}/api/plex/image?path={urllib.parse.quote(image_path, safe='')}&server={urllib.parse.quote(str(item.get('plex_server_id', '')), safe='')}&size=poster"
     for channel in channels():
+        if run_finished(channel, moment):
+            continue
         try:
             items = scheduled_items(channel)
             position = schedule_position(channel, moment, items=items)
             current = position["item"]
             if brief:
-                following = schedule_position(channel, position["stop"], items=items)
-                slots = [position, following]
+                slots = [position]
+                if not run_finished(channel, position["stop"]):
+                    slots.append(schedule_position(channel, position["stop"], items=items))
             else:
                 slots = schedule_window(channel, start, end, items=items)
             if current.get("source") == "local":
@@ -2301,6 +2774,10 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
             "id": str(channel.get("id", "")), "name": str(channel.get("name", "Untitled")),
             "number": str(channel.get("number", "")), "online": online,
             "stream_url": f"{base}/live/{urllib.parse.quote(str(channel.get('id', '')))}.m3u8",
+            "air_until": channel.get("air_until", ""),
+            "air_until_epoch_ms": int(parse_timestamp(channel["air_until"]).timestamp()*1000) if channel.get("air_until") else 0,
+            **({"continuous_url": f"{base}/broadcast/{channel['id']}/master.m3u8"}
+               if continuous else {}),
             "logo_url": f"{base}/user-assets/{urllib.parse.quote(str(logo.get('filename', '')))}" if logo else "",
             "programs": [{
                 "title": str(slot["item"].get("title", "Untitled")),
@@ -2342,12 +2819,12 @@ def playback_error(channel_id: str) -> str:
     return ""
 
 
-def start_vault_session(item_id: str) -> str:
+def start_vault_session(item_id: str, *, public_delivery: bool = False) -> str:
     item = vault_source(item_id)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     channel = {"id": f"vault-{item_id}", "items": [item], "schedule_anchor": now.isoformat(),
                "playback_mode": "ordered", "on_demand": True}
-    return start_playback_route(channel)
+    return start_playback_route(channel, public_delivery=public_delivery)
 
 
 def plugin_tools() -> list[dict]:
@@ -2439,7 +2916,62 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
-    def send_playback_manifest(self, route: str) -> None:
+    def broadcast(self, channel_id, playlist, token):
+        public = isinstance(self, PublicMediaHandler)
+        constrained = public and constrained_public_relay()
+        feed_key = (channel_id, public, constrained)
+        if playlist == "master":
+            channel = next((row for row in channels() if row["id"] == channel_id), None)
+            if not channel:
+                return self.send_json(404, {"error": "Channel offline."})
+            if run_finished(channel):
+                return self.send_json(410, {"error": "This channel has finished its lineup."})
+
+            def open_program(boundary):
+                current = next((row for row in channels() if row["id"] == channel_id), None)
+                if not current:
+                    raise ValueError("Channel offline.")
+                if run_finished(current, boundary):
+                    return None
+                position = schedule_position(current, boundary)
+                identity = start_ffmpeg_session(current, public_delivery=public, constrained_live=constrained, position=position)
+                with LOCK:
+                    session = FFMPEG_SESSIONS[identity]
+                    return identity, session["directory"], session["process"], position["stop"]
+
+            with LOCK:
+                feed = LIVE_PLAYOUT.get(feed_key)
+                if not feed or not feed.active() or feed.run_anchor != channel.get("schedule_anchor"):
+                    if feed:
+                        feed.stopped = True
+                    feed = LIVE_PLAYOUT[feed_key] = LivePlayout(open_program, channel.get("schedule_anchor"))
+                    threading.Thread(target=feed.run, daemon=True, name="channel-playout").start()
+                feed.last_request = time.monotonic()
+            lines = ["#EXTM3U"]
+            variants = (("economy", 224000),) if constrained else (("economy", 270000), ("balanced", 690000), ("hd", 1750000))
+            for name, bandwidth in variants:
+                lines.extend([f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}",
+                              f"/broadcast/{channel_id}/{feed.token}/{name}.m3u8"])
+            manifest = "\n".join(lines) + "\n"
+        else:
+            with LOCK:
+                feed = LIVE_PLAYOUT.get(feed_key)
+                if feed and feed.token == token and feed.capacity_error:
+                    return self.send_json(503, {"error": feed.capacity_error})
+                if not feed or feed.token != token or not feed.active():
+                    return self.send_json(410, {"error": "Tune this channel again."})
+            try:
+                manifest = feed.playlist(playlist)
+            except EncoderCapacityError as exc:
+                return self.send_json(503, {"error": str(exc)})
+            except ValueError:
+                return self.send_json(503, {"error": "The studio could not prepare this channel."})
+        self.send_bytes(200, manifest.encode(), "application/vnd.apple.mpegurl")
+
+    def send_playback_manifest(self, route: str, *, constrained_live: bool = False) -> None:
+        if constrained_live:
+            master = f"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=224000\n{route}\n".encode()
+            return self.send_bytes(200, master, "application/vnd.apple.mpegurl")
         match = re.fullmatch(r"(/ffmpeg-stream/([a-zA-Z0-9_-]+)/)index\.m3u8", route)
         if match:
             with LOCK:
@@ -2469,10 +3001,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             parsed = urllib.parse.urlparse(self.path)
+            broadcast = BROADCAST_ROUTE.fullmatch(parsed.path)
+            if broadcast:
+                return self.broadcast(broadcast[1], broadcast[3] or broadcast[4], broadcast[2])
             if parsed.path == "/api/local-creator":
                 settings = config()
                 name = settings["creator_profile"].get("name") or settings["plex_profile"].get("server_name")
-                self.send_json(200, {"app": APP_NAME, "version": VERSION, "name": name, "channel_count": len(channels()),
+                self.send_json(200, {"app": APP_NAME, "version": VERSION, "name": name, "channel_count": sum(not run_finished(row) for row in channels()),
                                      "creator_id": settings["creator_id"], "public_url": settings["public_url"]})
             elif parsed.path == "/api/status":
                 if urllib.parse.parse_qs(parsed.query).get("brief") == ["1"]:
@@ -2480,6 +3015,8 @@ class Handler(BaseHTTPRequestHandler):
                 values = channels()
                 now_playing = {}
                 for channel in values:
+                    if run_finished(channel):
+                        continue
                     try:
                         position = schedule_position(channel)
                         now_playing[channel["id"]] = {
@@ -2520,6 +3057,8 @@ class Handler(BaseHTTPRequestHandler):
                 moment = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(hours=offset)
                 guide = []
                 for channel in channels():
+                    if run_finished(channel):
+                        continue
                     slots = schedule_window(channel, moment, moment + timedelta(hours=6))
                     guide.append({"channel_id": channel["id"], "name": channel["name"], "number": channel["number"], "logo_asset_id": channel.get("logo_asset_id", ""), "programs": [{"title": slot["item"].get("title", "Untitled"), "year": slot["item"].get("year", ""), "type": slot["item"].get("type", "video"), "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat()} for slot in slots]})
                 self.send_json(200, {"generated_at": moment.isoformat(), "channels": guide})
@@ -2540,7 +3079,7 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/public/channels":
                 guide = urllib.parse.parse_qs(parsed.query).get("guide")
                 self.send_json(200, public_channel_catalog(self.catalog_base(), extended=guide == ["extended"],
-                                                           brief=guide == ["brief"]))
+                                                           brief=guide == ["brief"], continuous=True))
             elif parsed.path == "/api/public/origin":
                 self.send_json(200, {"instance": RELAY_INSTANCE})
             elif parsed.path == "/api/update":
@@ -2562,34 +3101,43 @@ class Handler(BaseHTTPRequestHandler):
                 if requested not in {"guide.xml", "channels.m3u"}:
                     raise FileNotFoundError
                 path = EXPORT_DIR / requested
-                if not path.exists():
-                    generate_exports()
-                self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+                with LOCK:
+                    values = channels()
+                    if not path.exists() or EXPORT_CHANNEL_IDS != tuple(c["id"] for c in values if not run_finished(c)):
+                        generate_exports(values)
+                    body = path.read_bytes()
+                self.send_bytes(200, body, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
             elif parsed.path.startswith("/live/") and parsed.path.endswith(".m3u8"):
                 channel_id = Path(parsed.path).stem
                 channel = next((item for item in channels() if item.get("id") == channel_id), None)
                 if not channel:
                     raise FileNotFoundError
+                if run_finished(channel):
+                    return self.send_json(410, {"error": "This channel has finished its lineup."})
                 try:
-                    route = start_playback_route(channel)
+                    public_delivery = isinstance(self, PublicMediaHandler)
+                    constrained_live = public_delivery and constrained_public_relay()
+                    route = start_playback_route(channel, public_delivery=public_delivery, constrained_live=constrained_live)
                     with LOCK:
                         PLAYBACK_ERRORS.pop(channel_id, None)
                 except Exception as exc:
                     with LOCK:
                         PLAYBACK_ERRORS[channel_id] = (time.monotonic(), sanitized_playback_error(exc))
                     raise
-                self.send_playback_manifest(route)
+                self.send_playback_manifest(route, constrained_live=constrained_live)
             elif parsed.path.startswith("/vault/") and parsed.path.endswith(".m3u8"):
                 item_id = Path(parsed.path).stem
                 if not re.fullmatch(r"[a-f0-9]{24}", item_id):
                     raise FileNotFoundError
-                self.send_playback_manifest(start_vault_session(item_id))
+                self.send_playback_manifest(start_vault_session(item_id, public_delivery=isinstance(self, PublicMediaHandler)))
             elif parsed.path.startswith("/ffmpeg-stream/"):
                 parts = parsed.path.strip("/").split("/")
                 if len(parts) != 3 or not re.fullmatch(ENCODER_FILE, parts[2]):
                     raise FileNotFoundError
                 with LOCK:
                     session = FFMPEG_SESSIONS.get(parts[1])
+                    if session and session.get("capacity_error") and parts[2].endswith(".m3u8"):
+                        raise EncoderCapacityError(session["capacity_error"])
                     if session:
                         session["last_access"] = time.time()
                 if not session:
@@ -2630,6 +3178,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(404, {"error": "Not found"})
         except FileNotFoundError:
             self.send_json(404, {"error": "Not found"})
+        except EncoderCapacityError as exc:
+            self.send_json(503, {"error": str(exc)})
         except Exception as exc:
             self.send_json(400, {"error": str(exc)})
 
@@ -2708,6 +3258,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(ids, list):
                     raise ValueError("Channel order must be a list.")
                 self.send_json(200, {"channels": reorder_channels([str(item) for item in ids])})
+            elif re.fullmatch(r"/api/channels/[a-zA-Z0-9_-]+/(?:reair|refresh|shuffle)", parsed.path):
+                channel_id, action = parsed.path.split("/")[-2:]
+                channel = update_channel_run(channel_id, action)
+                if action == "reair":
+                    queue_channel_publication(channel, None)
+                self.send_json(200, {"channel": channel})
             elif parsed.path == "/api/exports":
                 self.send_json(200, generate_exports())
             elif parsed.path == "/api/assets/generate":
@@ -2716,11 +3272,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"asset": upload_asset(payload)})
             elif parsed.path == "/api/update/download":
                 result = download_verified_update()
-                self.send_json(200, result)
                 if payload.get("launch") and result["can_launch"]:
-                    installer = result["path"]
-                    threading.Timer(0.8, lambda: launch_verified_windows_update(installer)).start()
-                    threading.Timer(1.5, lambda: exit_for_update(self.server.shutdown)).start()
+                    apply_creator_update(result, self.server.shutdown)
+                self.send_json(200, result)
             elif parsed.path == "/api/update/start":
                 self.send_json(202, {"job_id": start_update_job(bool(payload.get("launch")), self.server.shutdown)})
             elif parsed.path.startswith("/api/tools/"):
@@ -2763,11 +3317,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class PublicMediaHandler(Handler):
+    """Limit the public HTTPS origin to the paths TV viewers consume."""
+
     def end_headers(self) -> None:
         self.send_header("X-ChannelForge-Version", VERSION)
         super().end_headers()
-
-    """Limit the public HTTPS origin to the paths TV viewers consume."""
 
     def catalog_base(self) -> str:
         return server_base()
@@ -2780,6 +3334,8 @@ class PublicMediaHandler(Handler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
+        if BROADCAST_ROUTE.fullmatch(path):
+            return super().do_GET()
         if path == "/api/plex/image":
             image = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
             if not re.fullmatch(r"/library/metadata/\d+/(?:thumb|art)(?:/\d+)?", image):

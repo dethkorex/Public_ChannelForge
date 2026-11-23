@@ -57,9 +57,12 @@ public class MainActivity extends Activity {
     private final List<Creator> creators = new ArrayList<>();
     private final List<Channel> channels = new ArrayList<>();
     private final List<VaultItem> vaultItems = new ArrayList<>();
+    private String movieDecade = "all", movieSearch = "", movieGenre = "", movieRating = "";
+    private JSONArray movieGenres = new JSONArray(), movieRatings = new JSONArray();
     private PlayerView video;
     private FrameLayout activityRoot;
     private View cassetteMotion;
+    private Runnable revealMovie;
     private ValueAnimator cassetteAnimator;
     private boolean ejectingTape;
     private LinearLayout movieDetails;
@@ -84,10 +87,22 @@ public class MainActivity extends Activity {
     private Channel tunedChannel;
     private int liveRetries;
     private long tunedProgramEnd;
+    private long transitionAt;
+    private String transitionTitle = "";
     private boolean hasUpcomingProgram, upcomingDue, upcomingShown;
     private final Runnable upcomingProgram = () -> { upcomingDue = true; showUpcomingIfPlaying(); };
-    private final Runnable liveProgramBoundary = this::retuneAtBoundary;
+    private final Runnable liveProgramBoundary = () -> {
+        if (tunedChannel == null || guideVisible) return;
+        if (tunedChannel.continuousUrl.isEmpty()) {
+            retuneAtBoundary();
+        } else {
+            trackLiveProgram();
+            if (!hasUpcomingProgram) refreshOnAirGuide(tunedChannel);
+            showChannelBanner(tunedChannel);
+        }
+    };
     private boolean playbackWaiting, playbackFailed;
+    private final Runnable resetLiveRetries = () -> liveRetries = 0;
     private VaultItem activeMovie;
     private final LruCache<String, Bitmap> posters = new LruCache<String, Bitmap>(6 * 1024 * 1024) {
         @Override protected int sizeOf(String address, Bitmap image) { return image.getByteCount(); }
@@ -97,7 +112,11 @@ public class MainActivity extends Activity {
         if (!guideVisible) {
             video.removeCallbacks(this.continueLive);
             player.stop();
-            failPlayback();
+            if (tunedChannel != null && liveRetries == 0) {
+                ++liveRetries;
+                showBuffering("Reconnecting to the studio…", true);
+                scheduleLive(1000);
+            } else failPlayback();
         }
     };
     private final Runnable continueLive = () -> {
@@ -106,7 +125,7 @@ public class MainActivity extends Activity {
             if (!hasUpcomingProgram) refreshOnAirGuide(tunedChannel);
             showBuffering("Connecting to the studio…", true);
             waitForPlayback();
-            startStream(tunedChannel.url, true);
+            startStream(tunedChannel.continuousUrl.isEmpty() ? tunedChannel.url : tunedChannel.continuousUrl, true);
         }
     };
     private boolean directoryLoading = false;
@@ -226,7 +245,7 @@ public class MainActivity extends Activity {
                 .setConnectTimeoutMs(6000).setReadTimeoutMs(10000);
         player = new ExoPlayer.Builder(this, new DefaultRenderersFactory(this).setEnableDecoderFallback(true))
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(http))
-                .setLoadControl(new DefaultLoadControl.Builder().setBufferDurationsMs(8000, 25000, 900, 2000).build())
+                .setLoadControl(new DefaultLoadControl.Builder().setBufferDurationsMs(8000, 25000, 1400, 2500).build())
                 .setBandwidthMeter(new DefaultBandwidthMeter.Builder(this).setInitialBitrateEstimate(240_000L).build())
                 .setAudioAttributes(AudioAttributes.DEFAULT, true)
                 .build();
@@ -352,6 +371,15 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
         bp.setMargins(dp(35), 0, dp(35), dp(35));
         root.addView(bannerPanel, bp);
+        TextView eject = focusButton("⏏  EJECT MOVIE");
+        FrameLayout.LayoutParams ejectLayout = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
+        ejectLayout.setMargins(0, dp(12), dp(16), 0);
+        eject.setVisibility(View.GONE);
+        eject.setOnClickListener(v -> ejectMovie());
+        root.addView(eject, ejectLayout);
+        video.setControllerVisibilityListener((PlayerView.ControllerVisibilityListener) visibility ->
+                eject.setVisibility(visibility == View.VISIBLE && activeMovie != null && !ejectingTape
+                        && cassetteMotion == null ? View.VISIBLE : View.GONE));
         setContentView(root);
         screenSwitcher.requestFocus();
         player.addListener(new Player.Listener() {
@@ -360,9 +388,13 @@ public class MainActivity extends Activity {
                 if (state == Player.STATE_BUFFERING) {
                     showBuffering("Buffering video…", true);
                     waitForPlayback();
+                } else if (state == Player.STATE_READY && revealMovie != null) {
+                    revealMovie.run();
                 } else if (state == Player.STATE_ENDED) {
                     clearPlaybackDeadline();
-                    if (tunedChannel != null) {
+                    if (tunedChannel != null && tunedChannel.airUntil > 0 && tunedChannel.airUntil <= System.currentTimeMillis() + 1000) {
+                        showBuffering("Broadcast finished. Press Back for the guide.", false);
+                    } else if (tunedChannel != null) {
                         retuneAtBoundary();
                     } else if (activeMovie != null) {
                         ejectMovie();
@@ -388,6 +420,16 @@ public class MainActivity extends Activity {
             @Override public void onPlayerError(PlaybackException error) {
                 if (guideVisible) return;
                 clearPlaybackDeadline();
+                if (tunedChannel != null && error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW
+                        && liveRetries < 2) {
+                    ++liveRetries;
+                    video.removeCallbacks(resetLiveRetries);
+                    showBuffering("Catching up to live TV…", true);
+                    waitForPlayback();
+                    player.seekToDefaultPosition();
+                    player.prepare();
+                    return;
+                }
                 Throwable cause = error.getCause();
                 boolean unavailable = cause instanceof HttpDataSource.InvalidResponseCodeException
                         && (((HttpDataSource.InvalidResponseCodeException) cause).responseCode == 404
@@ -584,6 +626,7 @@ public class MainActivity extends Activity {
         selectedPlaylist = creator.playlist;
         if (changed) {
             ++movieRequest;
+            movieGenre = movieRating = "";
             moviePageLoading = movieShelfLoaded = false;
             nextMovieOffset = -1;
             movieShelf = null;
@@ -816,24 +859,31 @@ public class MainActivity extends Activity {
         if (moviePageLoading) return;
         moviePageLoading = true;
         int movieLoad = ++movieRequest;
+        final String decade = movieDecade, query = movieSearch, genre = movieGenre, rating = movieRating;
         if (moreMovies != null) moreMovies.setText("LOADING MOVIES…");
         studioLoader.execute(() -> {
             try {
                 JSONObject page = new JSONObject();
                 if (!creator.vault.isEmpty()) {
                     String address = Uri.parse(creator.vault).buildUpon()
+                            .appendQueryParameter("sort", "title").appendQueryParameter("q", query)
+                            .appendQueryParameter("decade", decade).appendQueryParameter("genre", genre)
+                            .appendQueryParameter("rating", rating)
                             .appendQueryParameter("limit", String.valueOf(MOVIE_PAGE_SIZE))
                             .appendQueryParameter("offset", String.valueOf(offset)).build().toString();
                     page = new JSONObject(get(address));
                 }
                 List<VaultItem> movies = creator.vault.isEmpty() ? Collections.emptyList() : parseVault(page);
                 int followingOffset = page.optInt("next_offset", -1);
+                final JSONArray genres = page.optJSONArray("genres"), ratings = page.optJSONArray("ratings");
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed() || movieLoad != movieRequest) return;
                     moviePageLoading = false;
                     movieShelfLoaded = true;
                     nextMovieOffset = followingOffset > offset ? followingOffset : -1;
                     if (offset == 0) {
+                        movieGenres = genres;
+                        movieRatings = ratings;
                         vaultItems.clear();
                         vaultItems.addAll(movies);
                         renderMovies(creator);
@@ -872,6 +922,8 @@ public class MainActivity extends Activity {
             JSONObject entry = entries.getJSONObject(i);
             if (entry.optBoolean("online")) {
                 Channel channel = new Channel(entry.getString("name"), entry.getString("stream_url"));
+                channel.continuousUrl = entry.optString("continuous_url");
+                channel.airUntil = entry.optLong("air_until_epoch_ms", 0);
                 channel.number = entry.optString("number");
                 channel.logo = entry.optString("logo_url");
                 channel.programs = entry.optJSONArray("programs");
@@ -1225,6 +1277,59 @@ public class MainActivity extends Activity {
                 : moviePageLoading ? "CHECKING MOVIES" : "REWIND CINEMA"));
     }
 
+    private void reloadMovieFilters(Creator creator) {
+        moviePageLoading = false;
+        moreMovies = null;
+        nextMovieOffset = -1;
+        status.setText("Searching " + creator.name + "…");
+        loadMoviePage(creator, 0);
+    }
+
+    private void addMovieFilters(Creator creator) {
+        LinearLayout strip = new LinearLayout(this);
+        for (String value : new String[]{"all","60s","70s","80s","90s","2000s","recent"}) {
+            String label = value.equals("recent") ? "2010+" : value.toUpperCase(Locale.ROOT);
+            TextView button = navigationButton(label);
+            button.setSelected(value.equals(movieDecade));
+            if (button.isSelected()) button.setTextColor(color("#FFF088"));
+            button.setContentDescription(label + (button.isSelected() ? ", selected" : ""));
+            button.setOnClickListener(v -> { movieDecade = value; reloadMovieFilters(creator); });
+            strip.addView(button);
+        }
+        TextView search = navigationButton(movieSearch.isEmpty() ? "Search movies" : movieSearch);
+        search.setOnClickListener(v -> {
+            EditText input = new EditText(this);
+            input.setSingleLine(true);
+            input.setText(movieSearch);
+            new AlertDialog.Builder(this).setTitle("Search movies").setView(input)
+                    .setPositiveButton("Search", (d,w) -> { movieSearch = input.getText().toString().trim(); reloadMovieFilters(creator); })
+                    .setNeutralButton("Clear", (d,w) -> { movieSearch = ""; reloadMovieFilters(creator); })
+                    .setNegativeButton("Cancel", null).show();
+        });
+        strip.addView(search);
+        addMovieChoices(strip, creator, true);
+        addMovieChoices(strip, creator, false);
+        addHorizontalStrip(movieRail, strip);
+    }
+
+    private void addMovieChoices(LinearLayout row, Creator creator, boolean genres) {
+        JSONArray options = genres ? movieGenres : movieRatings;
+        if (options == null || options.length() == 0) return;
+        String all = genres ? "All genres" : "All ratings";
+        String selected = genres ? movieGenre : movieRating;
+        TextView button = navigationButton(selected.isEmpty() ? all : selected);
+        String[] names = new String[options.length() + 1];
+        names[0] = all;
+        for (int i = 0; i < options.length(); i++) names[i + 1] = options.optString(i);
+        button.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle(all)
+                .setItems(names, (d,index) -> {
+                    String value = index == 0 ? "" : names[index];
+                    if (genres) movieGenre = value; else movieRating = value;
+                    reloadMovieFilters(creator);
+                }).show());
+        row.addView(button);
+    }
+
     private void renderMovies(Creator creator) {
         movieRail.removeAllViews();
         updateStudioStatus(creator.name);
@@ -1250,15 +1355,16 @@ public class MainActivity extends Activity {
             studios.addView(studio, button);
         }
         if (studios.getChildCount() > 1) addHorizontalStrip(movieRail, studios);
+        addMovieFilters(creator);
         if (vaultItems.isEmpty()) {
-            movieRail.addView(text("No movies available from this studio.", 14, false));
+            movieRail.addView(text("No movies match this selection.", 14, false));
             return;
         }
         LinearLayout content = new LinearLayout(this);
         content.setBaselineAligned(false);
         content.setPadding(0, dp(8), 0, 0);
         int screenHeight = getResources().getConfiguration().screenHeightDp;
-        int height = Math.max(118, Math.min(430, screenHeight - (screenHeight < 450 ? 236 : 284)));
+        int height = Math.max(106, Math.min(430, screenHeight - (screenHeight < 450 ? 270 : 318)));
         LinearLayout shelf = new LinearLayout(this);
         shelf.setOrientation(LinearLayout.VERTICAL);
         movieShelf = shelf;
@@ -1628,6 +1734,8 @@ public class MainActivity extends Activity {
         String next = currentAndNext(tunedChannel)[1];
         if (next.isEmpty()) return;
         upcomingShown = true;
+        transitionAt = tunedProgramEnd;
+        transitionTitle = next;
         showBanner("COMING UP NEXT\n" + next, tunedChannel.logo);
     }
 
@@ -1651,9 +1759,11 @@ public class MainActivity extends Activity {
 
     private void waitForPlayback() {
         playbackFailed = false;
+        video.removeCallbacks(resetLiveRetries);
         if (playbackWaiting) return;
         playbackWaiting = true;
-        video.postDelayed(playbackDeadline, 24_000L);
+        long timeout = tunedChannel == null ? 24_000L : (liveRetries == 0 ? 12_000L : 16_000L);
+        video.postDelayed(playbackDeadline, timeout);
     }
 
     private void clearPlaybackDeadline() {
@@ -1664,14 +1774,22 @@ public class MainActivity extends Activity {
     private void hidePlaybackBuffer() {
         clearPlaybackDeadline();
         bufferPanel.setVisibility(View.GONE);
-        liveRetries = 0;
+        if (tunedChannel != null && player.isPlaying()) {
+            video.removeCallbacks(resetLiveRetries);
+            video.postDelayed(resetLiveRetries, 4000);
+        }
     }
 
     private void startStream(String url, boolean live) {
         renderedFrame = false;
+        video.removeCallbacks(resetLiveRetries);
+        String host = Uri.parse(url).getHost();
+        boolean constrained = live && host != null && host.endsWith(".app.lhr.life");
+        player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+                .setMaxVideoBitrate(constrained ? 260_000 : Integer.MAX_VALUE).build());
         MediaItem.Builder media = new MediaItem.Builder().setUri(url).setMimeType(MimeTypes.APPLICATION_M3U8);
         if (live) {
-            media.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(3200).build());
+            media.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(6000).build());
             player.setMediaItem(media.build());
         } else {
             player.setMediaItem(media.build(), 0);
@@ -1682,6 +1800,7 @@ public class MainActivity extends Activity {
 
     private void failPlayback() {
         playbackFailed = true;
+        if (activeMovie != null && !ejectingTape) clearCassette();
         showBuffering("The studio could not deliver video. Press OK to retry or Back for the guide.", false);
     }
 
@@ -1691,6 +1810,7 @@ public class MainActivity extends Activity {
         tunedChannel = channels.get(channelIndex);
         tunedProgramEnd = 0;
         upcomingDue = upcomingShown = false;
+        transitionAt = 0;
         streamTitle = tunedChannel.name;
         liveRetries = 0;
         clearPlaybackDeadline();
@@ -1756,6 +1876,9 @@ public class MainActivity extends Activity {
     }
 
     private void showBuffering(String message, boolean loading) {
+        if (loading && tunedChannel != null && Math.abs(System.currentTimeMillis() - transitionAt) < 12000) {
+            message = "COMING UP NEXT\n" + transitionTitle;
+        }
         bufferLabel.setText(message + (streamTitle.isEmpty() ? "" : "\n" + streamTitle));
         bufferSpinner.setVisibility(loading ? View.VISIBLE : View.GONE);
         bufferPanel.setVisibility(View.VISIBLE);
@@ -1849,6 +1972,7 @@ public class MainActivity extends Activity {
     }
 
     private void clearCassette() {
+        revealMovie = null;
         View previous = cassetteMotion;
         cassetteMotion = null;
         if (cassetteAnimator != null) { cassetteAnimator.cancel(); cassetteAnimator = null; }
@@ -1860,9 +1984,22 @@ public class MainActivity extends Activity {
         if (!motionEnabled()) { complete.run(); return; }
         FrameLayout layer = new FrameLayout(this);
         layer.setBackground(surface(new int[]{color("#090914"), color("#3E2153"), color("#100D22")}, 0, 0, 0));
+        int width = Math.min(dp(390), activityRoot.getWidth() * 3 / 4);
+        int glassHeight = Math.min(dp(150), activityRoot.getHeight() / 3);
+        FrameLayout cabinet = new FrameLayout(this);
+        cabinet.setBackground(surface(new int[]{color("#675E70"), color("#302C3A"), color("#17151D")}, color("#87788D"), 2, 14));
+        FrameLayout.LayoutParams body = new FrameLayout.LayoutParams(width, glassHeight + dp(60), Gravity.CENTER);
+        layer.addView(cabinet, body);
+        cabinet.setTranslationY(-glassHeight / 2f);
+        TextView glass = text("", 12, true);
+        glass.setGravity(Gravity.CENTER);
+        glass.setBackground(surface(new int[]{color("#303B49"), color("#101A22"), color("#0A1016")}, color("#151521"), 3, 16));
+        FrameLayout.LayoutParams bezel = new FrameLayout.LayoutParams(-1, glassHeight, Gravity.TOP);
+        bezel.setMargins(dp(13), dp(7), dp(24), 0);
+        cabinet.addView(glass, bezel);
         TextView slot = text("", 13, true);
         slot.setBackground(surface(new int[]{color("#08060C"), color("#211F33")}, color("#9F76AA"), 2, 6));
-        layer.addView(slot, new FrameLayout.LayoutParams(dp(362), dp(48), Gravity.CENTER));
+        layer.addView(slot, new FrameLayout.LayoutParams(width * 4 / 5, dp(33), Gravity.CENTER));
         CassetteView tape = new CassetteView(this, movie.title);
         tape.setPosition(inserting ? 0 : 1);
         Bitmap poster = posters.get(movie.poster);
@@ -1877,14 +2014,27 @@ public class MainActivity extends Activity {
         activityRoot.addView(layer, new FrameLayout.LayoutParams(-1, -1));
         cassetteMotion = layer;
         cassetteAnimator = ValueAnimator.ofFloat(inserting ? 0 : 1, inserting ? 1 : 0);
-        cassetteAnimator.setDuration(inserting ? 1400 : 850);
+        cassetteAnimator.setDuration(inserting ? 1800 : 850);
         cassetteAnimator.addUpdateListener(animation -> tape.setPosition((float) animation.getAnimatedValue()));
         cassetteAnimator.addListener(new AnimatorListenerAdapter() {
             @Override public void onAnimationEnd(Animator animation) {
                 if (cassetteMotion != layer) return;
                 cassetteAnimator = null;
-                clearCassette();
-                complete.run();
+                if (!inserting) { clearCassette(); complete.run(); return; }
+                tape.setVisibility(View.GONE);
+                glass.setText("Buffering movie…");
+                revealMovie = () -> {
+                    revealMovie = null;
+                    glass.setText("");
+                    glass.setBackground(surface(new int[]{color("#C2E6DF"), color("#467277")}, color("#171521"), 3, 16));
+                    glass.setScaleY(.025f);
+                    glass.animate().scaleY(1f).alpha(.7f).setDuration(420).withEndAction(() -> {
+                        if (cassetteMotion != layer) return;
+                        clearCassette();
+                        complete.run();
+                    }).start();
+                };
+                if (player.getPlaybackState() == Player.STATE_READY) revealMovie.run();
             }
         });
         cassetteAnimator.start();
@@ -1956,7 +2106,8 @@ public class MainActivity extends Activity {
     }
     private static class Channel {
         final String name, url;
-        String number = "", logo = "", guideUrl = "", studio = "";
+        String number = "", logo = "", guideUrl = "", studio = "", continuousUrl = "";
+        long airUntil;
         JSONArray programs;
         Channel(String name, String url) { this.name = name; this.url = url; }
     }

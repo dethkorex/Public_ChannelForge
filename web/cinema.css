@@ -88,17 +88,49 @@
     pointer-events: none;
 }
 .cinema-tape-deck {
-    position: relative;
+    position: absolute;
+    top: 65%;
+    transform: translateY(-50%);
     display: grid;
     justify-items: center;
     align-items: center;
     width: min(84vw, 760px);
-    height: 178px;
+    height: clamp(76px, 16vh, 140px);
     border: 1px solid #887691;
     border-radius: 14px;
     background: linear-gradient(174deg, #51425d, #191a2e 22%, #120f20 75%, #252038);
     box-shadow: inset 0 3px #a496a958, inset 0 -8px #05040b, 0 24px 60px #000b, 0 0 35px #cc4a9754;
 }
+.cinema-crt {
+    position: absolute; bottom: calc(100% - 3px); inset-inline: -1px;
+    height: min(39vh, 310px); padding: clamp(10px, 2vh, 22px) 12% clamp(10px, 2vh, 22px) 4%;
+    box-sizing: border-box; border: 1px solid #887691; border-radius: 24px 24px 5px 5px;
+    background: linear-gradient(153deg, #706577, #2d2939 23%, #171622 81%);
+    box-shadow: inset 0 3px 2px #aca2af88, inset -6px -6px 12px #0d0b17;
+}
+.cinema-glass {
+    height: 100%; overflow: hidden; position: relative; display: grid; place-items: center;
+    border-radius: 10% / 15%; border: 4px solid #121420;
+    background: radial-gradient(ellipse at 28% 13%, #38414a, #171e28 50%, #090e18);
+    box-shadow: 0 0 0 4px #3c3948, inset 0 2px 18px #030712;
+}
+.cinema-crt i { position:absolute; right:4%; top:25%; width:4%; height:50%;
+    background:repeating-linear-gradient(#10131b 0 2px,#464454 2px 4px); }
+.cinema-glass span { opacity:0; color:#a2e7e1; font: 600 clamp(12px,1.4vw,18px) monospace; }
+.seated .cinema-glass span { opacity:1; }
+.screen-on .cinema-glass span { opacity:0; }
+.screen-on .cinema-glass::after { content:""; position:absolute; inset:0;
+    background:radial-gradient(ellipse,#d7faff,#86cabc 60%,#568f8f); animation:crt-wake 420ms ease-out both; }
+@keyframes crt-wake {
+    0% { transform:scale(.04,.01); opacity:.2; }
+    40% { transform:scale(.88,.025); opacity:.9; }
+    100% { transform:scale(1); opacity:.25; }
+}
+#close.cinema-eject { border:1px solid #30dce8; border-radius:9px; padding:.65em 1.1em;
+    color:#e8ffff; background:linear-gradient(150deg,#182438,#0a1022);
+    font-weight:750; letter-spacing:.04em; text-transform:uppercase; }
+#close.cinema-eject:hover, #close.cinema-eject:focus-visible { color:#fff; border-color:#fa55cc;
+    outline:2px solid #fa55cc; outline-offset:2px; }
 .cinema-deck-brand {
     position: absolute;
     top: 18px;
@@ -127,6 +159,7 @@
 .cinema-tape-prop {
     --depth: clamp(24px, 3.5vh, 40px);
     position: absolute;
+    top: calc(65% - clamp(57.5px, 14vh, 115px));
     width: min(58vw, 460px);
     height: clamp(115px, 28vh, 230px);
     transform-style: preserve-3d;
@@ -188,7 +221,7 @@
 }
 .cinema-tape-side.opposite { left: calc(var(--depth) / -2); transform: rotateY(-90deg); }
 .cinema-tape-base { inset: 0; background: #161021; border: 2px solid #9e795b; transform: translateZ(calc(var(--depth) / -2)) rotateY(180deg); }
-.inserting .cinema-tape-prop { animation: insert-cassette 1400ms ease-in-out both; }
+.inserting .cinema-tape-prop { animation: insert-cassette 1800ms cubic-bezier(.35,0,.27,1) both; }
 .ejecting .cinema-tape-prop { animation: insert-cassette 850ms ease-in-out reverse both; }
 .inserting .cinema-deck-light { animation: tape-ready 1400ms steps(1,end) both; }
 @keyframes insert-cassette {

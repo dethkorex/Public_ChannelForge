@@ -4,6 +4,8 @@ sub init()
   m.directoryTimer.observeField("fire", "refreshCatalog") : m.directoryTimer.control = "start"
   m.liveRetryTimer = m.top.findNode("liveRetryTimer")
   m.liveRetryTimer.observeField("fire", "continueLive")
+  m.playbackDeadline = m.top.findNode("playbackDeadline")
+  m.playbackDeadline.observeField("fire", "playbackTimedOut")
   m.upcomingTimer = m.top.findNode("upcomingTimer")
   m.upcomingTimer.observeField("fire", "showUpcomingBanner")
   m.programBoundaryTimer = m.top.findNode("programBoundaryTimer")
@@ -26,6 +28,9 @@ sub init()
   m.liveProgramStop = 0
   m.checkingOffline = false
   m.liveRetries = 0
+  m.waitingForVideo = false
+  m.upcomingDue = false
+  m.upcomingShown = false
   m.catalogLoading = false
   m.creatorUrl = ""
   refreshCatalog()
@@ -200,6 +205,9 @@ end sub
 sub animateTape(inserting as boolean)
   if m.activeMovie = invalid then return
   m.ejectingMovie = not inserting
+  m.crtWaiting = false
+  m.crtLit = false
+  m.top.findNode("crtLight").opacity = 0
   m.top.findNode("tapeTitle").text = m.activeMovie.title
   m.top.findNode("tapeArtwork").uri = m.activeMovie.hdPosterUrl
   m.top.findNode("tapeMotion").visible = true
@@ -207,7 +215,7 @@ sub animateTape(inserting as boolean)
   m.top.findNode("ejectTapeMotion").control = "stop"
   if inserting
     m.top.findNode("insertTapeMotion").control = "start"
-    m.tapeTimer.duration = 1.45
+    m.tapeTimer.duration = 1.85
   else
     m.video.control = "pause"
     m.top.findNode("ejectTapeMotion").control = "start"
@@ -217,8 +225,9 @@ sub animateTape(inserting as boolean)
   m.tapeTimer.control = "start"
 end sub
 sub tapeMotionDone()
-  m.top.findNode("tapeMotion").visible = false
   if m.ejectingMovie
+    m.top.findNode("tapeMotion").visible = false
+    clearPlaybackDeadline()
     m.ejectingMovie = false
     m.activeMovie = invalid
     m.video.visible = false
@@ -226,8 +235,13 @@ sub tapeMotionDone()
     m.bufferPanel.visible = false
     m.video.control = "stop"
     m.insertMovie.SetFocus(true)
+  else if m.crtLit = true
+    m.top.findNode("tapeMotion").visible = false
+    m.crtLit = false
   else if not m.guide.visible and m.activeMovie <> invalid
+    m.crtWaiting = true
     m.video.control = "play"
+    startPlaybackDeadline()
   end if
 end sub
 sub checkUpdates()
@@ -261,25 +275,46 @@ sub playChannel(index as integer)
   m.liveItem = item
   m.checkingOffline = false
   m.liveRetries = 0
+  m.liveProgramStop = 0
   updateLiveProgramStop()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
   m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
+  startPlaybackDeadline()
   showChannelBanner(item)
 end sub
 sub videoStateChanged()
   if m.guide.visible then return
   state = m.video.state
   if state = "playing"
+    if m.crtWaiting = true and m.activeMovie <> invalid
+      m.crtWaiting = false
+      m.crtLit = true
+      m.top.findNode("crtLight").opacity = 0.65
+      m.tapeTimer.duration = 0.35
+      m.tapeTimer.control = "start"
+    end if
+    clearPlaybackDeadline()
     m.bufferPanel.visible = false
     m.liveRetries = 0
     if m.liveItem <> invalid then showChannelBanner(m.liveItem)
+    if m.upcomingDue then showUpcomingBanner()
   else if state = "buffering"
+    startPlaybackDeadline()
     if m.video.content <> invalid then showBuffering("BUFFERING VIDEO", m.video.content.title)
   else if state = "finished" and m.liveItem <> invalid
-    scheduleNextProgram()
+    if m.liveItem.continuous = true
+      clearPlaybackDeadline()
+      m.programBoundaryTimer.control = "stop"
+      showBuffering("BROADCAST FINISHED", "Press Back to return to the guide.")
+    else
+      scheduleNextProgram()
+    end if
   else if state = "finished" and m.activeMovie <> invalid and not m.ejectingMovie
     animateTape(false)
   else if state = "error"
+    if m.crtWaiting = true then m.top.findNode("tapeMotion").visible = false
+    m.crtWaiting = false
+    clearPlaybackDeadline()
     if m.liveItem <> invalid and m.liveRetries < 3
       showBuffering("RECONNECTING TO THE STUDIO", m.liveItem.title)
       m.liveRetries = m.liveRetries + 1
@@ -295,10 +330,34 @@ sub videoStateChanged()
     end if
   end if
 end sub
+sub startPlaybackDeadline()
+  if m.waitingForVideo then return
+  m.waitingForVideo = true
+  m.playbackDeadline.control = "start"
+end sub
+sub clearPlaybackDeadline()
+  m.playbackDeadline.control = "stop"
+  m.waitingForVideo = false
+end sub
+sub playbackTimedOut()
+  clearPlaybackDeadline()
+  if m.crtWaiting = true then m.top.findNode("tapeMotion").visible = false
+  m.crtWaiting = false
+  if m.guide.visible then return
+  m.liveRetryTimer.control = "stop"
+  m.programBoundaryTimer.control = "stop"
+  m.video.control = "stop"
+  showBuffering("THE STUDIO DID NOT DELIVER VIDEO", "Press OK to retry or Back for the guide.")
+end sub
 sub scheduleNextProgram()
   if m.liveItem = invalid or m.guide.visible then return
   m.upcomingTimer.control = "stop"
   m.programBoundaryTimer.control = "stop"
+  if m.liveItem.continuous = true
+    updateLiveProgramStop()
+    refreshOnAirGuide()
+    return
+  end if
   showBuffering("LOADING THE NEXT PROGRAM", m.liveItem.title)
   remaining = m.liveProgramStop - CreateObject("roDateTime").AsSeconds()
   m.liveRetryTimer.duration = 1
@@ -348,6 +407,7 @@ sub showChannelBanner(item as object)
   m.bannerTimer.control = "start"
 end sub
 sub updateLiveProgramStop()
+  previousStop = m.liveProgramStop
   m.liveProgramStop = 0
   m.upcomingTimer.control = "stop"
   m.programBoundaryTimer.control = "stop"
@@ -358,6 +418,10 @@ sub updateLiveProgramStop()
     if program.start_epoch_ms <> invalid and program.stop_epoch_ms <> invalid
       if program.start_epoch_ms / 1000# <= now and program.stop_epoch_ms / 1000# > now
         m.liveProgramStop = program.stop_epoch_ms / 1000#
+        if previousStop <> m.liveProgramStop
+          m.upcomingDue = false
+          m.upcomingShown = false
+        end if
         m.programBoundaryTimer.duration = m.liveProgramStop - now + 1.7
         m.programBoundaryTimer.control = "start"
         if index + 1 < m.liveItem.programs.Count()
@@ -375,7 +439,11 @@ sub updateLiveProgramStop()
 end sub
 
 sub showUpcomingBanner()
-  if m.liveItem <> invalid and not m.guide.visible and m.video.state = "playing" then showChannelBanner(m.liveItem)
+  m.upcomingDue = true
+  if not m.upcomingShown and m.liveItem <> invalid and not m.guide.visible and m.video.state = "playing"
+    m.upcomingShown = true
+    showChannelBanner(m.liveItem)
+  end if
 end sub
 
 sub refreshOnAirGuide()
@@ -418,16 +486,27 @@ sub continueLive()
   m.video.control = "stop"
   m.video.content = item
   m.video.control = "play"
+  startPlaybackDeadline()
 end sub
 function onKeyEvent(key as string, press as boolean) as boolean
   if not press then return false
   if m.guide.visible = false
+    if key = "OK" and m.bufferPanel.visible and not m.waitingForVideo and m.activeMovie <> invalid and not m.ejectingMovie and not m.top.findNode("tapeMotion").visible
+      m.video.control = "play"
+      startPlaybackDeadline()
+      return true
+    end if
+    if key = "OK" and m.bufferPanel.visible and not m.waitingForVideo and m.liveItem <> invalid
+      playChannel(m.channels.itemFocused)
+      return true
+    end if
     if key = "back" or (key = "OK" and m.liveItem <> invalid)
       if m.activeMovie <> invalid
         if not m.ejectingMovie then animateTape(false)
         return true
       end if
       m.liveItem = invalid
+      clearPlaybackDeadline()
       m.liveRetryTimer.control = "stop"
       m.upcomingTimer.control = "stop"
       m.programBoundaryTimer.control = "stop"

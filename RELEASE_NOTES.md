@@ -1,20 +1,9 @@
-- Fire TV opens a time-based Live TV Guide with all studios, search, Earlier and Later controls, and artwork for the highlighted channel.
-- The Fire TV guide opens with a collapsed sidebar and fits more channels and programs on screen.
-- Fire TV starts adaptive video at a lower bitrate and can fall back to another decoder when the device's preferred decoder fails.
-- Fire TV loads and caches movie posters, and tries the full cover when a thumbnail is unavailable.
-- Coming Up Next is generated from the schedule. On Fire TV, the announcement waits for playback to resume if the stream is buffering.
-- VHS insertion and ejection show the selected movie's cover on a box with visible depth. The deck clears after insertion, and ejecting closes fullscreen playback.
-- Rewind Cinema scrolls through VHS cases. Select a case and choose Insert Movie to open fullscreen playback.
-- Movies animate into the player and eject when you close them. The same movie appears once per studio.
-- Creator has a redesigned dashboard with quicker access to sources, channel editing, and worldwide sharing.
-- Fire TV loads the guide and movie catalog separately and uses adaptive playback.
-- Live TV continues into the next program and shows when a channel is offline.
-- Fullscreen Guide and Cinema use the whole screen. Fire TV has a collapsible sidebar with the same navigation as desktop.
-- The worldwide directory hides unsupported Creator versions until the studio updates and reconnects.
-- Rewind Cinema switches cleanly between compatible studios. The 3D tape seats before the movie plays, and Back or B ejects it.
-- Creator shows connected libraries while shared Plex libraries load and previews channel logos, backgrounds, and corner overlays.
-- Previously indexed Plex movies open from the Creator library cache. Public adaptive streams start with one fewer network request.
-- Update checks have a fallback. The Windows and Linux badge says when the update check needs a retry.
-- Fire TV keeps the guide and navigation visible at 720p. Closing video cleanly cancels network requests that are still running.
-- Creator reconnects the public relay when it stops serving viewers, even if the connection still appears open.
-- Creator has separate TV Shows and Movies library tabs. Add both to one channel and keep your selections while switching libraries.
+- Live TV keeps one stream open as the next show or movie starts. Coming Up Next shows which title is about to air.
+- Creator can use an existing Tailscale Funnel dedicated to ChannelForge. Viewers find the studio in their guide without signing in or entering an address.
+- Channels go offline at the end of their lineup. In Creator, choose Refresh guide, Reshuffle lineup or Put back on TV. Movies remain on the studio’s Rewind Cinema shelf.
+- Fire TV adds movie search, genre and rating filters, and decade buttons from the 1960s through 2010+.
+- Live TV keeps a longer window of recent video. Fire TV can jump back to the live picture after a connection stall.
+- In Rewind Cinema, the TV/VCR lights up when your movie is ready. Choose Eject movie or press Back to return to the shelf.
+- Fixed a Linux movie freeze after VHS insertion. Movies shared through a custom public origin now use the remote streaming profile.
+- Creator limits temporary playback storage to 3 GiB and reserves 1 GiB of free space. The public directory checks offline studios less often.
+- Linux updates replace the existing installation. Creator and TV can restart after the update.

@@ -17,11 +17,11 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from linux_runtime import linux_install_command, linux_release_asset, start_webview
+from linux_runtime import apply_linux_update, can_apply_linux_update, restart_linux_app, linux_install_command, linux_release_asset, start_webview
 from release_metadata import read_latest_release
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.30"
+VERSION = "3.6.0"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -217,7 +217,8 @@ def start_tv_update() -> str:
             if linux:
                 destination = verified_download(UPDATE_DIR / asset_name, expected, download_package, report)
                 result = {"version": version, "path": str(destination),
-                          "command": linux_install_command(destination, Path(__file__).resolve().parent)}
+                          "command": linux_install_command(destination, Path(__file__).resolve().parent, expected), "sha256": expected,
+                          "can_apply": can_apply_linux_update(destination, Path(__file__).resolve().parent)}
             else:
                 destination = verified_windows_setup(UPDATE_DIR, version, expected, download_package, report)
                 result = {"version": version, "path": str(destination)}
@@ -232,13 +233,18 @@ def start_tv_update() -> str:
 
 
 def launch_tv_update(job_id: str) -> None:
-    if sys.platform.startswith("linux"):
-        raise ValueError("Use the verified package's install command to finish this Linux update.")
     with UPDATE_LOCK:
         result = UPDATE_JOBS.get(job_id, {}).get("result", {})
     path = Path(str(result.get("path", ""))).resolve()
     if not path.is_file() or path.parent != UPDATE_DIR.resolve():
         raise ValueError("No verified ChannelForge TV update is ready.")
+    if sys.platform.startswith("linux"):
+        apply_linux_update(path, result["sha256"], Path(__file__).resolve().parent)
+        if shutil.which("systemctl"):
+            subprocess.run(["systemctl", "--user", "try-restart", "public-channelforge.service"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        threading.Timer(1.0, restart_linux_app).start()
+        return
     command = [str(path)]
     if getattr(sys, "frozen", False):
         command.extend(["--silent-update", "--target-exe", str(Path(sys.executable).resolve()), "--wait-pid", str(os.getpid())])
@@ -297,8 +303,8 @@ async function downloadUpdate(){
             bytes.textContent=job.total?Math.round(job.downloaded/1048576)+' MB of '+Math.round(job.total/1048576)+' MB':'';
             if(job.status==='error')throw Error(job.error||'Update failed');
             if(job.status==='complete'){
-                command.value=job.result?.command||'';command.hidden=!command.value;
-                action.textContent=command.value?'COPY INSTALL COMMAND':'OPEN VERIFIED UPDATE';action.hidden=false;
+                panel.dataset.fallback=job.result?.command||'';command.value=job.result?.can_apply?'':panel.dataset.fallback;command.hidden=!command.value;
+                action.textContent=command.value?'COPY INSTALL COMMAND':'INSTALL VERIFIED UPDATE';action.hidden=false;
                 if(command.value)message.textContent='Run the verified install command in your terminal.';
                 return;
             }
@@ -479,7 +485,7 @@ function creatorMedia(url, creator){
     if(!url)return '';
     try{
         const target=new URL(url,creator.status_url||creator.playlist_url);
-        if(creator.local&&/^\/(?:api\/(?:plex|local)\/image$|user-assets\/|live\/|vault\/)/.test(target.pathname)){
+        if(creator.local&&/^\/(?:api\/(?:plex|local)\/image$|user-assets\/|live\/|vault\/|broadcast\/)/.test(target.pathname)){
             return new URL(target.pathname+target.search,creator.status_url).href;
         }
         return ['http:','https:'].includes(target.protocol)?target.href:'';
@@ -584,6 +590,7 @@ async function scanStudio(creator){
             channels=(value.channels||[]).filter(channel=>channel.online)
                 .map(channel=>({...channel,creator_name:creator.name,
                     stream_url:creatorMedia(channel.stream_url,creator),
+                    continuous_url:channel.continuous_url?creatorMedia(channel.continuous_url,creator):'',
                     logo_url:creatorArtwork(channel.logo_url,creator),creator_logo_url:creatorArtwork(creator.logo_url,creator),
                     programs:(channel.programs||[]).map(program=>({...program,
                         poster_url:creatorArtwork(program.poster_url,creator),
@@ -664,7 +671,7 @@ function indexVault(items){
 function filteredVault(){
     const terms=vaultSearch.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const genre=vaultGenre.toLowerCase();
-    const bounds={ '80s':[1980,1990], '90s':[1990,2000], '2000s':[2000,2010], recent:[2010,Infinity] }[vaultFilter];
+    const bounds={ '60s':[1960,1970], '70s':[1970,1980], '80s':[1980,1990], '90s':[1990,2000], '2000s':[2000,2010], recent:[2010,Infinity] }[vaultFilter];
     if(!movieOrders.has(vaultSort)){
         const byTitle=(a,b)=>String(a.title).localeCompare(String(b.title));
         const byYear=movie=>movieIndex.get(movie).year;
@@ -903,7 +910,8 @@ function playCinemaMovie(movie){
         movieOwnsFullscreen=true;
         setApplicationFullscreen(true);
     }
-    const media={kind:'movie',title:movie.title,movie,cinema:true,transportPending:true};
+    const deferDecode=/Linux/i.test(navigator.platform)&&window.Hls?.isSupported();
+    const media={kind:'movie',title:movie.title,movie,cinema:true,transportPending:true,deferDecode};
     play(movie.stream_url,media);
     animateCinemaTape(true,movie,()=>{
         media.transportPending=false;
@@ -913,6 +921,7 @@ function playCinemaMovie(movie){
 let cinemaTapeTimer, cinemaTapeStage;
 function clearCinemaTape(){
     clearTimeout(cinemaTapeTimer);
+    if(cinemaTapeStage?.readyListener)$('#player').removeEventListener(cinemaTapeStage.readyEvent,cinemaTapeStage.readyListener);
     cinemaTapeStage?.remove();
     cinemaTapeStage=null;
 }
@@ -926,7 +935,7 @@ function animateCinemaTape(inserting,movie,done){
     stage.id='cinema-tape-animation';
     stage.className=inserting?'inserting':'ejecting';
     stage.setAttribute('aria-hidden','true');
-    stage.innerHTML='<div class="cinema-tape-deck"><span class="cinema-deck-brand">CHANNELFORGE HOME VIDEO</span>'
+    stage.innerHTML='<div class="cinema-tape-deck"><div class="cinema-crt"><div class="cinema-glass"><span>Buffering movie…</span></div><i></i></div><span class="cinema-deck-brand">CHANNELFORGE HOME VIDEO</span>'
         +'<div class="cinema-tape-slot"></div><span class="cinema-deck-light"></span></div>'
         +'<div class="cinema-tape-prop"><div class="cinema-tape-face"><div class="cinema-tape-art">'
         +(poster?'<img src="'+esc(poster)+'" alt="">':'')+'</div><span class="cinema-tape-print">'
@@ -940,10 +949,26 @@ function animateCinemaTape(inserting,movie,done){
         clearCinemaTape();
         done();
     };
-    stage.querySelector('.cinema-tape-prop').addEventListener('animationend',complete,{once:true});
+    const seated=()=>{
+        if(cinemaTapeStage!==stage||stage.classList.contains('seated'))return;
+        clearTimeout(cinemaTapeTimer);
+        if(!inserting){complete();return}
+        stage.classList.add('seated');
+        const video=$('#player');
+        const lightScreen=()=>{
+            if(cinemaTapeStage!==stage||stage.classList.contains('screen-on'))return;
+            stage.classList.add('screen-on');
+            cinemaTapeTimer=setTimeout(complete,450);
+        };
+        stage.readyListener=lightScreen;
+        stage.readyEvent=activeMedia?.deferDecode?'cinemamanifestready':'canplay';
+        video.addEventListener(stage.readyEvent,lightScreen,{once:true});
+        if(activeMedia?.deferDecode?activeMedia.manifestReady:video.readyState>=3)lightScreen();
+    };
+    stage.querySelector('.cinema-tape-prop').addEventListener('animationend',seated,{once:true});
     cinemaTapeStage=stage;
     document.body.append(stage);
-    cinemaTapeTimer=setTimeout(complete,inserting?1650:1100);
+    cinemaTapeTimer=setTimeout(seated,inserting?2000:1100);
 }
 function restoreCinemaWindow(){
     if(!movieOwnsFullscreen)return;
@@ -960,7 +985,9 @@ function setBuffering(active,message='Buffering video…',loading=true){
     overlay.hidden=!active;
     if(!active)return;
     overlay.querySelector('.buffer-spinner').hidden=!loading;
-    overlay.querySelector('b').textContent=message;
+    const transition=activeMedia?.transition;
+    const atBoundary=loading&&transition&&Math.abs(Date.now()-transition.at)<12000;
+    overlay.querySelector('b').textContent=atBoundary?'COMING UP NEXT · '+transition.title:message;
     overlay.querySelector('small').textContent=activeMedia?.channel?.name||activeMedia?.title||'ChannelForge TV';
 }
 function setPlayerState(message,error=false,canRetry=error){
@@ -969,6 +996,7 @@ function setPlayerState(message,error=false,canRetry=error){
     state.textContent=message;
     state.classList.toggle('error',error);
     if(!error)return;
+    if(activeMedia?.cinema&&!activeMedia.ejecting){clearCinemaTape();activeMedia.transportPending=false}
     clearTimeout(playbackTimer);playbackTimer=null;
     setBuffering(true,message,false);
     clearTimeout(playerControlsTimer);
@@ -986,12 +1014,16 @@ function showChannelOffline(){
     clearTimeout(liveBoundaryTimer);
     setPlayerState('This channel is offline.',true);
 }
-let playbackGeneration=0, liveRetryTimer, liveBoundaryTimer, liveRetries=0, playbackTimer, lastPlaybackTime=-1;
+let playbackGeneration=0, liveRetryTimer, liveBoundaryTimer, liveRetries=0, playbackTimer, lastPlaybackTime=-1, playingSince=0;
 function armPlaybackDeadline(generation, delay){
     if(playbackTimer)return;
     playbackTimer=setTimeout(()=>{
         playbackTimer=null;
         if(generation!==playbackGeneration||!activeStreamUrl)return;
+        if(liveMode&&liveRetries<1){
+            advanceLive(true,'The studio did not deliver video in time.');
+            return;
+        }
         ++playbackGeneration;
         clearTimeout(liveRetryTimer);liveRetryTimer=null;
         clearTimeout(liveBoundaryTimer);
@@ -1040,9 +1072,10 @@ function play(url,media=null,continuing=false){
     clearTimeout(liveBoundaryTimer);
     clearTimeout(playbackTimer);playbackTimer=null;
     const generation=++playbackGeneration,v=$('#player'),shell=ensurePlayerShell();
-    const source='/stream?url='+encodeURIComponent(url);
+    const continuousUrl=media?.kind==='live'&&media.channel?.continuous_url;
+    const source='/stream?url='+encodeURIComponent(continuousUrl||url);
     if(hls){hls.destroy();hls=null}
-    lastPlaybackTime=-1;
+    lastPlaybackTime=-1;playingSince=0;
     if(!continuing){
         liveRetries=0;playerMini=false;document.body.classList.remove('has-mini-player','player-controls-hidden');
         document.body.append(shell);shell.className='mini-player-shell';v.classList.remove('mini');
@@ -1053,7 +1086,7 @@ function play(url,media=null,continuing=false){
         const current=programAt(activeMedia.channel,Date.now());
         activeMedia.programStart=current?.start;
         activeMedia.title=current?.title||activeMedia.title;
-        if(current){
+        if(current&&!continuousUrl){
             const remaining=Date.parse(current.stop)-Date.now();
             liveBoundaryTimer=setTimeout(()=>{
                 if(generation===playbackGeneration)advanceLive();
@@ -1061,13 +1094,14 @@ function play(url,media=null,continuing=false){
         }
     }
     $('#close').hidden=liveMode&&!playerMini;
-    $('#close').textContent=playerMini?'✕ CLOSE PLAYER':'✕ CLOSE MOVIE';
+    $('#close').classList.toggle('cinema-eject',!liveMode);
+    $('#close').textContent=liveMode?'✕ CLOSE PLAYER':'⏏  Eject movie';
     v.controls=!liveMode;updateTunedIndicator(activeMedia,'CONNECTING…');setBuffering(true,'Connecting to the studio…');showPlayerControls();renderLiveGuide();
     v.autoplay=!activeMedia.transportPending;
     v.classList.add('playing');$('#close').classList.add('show');
     v.removeAttribute('src');v.load();
     if(liveMode&&activeMedia.channel?.online===false){showChannelOffline();return}
-    armPlaybackDeadline(generation,24000);
+    armPlaybackDeadline(generation,liveMode?(liveRetries?16000:12000):24000);
     const start=()=>{
         if(generation!==playbackGeneration||activeMedia.ejecting)return;
         if(activeMedia.transportPending){activeMedia.startAfterTransport=start;return}
@@ -1076,18 +1110,52 @@ function play(url,media=null,continuing=false){
         });
     };
     if(window.Hls&&Hls.isSupported()){
-        const local=['127.0.0.1','localhost','[::1]'].includes(new URL(url,location.href).hostname);
+        const hostname=new URL(url,location.href).hostname;
+        const local=['127.0.0.1','localhost','[::1]'].includes(hostname);
+        const constrained=liveMode&&hostname.endsWith('.app.lhr.life');
         const liveBuffer=local?{liveSyncDurationCount:2,liveMaxLatencyDurationCount:8,maxBufferLength:8,maxMaxBufferLength:12}
-            :{liveSyncDurationCount:7,liveMaxLatencyDurationCount:20,maxBufferLength:14,maxMaxBufferLength:20};
+            :{liveSyncDuration:8,liveMaxLatencyDuration:24,maxBufferLength:18,maxMaxBufferLength:24,
+              abrEwmaDefaultEstimate:250000,abrBandWidthUpFactor:0.55,abrBandWidthFactor:0.8};
         const options=liveMode?{startPosition:-1,backBufferLength:2,startFragPrefetch:true,...liveBuffer}
             :{startPosition:0,backBufferLength:120,maxBufferLength:60};
         const player=new Hls({autoStartLoad:false,...options});hls=player;
         let movieRecovery=false;
+        const primeLive=liveMode&&!local;
+        if(primeLive){
+            v.autoplay=false;
+            let started=false, fallback;
+            const begin=()=>{
+                if(started||generation!==playbackGeneration||hls!==player)return;
+                started=true;clearTimeout(fallback);start();
+            };
+            player.on(Hls.Events.FRAG_BUFFERED,()=>{
+                if(started||!v.buffered.length)return;
+                const end=v.buffered.length-1;
+                const seconds=v.buffered.end(end)-Math.max(v.currentTime,v.buffered.start(end));
+                if(seconds>=2.4)begin();
+                else if(!fallback)fallback=setTimeout(begin,2200);
+            });
+            player.on(Hls.Events.DESTROYING,()=>clearTimeout(fallback));
+        }
         player.on(Hls.Events.MANIFEST_PARSED,()=>{
             if(generation!==playbackGeneration)return;
             player.startLevel=local?Math.max(0,player.levels.length-1):0;
-            player.startLoad();
-            start();
+            if(constrained)player.autoLevelCapping=0;
+            const loadMedia=()=>{
+                if(generation!==playbackGeneration||activeMedia.ejecting)return;
+                if(activeMedia.deferDecode)player.attachMedia(v);
+                player.startLoad();
+                if(!primeLive)start();
+            };
+            if(activeMedia.deferDecode&&activeMedia.transportPending){
+                // Let WebKitGTK paint the cleared deck before it creates the GStreamer video sink.
+                activeMedia.startAfterTransport=()=>requestAnimationFrame(()=>requestAnimationFrame(()=>{
+                    if(generation!==playbackGeneration||activeMedia.ejecting)return;
+                    loadMedia();
+                }));
+                activeMedia.manifestReady=true;
+                v.dispatchEvent(new Event('cinemamanifestready'));
+            }else loadMedia();
         });
         player.on(Hls.Events.ERROR,(_event,data)=>{
             if(!data.fatal||generation!==playbackGeneration)return;
@@ -1104,7 +1172,7 @@ function play(url,media=null,continuing=false){
             if(data.type===Hls.ErrorTypes.MEDIA_ERROR&&!movieRecovery){movieRecovery=true;player.recoverMediaError();return}
             setPlayerState('COULD NOT PLAY THIS MOVIE',true);
         });
-        player.loadSource(source);player.attachMedia(v);
+        player.loadSource(source);if(!activeMedia.deferDecode)player.attachMedia(v);
     }else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=source;start()}
     else showNativePlayback();
 }
@@ -1117,14 +1185,21 @@ function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeM
         if(video!==$('#player')||!activeStreamUrl||video.paused||video.seeking||video.currentTime<=lastPlaybackTime)return;
         const progressed=lastPlaybackTime>=0;
         lastPlaybackTime=video.currentTime;
-        if(liveMode&&progressed&&!activeMedia.nextAnnounced){
+        if(!playingSince)playingSince=performance.now();
+        else if(liveMode&&performance.now()-playingSince>=4000)liveRetries=0;
+        if(liveMode&&progressed){
             const channel=liveChannels.find(channel=>channel.stream_url===activeStreamUrl)||activeMedia.channel;
             const program=programAt(channel);
+            if(channel?.continuous_url&&program&&program.start!==activeMedia.programStart){
+                activeMedia.programStart=program.start;activeMedia.title=program.title;activeMedia.nextAnnounced=false;
+                updateTunedIndicator(activeMedia,'LIVE');
+            }
             const duration=Date.parse(program?.stop)-Date.parse(program?.start);
             const left=Date.parse(program?.stop)-Date.now();
             const next=channel?.programs?.[channel.programs.indexOf(program)+1];
-            if(program&&program.start===activeMedia.programStart&&next&&left<=Math.min(45000,duration/3)){
+            if(!activeMedia.nextAnnounced&&program&&program.start===activeMedia.programStart&&next&&left<=Math.min(45000,duration/3)){
                 activeMedia.nextAnnounced=true;
+                activeMedia.transition={title:next.title,at:Date.parse(program.stop)};
                 activeMedia.channel=channel;
                 updateTunedIndicator(activeMedia,'LIVE');
                 showPlayerControls();
@@ -1132,13 +1207,16 @@ function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeM
         }
         if(progressed&&playbackTimer){
             clearTimeout(playbackTimer);playbackTimer=null;
-            setBuffering(false);showPlayerControls();liveRetries=0;
+            setBuffering(false);showPlayerControls();
             setPlayerState(liveMode?'● LIVE · NO PAUSE OR REWIND':'PLAYING');
         }
     });
     video.addEventListener('ended',()=>{
         if(video!==$('#player'))return;
-        if(liveMode)advanceLive();
+        if(liveMode&&Date.parse(activeMedia?.channel?.air_until)<=Date.now()+1000){
+            clearTimeout(liveBoundaryTimer);clearTimeout(playbackTimer);playbackTimer=null;
+            setBuffering(false);setPlayerState('Broadcast finished. Return to the guide.',true,false);
+        }else if(liveMode)advanceLive();
         else if(activeMedia?.cinema)closeVideoView();
     });
     video.addEventListener('error',()=>{
@@ -1153,7 +1231,8 @@ function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeM
     });
     video.addEventListener('waiting',()=>{
         if(video!==$('#player')||!activeStreamUrl||(!hls&&!video.hasAttribute('src')))return;
-        setPlayerState('BUFFERING…');setBuffering(true);armPlaybackDeadline(playbackGeneration,20000);
+        playingSince=0;
+        setPlayerState('BUFFERING…');setBuffering(true);armPlaybackDeadline(playbackGeneration,liveMode?(liveRetries?16000:10000):20000);
     });
     video.addEventListener('pause',()=>{
         if(video===$('#player')&&liveMode&&!video.ended&&video.readyState>=2&&video.classList.contains('playing'))video.play().catch(()=>{});
@@ -1215,10 +1294,17 @@ $('#restart-update').onclick=async()=>{
         catch(_error){command.focus();command.select();message.textContent='Press Ctrl+C to copy the selected command.'}
         return;
     }
+    $('#restart-update').disabled=true;
+    message.textContent='Installing verified update…';
     try{
         await localJson('/api/update/launch?id='+encodeURIComponent($('#update-panel').dataset.job),{method:'POST'});
         message.textContent='Opening the verified update…';
-    }catch(error){message.textContent=error.message}
+    }catch(error){
+        message.textContent=error.message;
+        $('#restart-update').disabled=false;
+        const fallback=$('#update-panel').dataset.fallback;
+        if(fallback){command.value=fallback;command.hidden=false;$('#restart-update').textContent='COPY INSTALL COMMAND'}
+    }
 };
 function demo(){let titles=['Neon Nights','The Last Arcade','Galaxy Rangers','Video Dreams','Summer Quest'],colors=['#bd205c','#a9560c','#069e9a','#792091','#d64a16'];$('#creators').innerHTML='<button class="creator"><b>RETRO WAVE STUDIO</b><br><small>Custom creator branding • online</small></button>';$('#live').innerHTML='<button class="channel">LIVE • SATURDAY MORNING</button><button class="channel">LIVE • SCI-FI AFTER DARK</button>';$('#vault').innerHTML='';titles.forEach((title,i)=>{let svg='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><defs><linearGradient id="g" x2="1" y2="1"><stop stop-color="'+colors[i]+'"/><stop offset="1" stop-color="#09142d"/></linearGradient></defs><rect width="400" height="600" fill="url(#g)"/><circle cx="90" cy="120" r="55" fill="#ffe43b" opacity=".8"/><text x="200" y="310" fill="white" font-size="38" font-family="sans-serif" font-weight="bold" text-anchor="middle">'+title+'</text></svg>');let x={title,year:1984+i,type:'movie',summary:'A creator-curated retro favorite with poster art and movie details loaded automatically from the connected library.',poster_url:svg,stream_url:''},b=document.createElement('button');b.className='tape';b.innerHTML='<img src="'+svg+'"><b>'+title+'</b><small>'+x.year+' • movie</small><i>PLAY ▶</i>';b.onfocus=()=>selectTape(x);b.onmouseenter=()=>selectTape(x);$('#vault').append(b);if(i===0)selectTape(x)});$('#vault').firstElementChild.focus()}if(location.search.includes('demo=1'))demo();else load();checkUpdate(true);</script></body></html>'''.replace("__VERSION__", VERSION).replace("__DIRECTORY__", DIRECTORY).replace("__DIRECTORY_FALLBACK__", DIRECTORY_FALLBACK)
 
@@ -1411,7 +1497,7 @@ HTML = HTML.replace('<section id="tuned-channel"', f'{CINEMA_STUDIOS_HTML}<secti
 HTML = HTML.replace('<div class="section-heading" data-section-block="cinema" hidden><h2 class="pink">REWIND CINEMA</h2><small>BROWSE THE MOVIE SHELF</small></div>', CINEMA_STAGE_HTML, 1)
 HTML = HTML.replace('<nav class="categories">', '<nav class="categories" data-section-block="cinema" hidden>', 1)
 HTML = HTML.replace('<div class="vault-layout">', '<div class="vault-layout" data-section-block="cinema" hidden>', 1)
-HTML = HTML.replace('<nav class="categories" data-section-block="cinema" hidden><span>CONTINUE WATCHING</span><span>80S BLOCKBUSTERS</span><span>90S ESSENTIALS</span><span>CREATOR PICKS</span></nav>', '<nav class="movie-tools" data-section-block="cinema" hidden><div class="movie-decades"><button class="active" data-movie-filter="all">ALL</button><button data-movie-filter="80s">80S</button><button data-movie-filter="90s">90S</button><button data-movie-filter="2000s">2000S</button><button data-movie-filter="recent">2010+</button></div><label class="movie-search-wrap">⌕<input id="movie-search" class="movie-search" type="search" placeholder="Search title, genre, description…"></label><select id="movie-genre" aria-label="Filter by genre"><option value="all">ALL GENRES</option></select><select id="movie-rating" aria-label="Filter by rating"><option value="all">ALL RATINGS</option></select><select id="movie-sort" aria-label="Sort movies"><option value="title">A–Z</option><option value="newest">NEWEST</option><option value="oldest">OLDEST</option></select><span id="movie-count"></span></nav>', 1)
+HTML = HTML.replace('<nav class="categories" data-section-block="cinema" hidden><span>CONTINUE WATCHING</span><span>80S BLOCKBUSTERS</span><span>90S ESSENTIALS</span><span>CREATOR PICKS</span></nav>', '<nav class="movie-tools" data-section-block="cinema" hidden><div class="movie-decades"><button class="active" data-movie-filter="all">ALL</button><button data-movie-filter="60s">60S</button><button data-movie-filter="70s">70S</button><button data-movie-filter="80s">80S</button><button data-movie-filter="90s">90S</button><button data-movie-filter="2000s">2000S</button><button data-movie-filter="recent">2010+</button></div><label class="movie-search-wrap">⌕<input id="movie-search" class="movie-search" type="search" placeholder="Search title, genre, description…"></label><select id="movie-genre" aria-label="Filter by genre"><option value="all">ALL GENRES</option></select><select id="movie-rating" aria-label="Filter by rating"><option value="all">ALL RATINGS</option></select><select id="movie-sort" aria-label="Sort movies"><option value="title">A–Z</option><option value="newest">NEWEST</option><option value="oldest">OLDEST</option></select><span id="movie-count"></span></nav>', 1)
 HTML = HTML.replace('<div class="movie-decades">', '<select id="cinema-studio-select" aria-label="Creator studio" disabled></select><div class="movie-decades">', 1)
 HTML = HTML.replace('<button id="update" class="update">', '<button id="desktop-fullscreen" type="button" aria-pressed="false" aria-label="Enter fullscreen (F11)" title="Enter fullscreen (F11)">⛶</button><button id="update" class="update">', 1)
 HTML = HTML.replace('</main><video id="player"', f'{EXTRA_SCREENS}</main><aside id="player-hud" class="player-hud" hidden></aside><aside id="player-bug" class="player-bug" hidden></aside><div id="player-buffer" class="player-buffer" role="status" aria-live="polite" hidden><span class="buffer-spinner" aria-hidden="true"></span><b></b><small></small></div><dialog id="program-dialog" class="program-dialog"><button class="program-close" onclick="this.closest(\'dialog\').close()">×</button><div id="program-dialog-body" class="program-dialog-body"></div></dialog><video id="player"', 1)

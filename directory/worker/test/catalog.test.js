@@ -22,6 +22,14 @@ test("simultaneous publications remain independently discoverable and removable"
     },
     delete: async key => records.delete(key),
   }};
+  const members = new Set();
+  let migrated = false;
+  env.STUDIO_INDEX = {getByName: () => ({
+    add: key => members.add(key), remove: key => members.delete(key),
+    keys: () => [...members], due: (_now, limit) => [...members].slice(0, limit),
+    checked: () => {}, claimImport: () => !migrated,
+    importLegacy: keys => { for (const key of keys) members.add(key); migrated = true; },
+  })};
   let vaultAvailable = true;
   let originAvailable = true;
   let originVersion = "";
@@ -53,8 +61,16 @@ test("simultaneous publications remain independently discoverable and removable"
     publish("Test studio 1", "https://first.example.com"),
     publish("Test studio 2", "https://second.example.com"),
   ]);
+  const list = env.CREATORS.list;
+  // KV may still be propagating a registration when the probe claims its key.
+  members.add("creator:pending");
+  env.CREATORS.list = () => { throw new Error("KV list() limit exceeded for the day."); };
   assert.deepEqual(await catalog(), [creator, rival.creator]);
+  await probe();
+  assert.deepEqual(await catalog(), [creator, rival.creator]);
+  env.CREATORS.list = list;
   assert.equal(creator.cinema_supported, false);
+  await probe();
   const removal = await worker.fetch(new Request(directory + "/v1/creators/" + creator.id, {
     method: "DELETE", headers: {Authorization: "Bearer " + key},
   }), env);

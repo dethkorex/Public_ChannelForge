@@ -23,6 +23,11 @@ sub load()
           node.AddField("programs", "array", false)
           if channel.programs <> invalid then node.programs = channel.programs
           node.url = channel.stream_url
+          if channel.continuous_url <> invalid and channel.continuous_url <> ""
+            node.url = channel.continuous_url
+            node.AddField("continuous", "boolean", false)
+            node.continuous = true
+          end if
           node.streamFormat = "hls"
         end if
       end for

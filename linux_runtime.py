@@ -1,6 +1,9 @@
 """Runtime and update helpers for the Linux desktop apps."""
 
+import hashlib
 import re
+import subprocess
+import tarfile
 import os
 import shlex
 import shutil
@@ -41,12 +44,17 @@ def is_portable_installation(folder: Path) -> bool:
     )
 
 
-def linux_install_command(path: Path, app_directory: Path | None = None) -> str:
+def linux_install_command(path: Path, app_directory: Path | None = None, expected_sha256: str = "") -> str:
     quoted = shlex.quote(str(path))
+    verify = ""
+    if expected_sha256:
+        if not re.fullmatch("[a-f0-9]{64}", expected_sha256):
+            raise ValueError("Invalid update checksum.")
+        verify = f'test "$(sha256sum -- {quoted} | cut -c1-64)" = {expected_sha256} && '
     if path.name.endswith(".pkg.tar.zst"):
-        return f"sudo pacman -U {quoted}"
+        return verify + f"sudo pacman -U {quoted}"
     if path.suffix == ".deb":
-        return f"sudo apt install {quoted}"
+        return verify + f"sudo apt install {quoted}"
     existing = ""
     if app_directory is not None and is_portable_installation(app_directory):
         existing = f" --replace {shlex.quote(str(app_directory))}"
@@ -55,7 +63,59 @@ def linux_install_command(path: Path, app_directory: Path | None = None) -> str:
         f'tar -xzf {quoted} -C "$update_dir"; bash "$update_dir/ChannelForge/install.sh"{existing}; '
         f"rm -f -- {quoted}"
     )
-    return "bash -c " + shlex.quote(script)
+    return verify + "bash -c " + shlex.quote(script)
+
+
+def can_apply_linux_update(package: Path, app_directory: Path) -> bool:
+    if package.name.endswith(".tar.gz"):
+        return is_portable_installation(app_directory) and os.access(app_directory, os.W_OK)
+    if app_directory != Path("/opt/public-channelforge"):
+        return False
+    return os.geteuid() == 0 or Path("/usr/bin/pkexec").is_file()
+
+
+def apply_linux_update(package: Path, expected_sha256: str, app_directory: Path) -> None:
+    """Apply a confirmed release without changing the existing install location."""
+    if not can_apply_linux_update(package, app_directory):
+        raise ValueError("Use the verified terminal command to update this installation.")
+    with package.open("rb") as source:
+        digest = hashlib.sha256()
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+        if digest.hexdigest() != expected_sha256:
+            raise ValueError("The downloaded update changed after verification. Download it again.")
+        if package.name.endswith(".tar.gz"):
+            source.seek(0)
+            with tempfile.TemporaryDirectory(prefix="channelforge-install-") as temp:
+                with tarfile.open(fileobj=source, mode="r:gz") as archive:
+                    for entry in archive:
+                        target = Path(temp) / entry.name
+                        if not target.resolve().is_relative_to(Path(temp) / "ChannelForge") or not (entry.isfile() or entry.isdir()):
+                            raise ValueError("Invalid file in the ChannelForge update.")
+                        if entry.isdir():
+                            target.mkdir(parents=True, exist_ok=True)
+                        else:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            with archive.extractfile(entry) as contents, target.open("wb") as output:
+                                shutil.copyfileobj(contents, output)
+                            target.chmod(entry.mode & 0o755)
+                subprocess.run(["/bin/bash", str(Path(temp) / "ChannelForge/install.sh"), "--replace", str(app_directory)],
+                               env={**os.environ, "CHANNELFORGE_IN_APP_UPDATE": "1"},
+                               stdin=subprocess.DEVNULL, check=True)
+            return
+    if package.name.endswith(".pkg.tar.zst"):
+        args = ["/usr/bin/pacman", "--noconfirm", "-U", str(package)]
+    elif package.suffix == ".deb":
+        args = ["/usr/bin/apt-get", "-y", "install", str(package)]
+    else:
+        raise ValueError("Unknown Linux package format.")
+    if os.geteuid() != 0:
+        args.insert(0, "/usr/bin/pkexec")
+    subprocess.run(args, stdin=subprocess.DEVNULL, check=True)
+
+
+def restart_linux_app() -> None:
+    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
 
 
 def install_linux_files(source: Path, destination: Path) -> None:

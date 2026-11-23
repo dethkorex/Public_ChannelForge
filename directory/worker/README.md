@@ -1,6 +1,6 @@
 # Hosted edge directory
 
-This Cloudflare Worker provides the Creator Directory. Each studio has its own KV record, so creators can publish at the same time. The public catalog reads those records in batches. A rotating two-minute health check temporarily hides studios after two failed endpoint checks, and healthy studios reappear automatically.
+This Cloudflare Worker provides the Creator Directory. Each studio has its own KV record. A SQLite-backed Durable Object tracks membership and schedules probes. Viewer scans share a cached catalog and read studio records in batches. Unreachable studios are checked progressively less often. After 30 days offline, their directory membership expires. Publishing again restores it.
 
 Deployment requires either the `channelforge.tv` zone or a stable `workers.dev` hostname in a Cloudflare account, plus a KV namespace. The repository includes `.github/workflows/deploy-directory.yml`; add these GitHub repository secrets and run **Deploy global Creator Directory**:
 

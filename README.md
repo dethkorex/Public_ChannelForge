@@ -1,6 +1,6 @@
 # Public ChannelForge 3
 
-Public ChannelForge is a standalone, local-first live TV server for local media folders, Plex libraries, or both. It runs continuously in the background, maintains deterministic 24/7 channel schedules, and hosts XMLTV, M3U, and browser-compatible HLS endpoints. Plex and ErsatzTV are optional.
+Public ChannelForge builds live TV channels from local media folders and Plex libraries. Each channel airs its saved lineup once. Creators can edit the lineup, reshuffle it and put it back on TV. Rewind Cinema keeps movies available on demand while the studio is online.
 
 ## ChannelForge TV ecosystem
 
@@ -10,9 +10,9 @@ Version 3.2 adds three public components without changing the owner's private Ch
 - **ChannelForge TV for Fire TV / Android TV** — downloadable remote-first APK with creator browsing, channel surfing, HLS playback, and a full-screen guide HUD.
 - **ChannelForge TV for Roku** — native SceneGraph/BrightScript channel with the same directory, channel surfing, guide, and HLS playback model.
 
-Use **Go live worldwide** in Creator to list channels and movies you have permission to share. Creator starts a read-only media listener and connects it to the free localhost.run relay. The Windows installer bundles the relay client, and the Linux packages install it as a dependency. Creator reconnects and republishes when its relay address changes. Browsing the guide or movie catalog leaves playback idle. Viewers trigger playback when they press Play, and viewers tuning the same program share an encoder.
+Use **Go live worldwide** in Creator to list channels and movies you have permission to share. Creator checks for an existing public Tailscale Funnel whose root points only to its read-only media listener at `http://127.0.0.1:8790`. It verifies the listener belongs to this Creator before publishing the address. Otherwise it opens the free localhost.run relay. Viewers select the studio in the guide without an account or a pairing URL. Viewers tuning the same live program share an encoder.
 
-Viewers install ChannelForge TV and browse published studios automatically. Keep Creator running while sharing media. Cloudflare hosts the directory metadata, and video streams from the creator's machine. Automatic sharing supports up to 720p, with a bitrate capped for the free relay. Studios that already run a public HTTPS media origin can enter it under **Advanced sharing settings** and point it at `127.0.0.1:8790`.
+Viewers install ChannelForge TV and browse published studios automatically. Keep Creator running while sharing media. Cloudflare hosts the directory metadata, and video streams from the creator's machine. Live TV through the automatic free relay uses a low-bandwidth encoding. Studios that run a public HTTPS media origin can enter it under **Advanced sharing settings** and point it at the read-only media server on `127.0.0.1:8790`. The custom origin supports adaptive live playback up to 720p.
 
 Source and deployment instructions are in [`directory/`](directory/), [`tv/firetv/`](tv/firetv/), and [`tv/roku/`](tv/roku/). Tagged releases build the installable Fire TV APK and Roku ZIP automatically.
 
@@ -36,7 +36,7 @@ Every installation includes 60 coordinated starter assets: a logo, guide/player 
 
 ![ChannelForge starter theme library](preview/channel-forge-default-themes-v3.4.3.png)
 
-All ChannelForge apps expose an update control backed by the official GitHub Releases feed. Creator and desktop TV check on launch, notify immediately, show download progress, and verify the published SHA-256 checksum before offering the update. After the user confirms, an installed Windows app performs an in-place update and restarts without reopening the first-install setup wizard; the chosen install folder, shortcuts, configuration, channels, and artwork are preserved. Fire TV detects the release and opens the exact official APK download; Android still requires the user to approve its package-installer prompt. Roku reports release availability in-app; Roku Store installs update automatically when distributed through the Store, while developer/sideload builds must be replaced through Roku's developer installer. Linux users receive the verified Debian, Arch/Omarchy, or portable package and a copyable install command. ChannelForge never downloads or launches an update without confirmation.
+All ChannelForge apps expose an update control backed by the official GitHub Releases feed. Creator and desktop TV check on launch, notify immediately, show download progress, and verify the published SHA-256 checksum before offering the update. After the user confirms, an installed Windows app performs an in-place update and restarts without reopening the first-install setup wizard; the chosen install folder, shortcuts, configuration, channels, and artwork are preserved. Fire TV detects the release and opens the exact official APK download; Android still requires the user to approve its package-installer prompt. Roku reports release availability in-app; Roku Store installs update automatically when distributed through the Store, while developer/sideload builds must be replaced through Roku's developer installer. On Linux, the updater installs the verified package in place and offers to restart. If the system cannot show an authorization prompt, the app provides the verified install command. ChannelForge never downloads or launches an update without confirmation.
 
 ChannelForge v3.5.8 makes Creator and TV share one verified Windows updater download. Updates reuse the selected install folder and move older Desktop installations into the suite folder. The Desktop shows shortcuts to both installed apps. Old ChannelForge setup downloads are cleared from the apps’ update caches after an upgrade. The Linux releases include both apps in portable, Debian, and Arch/Omarchy packages.
 
@@ -124,7 +124,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.30-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.6.0-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation

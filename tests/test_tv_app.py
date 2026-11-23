@@ -61,6 +61,28 @@ class TvAppTests(unittest.TestCase):
             self.assertIn("--replace", command)
             self.assertIn("trap", command)
 
+    def test_linux_installer_rechecks_download_before_running_package_manager(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / "verified.deb"
+            package.write_bytes(b"altered")
+            expected = hashlib.sha256(b"original").hexdigest()
+            with mock.patch.object(linux_runtime, "can_apply_linux_update", return_value=True), \
+                    mock.patch.object(linux_runtime.subprocess, "run") as install:
+                with self.assertRaisesRegex(ValueError, "changed after verification"):
+                    linux_runtime.apply_linux_update(package, expected, Path("/opt/public-channelforge"))
+            install.assert_not_called()
+            self.assertIn(expected, linux_runtime.linux_install_command(package, expected_sha256=expected))
+
+    def test_omarchy_package_uses_system_package_manager_and_polkit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / "public-channelforge-3.6.0-1-any.pkg.tar.zst"
+            package.write_bytes(b"package")
+            with mock.patch.object(linux_runtime, "can_apply_linux_update", return_value=True), \
+                    mock.patch.object(linux_runtime.os, "geteuid", create=True, return_value=1000), \
+                    mock.patch.object(linux_runtime.subprocess, "run") as install:
+                linux_runtime.apply_linux_update(package, hashlib.sha256(b"package").hexdigest(), Path("/opt/public-channelforge"))
+            self.assertEqual(install.call_args.args[0], ["/usr/bin/pkexec", "/usr/bin/pacman", "--noconfirm", "-U", str(package)])
+
     def test_version_comparison_handles_double_digit_minor(self):
         self.assertGreater(tv.version_tuple("v3.10.0"), tv.version_tuple("3.9.9"))
 
