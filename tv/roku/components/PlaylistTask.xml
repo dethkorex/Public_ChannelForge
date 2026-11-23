@@ -1,2 +1,2 @@
 <?xml version="1.0" encoding="utf-8" ?>
-<component name="PlaylistTask" extends="Task"><interface><field id="url" type="string"/><field id="content" type="node"/></interface><script type="text/brightscript" uri="PlaylistTask.brs"/></component>
+<component name="PlaylistTask" extends="Task"><interface><field id="url" type="string"/><field id="onlineCatalog" type="boolean"/><field id="content" type="node"/></interface><script type="text/brightscript" uri="PlaylistTask.brs"/></component>

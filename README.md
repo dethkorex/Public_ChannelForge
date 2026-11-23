@@ -42,6 +42,8 @@ ChannelForge v3.5.8 makes Creator and TV share one verified Windows updater down
 
 ChannelForge v3.5.9 fixes the Linux TV updater and launches both Linux apps with the system GTK and WebKit runtime. Rewind Cinema lists titles classified as movies, including movies from shared Plex libraries. TV episodes stay in the Live TV lineup.
 
+ChannelForge v3.5.10 shows channels as each studio responds, compresses large guide and movie catalogs, and lets you retry a stream from the player. Creators keep live segments available longer so viewers on slower connections can finish downloading them.
+
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
 ![ChannelForge TV home hub](preview/channel-forge-tv-v346-home.png)
@@ -94,7 +96,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.9-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.5.10-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation

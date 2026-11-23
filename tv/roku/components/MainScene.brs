@@ -7,20 +7,28 @@ sub init()
   m.video.observeField("state", "videoStateChanged")
   m.liveItem = invalid
   m.liveRetries = 0
+  m.catalogLoading = false
+  m.creatorUrl = ""
   refreshCatalog()
 end sub
 sub refreshCatalog()
-  if m.guide.visible = false then return
+  if m.guide.visible = false or m.catalogLoading = true then return
+  m.catalogLoading = true
   m.status.text = "Refreshing public creator studios…"
-  task = CreateObject("roSGNode", "CatalogTask") : task.url = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog" : task.fallbackUrl = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json" : task.observeField("content", "catalogLoaded") : task.control = "run"
+  task = CreateObject("roSGNode", "CatalogTask") : task.url = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog" : task.fallbackUrl = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json" : task.observeField("content", "catalogLoaded")
   m.catalogTask = task
+  task.control = "run"
 end sub
 sub catalogLoaded()
+  m.catalogLoading = false
   m.creators.content = m.catalogTask.content
   m.status.text = m.catalogTask.content.GetChildCount().ToStr() + " creator studios online"
-  m.creators.SetFocus(true)
   if m.catalogTask.content.GetChildCount() > 0
-    loadCreator(0)
+    selected = 0
+    for index = 0 to m.catalogTask.content.GetChildCount() - 1
+      if m.catalogTask.content.GetChild(index).url = m.creatorUrl then selected = index
+    end for
+    loadCreator(selected)
   else
     registry = CreateObject("roRegistrySection", "ChannelForge")
     paired = registry.Read("creator_url")
@@ -67,6 +75,8 @@ sub connectPaired(base as string)
   creator.title = "Paired Creator"
   creator.description = "Direct secure pairing"
   creator.url = base + "/exports/channels.m3u"
+  creator.AddField("statusUrl", "string", false)
+  creator.statusUrl = base + "/api/public/channels"
   creator.shortDescriptionLine2 = base + "/api/public/vault"
   m.creators.content = root
   loadCreator(0)
@@ -76,11 +86,25 @@ sub creatorSelected()
 end sub
 sub loadCreator(index as integer)
   creator = m.creators.content.GetChild(index)
+  if creator = invalid then return
+  switched = m.creatorUrl <> creator.url
+  m.creatorUrl = creator.url
   m.status.text = "Loading " + creator.title + "…"
-  task = CreateObject("roSGNode", "PlaylistTask") : task.url = creator.url : task.observeField("content", "playlistLoaded") : task.control = "run"
+  task = CreateObject("roSGNode", "PlaylistTask") : task.url = creator.url
+  if creator.statusUrl <> invalid and creator.statusUrl <> ""
+    task.url = creator.statusUrl
+    task.onlineCatalog = true
+  end if
+  if m.playlistTask <> invalid then m.playlistTask.unobserveField("content")
+  task.observeField("content", "playlistLoaded")
   m.playlistTask = task
-  vaultTask = CreateObject("roSGNode", "VaultTask") : vaultTask.url = creator.shortDescriptionLine2 : vaultTask.observeField("content", "vaultLoaded") : vaultTask.control = "run"
-  m.vaultTask = vaultTask
+  task.control = "run"
+  if switched or m.vault.content = invalid
+    if m.vaultTask <> invalid then m.vaultTask.unobserveField("content")
+    vaultTask = CreateObject("roSGNode", "VaultTask") : vaultTask.url = creator.shortDescriptionLine2 : vaultTask.observeField("content", "vaultLoaded")
+    m.vaultTask = vaultTask
+    vaultTask.control = "run"
+  end if
 end sub
 sub vaultLoaded()
   m.vault.content = m.vaultTask.content

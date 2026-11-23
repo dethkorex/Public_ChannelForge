@@ -11,6 +11,8 @@ sub load()
       node.title = creator.name
       node.description = creator.description
       node.url = creator.playlist_url
+      node.AddField("statusUrl", "string", false)
+      if creator.status_url <> invalid then node.statusUrl = creator.status_url
       node.shortDescriptionLine2 = creator.vault_url
       node.hdPosterUrl = creator.logo_url
     end for
@@ -22,6 +24,16 @@ function loadCatalog(address as string) as object
   transfer = CreateObject("roUrlTransfer")
   transfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
   transfer.InitClientCertificates()
+  transfer.EnableEncodings(true)
   transfer.SetUrl(address)
-  return ParseJson(transfer.GetToString())
+  messages = CreateObject("roMessagePort")
+  transfer.SetMessagePort(messages)
+  if not transfer.AsyncGetToString() then return invalid
+  response = wait(6000, messages)
+  if response = invalid
+    transfer.AsyncCancel()
+    return invalid
+  end if
+  if response.GetResponseCode() <> 200 then return invalid
+  return ParseJson(response.GetString())
 end function

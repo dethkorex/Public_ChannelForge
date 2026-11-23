@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 import http.client
+import gzip
 import io
 from unittest import mock
 from pathlib import Path
@@ -54,6 +55,7 @@ class CoreTests(unittest.TestCase):
             for method, path, expected in [
                 ("GET", "/api/public/channels", 200),
                 ("GET", "/api/public/vault", 200),
+                ("GET", "/api/local-creator", 404),
                 ("GET", "/api/status", 404),
                 ("GET", "/api/plex/image?path=/library/sections", 404),
                 ("POST", "/api/setup", 405),
@@ -471,6 +473,18 @@ class CoreTests(unittest.TestCase):
             with mock.patch.object(app.time, "monotonic", return_value=140.0):
                 self.assertEqual(app.playback_error("retry-channel"), "")
             self.assertNotIn("retry-channel", app.PLAYBACK_ERRORS)
+
+    def test_public_movie_catalog_negotiates_gzip(self):
+        handler = object.__new__(app.Handler)
+        handler.path = "/api/public/vault"
+        handler.headers = {"Accept-Encoding": "gzip"}
+        handler.send_bytes = mock.Mock()
+        payload = {"items": [{"type": "movie", "title": f"Film {number}", "summary": "Description " * 60} for number in range(100)]}
+        handler.send_json(200, payload)
+        _, body, _, headers = handler.send_bytes.call_args.args
+        self.assertEqual(headers, {"Vary": "Accept-Encoding", "Content-Encoding": "gzip"})
+        self.assertEqual(json.loads(gzip.decompress(body)), payload)
+        self.assertLess(len(body) * 5, len(gzip.decompress(body)))
 
     def test_rewind_cinema_automatically_indexes_all_plex_movies(self):
         libraries = [{"key": "1", "title": "Movies", "type": "movie", "source": "plex"}, {"key": "2", "title": "TV", "type": "show", "source": "plex"}]

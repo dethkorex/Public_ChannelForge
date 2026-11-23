@@ -7,6 +7,7 @@ import atexit
 import base64
 import concurrent.futures
 import hashlib
+import gzip
 import html
 import importlib.util
 import json
@@ -34,7 +35,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.9"
+VERSION = "3.5.10"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -1375,10 +1376,11 @@ def parse_timestamp(value: str) -> datetime:
         return datetime.now(timezone.utc).replace(second=0, microsecond=0)
 
 
-def schedule_position(channel: dict, moment: datetime | None = None) -> dict:
+def schedule_position(channel: dict, moment: datetime | None = None, *, items: list[dict] | None = None) -> dict:
     """Resolve a deterministic 24/7 channel position for any UTC moment."""
     moment = (moment or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    items = scheduled_items(channel)
+    if items is None:
+        items = scheduled_items(channel)
     if not items:
         raise ValueError("This channel has no scheduled titles.")
     durations = [max(1000, int(item.get("duration_ms", 1_800_000))) for item in items]
@@ -1398,10 +1400,10 @@ def schedule_position(channel: dict, moment: datetime | None = None) -> dict:
 
 
 def schedule_window(channel: dict, start: datetime, end: datetime) -> list[dict]:
-    position = schedule_position(channel, start)
+    items = scheduled_items(channel)
+    position = schedule_position(channel, start, items=items)
     cursor = position["start"]
     index = position["index"]
-    items = scheduled_items(channel)
     result = []
     while cursor < end:
         item = items[index]
@@ -1757,8 +1759,10 @@ def start_or_reuse_encoder(channel: dict) -> str:
     remaining = max(0.1, (position["stop"] - position["start"]).total_seconds() - position["offset_ms"] / 1000)
     input_timing = ["-re"] if on_demand else ["-re", "-ss", f'{position["offset_ms"] / 1000:.3f}']
     output_timing = [] if on_demand else ["-t", f"{remaining:.3f}"]
+    # Retain evicted segments briefly for remote viewers without increasing live delay.
     hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments"] if on_demand else
-                   ["-hls_list_size", "5", "-hls_flags", "delete_segments+independent_segments"])
+                   ["-hls_list_size", "5", "-hls_delete_threshold", "30",
+                    "-hls_flags", "delete_segments+independent_segments"])
     relay_encoding = []
     if config()["public_tunnel"]:
         relay_encoding = ["-vf", "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
@@ -2000,8 +2004,8 @@ def public_channel_catalog() -> dict:
         return f"{base}/api/plex/image?path={urllib.parse.quote(image_path, safe='')}&server={urllib.parse.quote(str(item.get('plex_server_id', '')), safe='')}"
     for channel in channels():
         try:
-            position = schedule_position(channel, moment)
-            current = position["item"]
+            slots = schedule_window(channel, moment, end)
+            current = slots[0]["item"]
             if current.get("source") == "local":
                 online = Path(str(current.get("file_path", ""))).is_file()
             else:
@@ -2009,7 +2013,6 @@ def public_channel_catalog() -> dict:
                 online = bool(plex_credentials(server_id).get("token") and plex_credentials(server_id).get("url")) if server_id else bool(settings.get("plex_token") and settings.get("plex_url"))
             if playback_error(str(channel.get("id", ""))):
                 online = False
-            slots = schedule_window(channel, moment, end)
         except (OSError, ValueError, TypeError):
             online, slots = False, []
         logo = assets.get(channel.get("logo_asset_id"))
@@ -2104,11 +2107,21 @@ class Handler(BaseHTTPRequestHandler):
         for name, value in (extra_headers or {}).items():
             if value:
                 self.send_header(name, value)
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def send_json(self, status: int, payload: object) -> None:
-        self.send_bytes(status, json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8")
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        headers = {}
+        if len(body) >= 1024 and urllib.parse.urlsplit(self.path).path in {"/api/public/channels", "/api/public/vault"}:
+            headers["Vary"] = "Accept-Encoding"
+            if any(part.strip().lower() == "gzip" for part in self.headers.get("Accept-Encoding", "").split(",")):
+                body = gzip.compress(body, compresslevel=3)
+                headers["Content-Encoding"] = "gzip"
+        self.send_bytes(status, body, "application/json; charset=utf-8", headers)
 
     def redirect(self, location: str) -> None:
         self.send_response(302)
@@ -2128,7 +2141,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             parsed = urllib.parse.urlparse(self.path)
-            if parsed.path == "/api/status":
+            if parsed.path == "/api/local-creator":
+                settings = config()
+                name = settings["creator_profile"].get("name") or settings["plex_profile"].get("server_name")
+                self.send_json(200, {"app": APP_NAME, "name": name, "channel_count": len(channels())})
+            elif parsed.path == "/api/status":
                 values = channels()
                 now_playing = {}
                 for channel in values:

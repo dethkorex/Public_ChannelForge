@@ -1,9 +1,13 @@
 import hashlib
+import http.client
+import http.server
 import io
 import json
 import tempfile
+import threading
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
@@ -108,9 +112,55 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("filter(channel=>channel.online)", tv.HTML)
         self.assertIn('id="home-changelog"', tv.HTML)
         self.assertIn('data-section-block="cinema" hidden><h2>CREATOR STUDIOS', tv.HTML)
-        self.assertIn("if(name==='cinema'&&selectedCreator&&!vaultItems.length)studio(selectedCreator)", tv.HTML)
-        self.assertIn("if(manual){await load();return liveChannels}", tv.HTML)
-        self.assertIn("scanChannels(true)", tv.HTML)
+        self.assertIn("if(name==='cinema'&&selectedCreator)studio(selectedCreator)", tv.HTML)
+        self.assertIn("channelsByStudio.set(creator.playlist_url,channels)", tv.HTML)
+        self.assertIn("directoryScan=refreshDirectory()", tv.HTML)
+
+    def test_closed_viewer_is_not_sent_a_second_response(self):
+        handler = object.__new__(tv.Handler)
+        handler.wfile = mock.Mock()
+        handler.wfile.write.side_effect = BrokenPipeError
+        handler.send_content_headers = mock.Mock()
+        handler.send(200, b"catalog", "application/json")
+        self.assertTrue(handler.close_connection)
+        handler.send_content_headers.assert_called_once()
+
+    def test_stream_proxy_starts_forwarding_before_segment_finishes(self):
+        release_segment = threading.Event()
+        prefix, suffix = b"first bytes", b"remaining tail"
+
+        class SlowSegment(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp2t")
+                self.send_header("Content-Length", str(len(prefix + suffix)))
+                self.end_headers()
+                self.wfile.write(prefix)
+                release_segment.wait(5)
+                self.wfile.write(suffix)
+
+            def log_message(self, *_args):
+                pass
+
+        with (
+            http.server.ThreadingHTTPServer(("127.0.0.1", 0), SlowSegment) as source,
+            http.server.ThreadingHTTPServer(("127.0.0.1", 0), tv.Handler) as viewer,
+            mock.patch.object(tv, "approved_content_url", side_effect=lambda url: url),
+        ):
+            for server in (source, viewer):
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+            with closing(http.client.HTTPConnection("127.0.0.1", viewer.server_port, timeout=2)) as client:
+                try:
+                    client.request("GET", f"/stream?url=http://127.0.0.1:{source.server_port}/segment.ts")
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(len(prefix)), prefix)
+                    release_segment.set()
+                    self.assertEqual(response.read(), suffix)
+                finally:
+                    release_segment.set()
+                    viewer.shutdown()
+                    source.shutdown()
 
     def test_tv_has_program_details_favorites_and_mini_player(self):
         self.assertIn('id="program-dialog"', tv.HTML)

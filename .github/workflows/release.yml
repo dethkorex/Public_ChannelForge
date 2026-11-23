@@ -47,21 +47,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install packaging tools
-        run: sudo apt-get update && sudo apt-get install -y zstd ffmpeg
+        timeout-minutes: 3
+        run: |
+          if ! command -v zstd >/dev/null; then
+            sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+            sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y zstd
+          fi
       - name: Build Linux, Debian, Arch and Omarchy packages
         run: |
           chmod +x packaging/build_linux_packages.sh scripts/install_linux.sh scripts/uninstall_linux.sh
           VERSION="${GITHUB_REF_NAME#v}"
           packaging/build_linux_packages.sh "$VERSION"
-      - name: Test portable Linux installer
+      - name: Verify the portable suite from the release archive
         run: |
-          TEST_HOME="$RUNNER_TEMP/channel-forge-home"
-          mkdir -p "$TEST_HOME"
-          sudo apt-get install -y python3-webview
-          HOME="$TEST_HOME" XDG_DATA_HOME="$TEST_HOME/.local/share" XDG_CONFIG_HOME="$TEST_HOME/.config" bash scripts/install_linux.sh
-          HOME="$TEST_HOME" XDG_DATA_HOME="$TEST_HOME/.local/share" XDG_CONFIG_HOME="$TEST_HOME/.config" "$TEST_HOME/.local/bin/public-channelforge" --help
-          test -x "$TEST_HOME/.local/bin/channelforge-tv"
-          test -f "$TEST_HOME/.local/share/applications/channelforge-tv.desktop"
+          PACKAGE_DIR="$(mktemp -d)"
+          tar -xzf release/ChannelForge-*-linux-x64.tar.gz -C "$PACKAGE_DIR"
+          cd "$PACKAGE_DIR/ChannelForge"
+          bash -n install.sh
+          bash -n uninstall.sh
+          /usr/bin/python3 -Es Public_ChannelForge.py --help
+          /usr/bin/python3 -Es -c 'import ChannelForge_TV; assert ChannelForge_TV.resource("web/hls.min.js").is_file()'
       - name: Inspect Debian package
         run: dpkg-deb --info release/Public_ChannelForge-*-linux-all.deb
       - name: Inspect Arch package

@@ -1,6 +1,8 @@
 """ChannelForge TV desktop viewer for the public creator directory."""
 from __future__ import annotations
 
+import gzip
+import http.client
 import http.server
 import json
 import os
@@ -16,7 +18,7 @@ from pathlib import Path
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.9"
+VERSION = "3.5.10"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -66,20 +68,30 @@ def approved_content_url(url: str) -> str:
 
 
 def local_creator() -> dict:
-    request = urllib.request.Request(f"{LOCAL_CREATOR}/api/status", headers={"Accept": "application/json", "User-Agent": f"ChannelForge-TV/{VERSION}"})
+    headers = {"Accept": "application/json", "User-Agent": f"ChannelForge-TV/{VERSION}"}
     try:
-        with urllib.request.urlopen(request, timeout=2) as response:
-            status = json.load(response)
+        try:
+            request = urllib.request.Request(f"{LOCAL_CREATOR}/api/local-creator", headers=headers)
+            with urllib.request.urlopen(request, timeout=1) as response:
+                status = json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+            error.close()
+            request = urllib.request.Request(f"{LOCAL_CREATOR}/api/status", headers=headers)
+            with urllib.request.urlopen(request, timeout=2) as response:
+                status = json.load(response)
+        count = status.get("channel_count")
+        if not isinstance(count, int):
+            count = len(status.get("channels") or [])
+        config = status.get("config") or {}
+        name = (status.get("name") or (config.get("creator_profile") or {}).get("name")
+                or (config.get("plex_profile") or {}).get("server_name") or "My ChannelForge Studio")
     except Exception:
         return {"available": False}
-    channels = status.get("channels", []) if isinstance(status, dict) else []
-    config = status.get("config", {}) if isinstance(status, dict) else {}
-    profile = config.get("creator_profile", {}) if isinstance(config, dict) else {}
-    plex_profile = config.get("plex_profile", {}) if isinstance(config, dict) else {}
-    name = profile.get("name") or plex_profile.get("server_name") or "My ChannelForge Studio"
     return {"available": True, "creator": {
         "id": "local-creator", "name": str(name),
-        "description": f"{len(channels)} local channel{'s' if len(channels) != 1 else ''} • Creator connected",
+        "description": f"{count} local channel{'s' if count != 1 else ''} • Creator connected",
         "guide_url": f"{LOCAL_CREATOR}/exports/guide.xml",
         "playlist_url": f"{LOCAL_CREATOR}/exports/channels.m3u",
         "status_url": f"{LOCAL_CREATOR}/api/public/channels",
@@ -186,8 +198,13 @@ def launch_tv_update(job_id: str) -> None:
 HTML = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>ChannelForge TV</title>
 <style>*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#2b0752,#060410 43%);color:#fff;font-family:Segoe UI,sans-serif;overflow-x:hidden}header{height:92px;display:flex;align-items:center;padding:0 4vw;border-bottom:2px solid #13e4ff;gap:28px}h1{color:#fff22b;letter-spacing:4px;margin:0}.tag{color:#4fffd0;border:1px solid #19e9ff;padding:5px 10px}.update{margin-left:auto;background:#15112c;color:white;border:1px solid #19e9ff;padding:12px 18px;border-radius:7px}.wrap{padding:28px 4vw}.creators,.live,.vault{display:flex;gap:14px;overflow-x:auto;padding:10px 6px 25px}.creator,.channel{min-width:260px;background:#16132c;border:1px solid #41376a;border-radius:9px;padding:16px;color:white}.creator:focus,.channel:focus{outline:4px solid #fff22b}.vault{min-height:410px;align-items:center;perspective:1000px;gap:0;padding-left:34px}.tape{position:relative;flex:0 0 210px;height:340px;margin-left:-28px;background:#0d0a1c;border:3px solid #14dcf5;border-left-width:15px;padding:10px;box-shadow:16px 10px 18px #000c,5px 0 #44244f inset;transition:transform .22s,filter .22s;color:white;transform:rotateY(-22deg) translateZ(-35px);transform-style:preserve-3d;filter:brightness(.7)}.tape:nth-child(even){transform:rotateY(18deg) translateZ(-25px)}.tape:focus,.tape:hover{outline:none;border-color:#efff1c;transform:rotateY(0) translateY(-10px) translateZ(95px) scale(1.08);filter:brightness(1);z-index:5}.tape img{width:172px;height:255px;object-fit:cover;background:linear-gradient(145deg,#3a2858,#130d24)}.tape b{display:block;padding-top:8px}.pink{color:#ff3eb8}.cyan{color:#28eaff}video{display:none;position:fixed;inset:0;width:100%;height:100%;background:#000;z-index:10}video.playing{display:block}.close{display:none;position:fixed;z-index:11;right:25px;top:20px;padding:12px 18px;background:#111d;color:white;border:1px solid white}.close.show{display:block}.empty{color:#a89abb;padding:25px}.update-panel{position:fixed;z-index:20;right:28px;top:108px;width:390px;padding:20px;border:2px solid #18e7ff;border-radius:12px;background:#0c1028;box-shadow:0 18px 60px #000}.update-panel h3{color:#fff22b;margin-top:0}.update-panel progress{width:100%;height:18px;accent-color:#4fffd0}.update-panel button{margin-top:12px;padding:10px 14px;background:#203659;color:white;border:1px solid #18e7ff;border-radius:6px}.update-panel button.primary{background:#9b3d99;border-color:#ff4dd2}</style></head><body>
 <style>.categories{display:flex;gap:10px;margin:0 0 12px}.categories span{padding:7px 13px;border:1px solid #ff3eb8;border-radius:999px;color:#8ff;background:#0f1330}.vault-layout{display:grid;grid-template-columns:48% 52%;gap:24px;min-height:440px}.vault{display:flex;flex-direction:column;perspective:900px;gap:7px;height:440px;overflow-y:auto;padding:8px 18px 20px 8px}.tape,.tape:nth-child(even){display:grid;grid-template-columns:78px 1fr auto;grid-template-rows:1fr 1fr;align-items:center;flex:none;width:100%;height:72px;margin:0;padding:6px 12px 6px 5px;border:1px solid #855938;border-left:9px solid #14dcf5;background:linear-gradient(90deg,#392416,#17131a 70%);box-shadow:8px 5px 12px #0009;transform:rotateX(-5deg) translateZ(-15px);filter:brightness(.82);text-align:left}.tape:focus,.tape:hover{transform:rotateX(0) translateZ(65px) scale(1.025);border:3px solid #efff1c;border-left-width:9px;filter:none}.tape img{grid-row:1/3;width:66px;height:56px;object-fit:cover;object-position:20% center;margin-right:12px;border:1px solid #f3c55b}.tape b{padding:0;font-size:17px}.tape small{color:#c8b89f}.tape i{grid-column:3;grid-row:1/3;background:#66ff9e;color:#07130c;padding:7px 10px;font-style:normal;font-weight:800}.selection{height:440px;border:1px solid #12dff9;border-radius:18px;padding:18px;background:linear-gradient(145deg,#11123b,#070a1d);display:grid;grid-template-columns:210px 1fr;gap:22px;box-shadow:0 0 36px #00c8ff18 inset}.selection>img{width:210px;height:315px;object-fit:cover;border:2px solid #18dcf4;border-radius:9px;box-shadow:16px 18px 28px #000b}.selection h2{color:#fff22d;font-size:29px;margin-top:8px}.selection p{line-height:1.55;min-height:115px}.selection button{width:100%;padding:14px;background:#a94d06;color:#fff1a0;border:2px solid #ffa20c;border-radius:7px;font-weight:900}.selection small{display:block;color:#8d829f;margin-top:12px}body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:50;background:repeating-linear-gradient(0deg,#0000 0 3px,#0000001c 4px)}header{position:sticky;top:0;z-index:8;background:#070817eF;backdrop-filter:blur(18px);box-shadow:0 12px 35px #0008}.brand-lockup{display:flex;align-items:center;gap:13px}.brand-lockup img{width:57px;height:57px;object-fit:contain;filter:drop-shadow(0 0 16px #13dfff66)}.brand-lockup h1{font-size:25px}.brand-lockup small{color:#57edff;letter-spacing:3px}.hero{position:relative;min-height:230px;display:flex;align-items:center;justify-content:space-between;overflow:hidden;margin-bottom:30px;padding:36px 42px;border:1px solid #652e9e;border-radius:22px;background:radial-gradient(circle at 78% 35%,#e12b8d55,transparent 25%),linear-gradient(120deg,#161149,#090a20 58%,#1d0929);box-shadow:0 25px 70px #0008}.hero::after{content:"";position:absolute;right:-70px;width:350px;height:350px;border:45px solid #11dcff1c;border-radius:50%;box-shadow:0 0 0 35px #fd2aa214}.eyebrow{color:#58f4ff;font-weight:900;letter-spacing:3px}.hero h2{font-size:46px;line-height:1.02;margin:10px 0;color:#fff}.hero p{max-width:650px;color:#bdc6dc}.signal-card{position:relative;z-index:1;display:grid;place-items:center;min-width:180px;height:130px;border:1px solid #ff42c8;border-radius:18px;background:#0b0924cc}.signal-card b{font-size:34px;color:#78ff9d}.signal-card span{color:#ffdc3f;letter-spacing:2px}.section-heading{display:flex;justify-content:space-between;align-items:end;margin-top:14px}.section-heading small{color:#8c96b8}.creator,.channel{background:linear-gradient(145deg,#1b1840,#101128);border-color:#403a71;box-shadow:0 12px 30px #0006;transition:.18s transform,.18s border-color}.creator:hover,.creator:focus,.channel:hover,.channel:focus{transform:translateY(-5px);border-color:#45eaff}.wrap{max-width:1600px;margin:auto}@media(max-width:900px){.vault-layout{grid-template-columns:1fr}.selection{display:none}.hero{padding:28px}.hero h2{font-size:34px}.signal-card{display:none}.brand-lockup small,.tag{display:none}}</style><header><div class="brand-lockup"><img src="/app-icon.png" alt=""><div><h1>CHANNELFORGE TV</h1><small>THE COMMUNITY DIAL</small></div></div><span class="tag">REWIND CINEMA</span><button id="update" class="update">UPDATES • v__VERSION__</button></header><aside id="update-panel" class="update-panel" hidden><h3>CHANNELFORGE TV UPDATE</h3><p id="update-message">Checking GitHub Releases…</p><progress id="update-progress" max="100" value="0"></progress><small id="update-bytes"></small><button id="restart-update" class="primary" hidden>OPEN VERIFIED UPDATE</button><button id="dismiss-update">NOT NOW</button></aside><main class="wrap"><section class="hero"><div><span class="eyebrow">COMMUNITY CHANNELS • ON DEMAND</span><h2>Turn the dial.<br>Find something unforgettable.</h2><p>Jump into live creator channels or browse every connected movie shelf from one cinematic TV interface.</p></div><div class="signal-card"><b>● LIVE</b><span>PUBLIC GUIDE</span></div></section><div class="section-heading"><h2>CREATOR STUDIOS</h2><small>Choose a studio to tune its channels and movies</small></div><div id="creators" class="creators"><span class="empty">Connecting to the public directory…</span></div><div class="section-heading"><h2 class="cyan">LIVE CHANNELS</h2><small>Select a channel to start watching</small></div><div id="live" class="live"></div><div class="section-heading"><h2 class="pink">REWIND CINEMA</h2><small>BROWSE THE MOVIE SHELF</small></div><nav class="categories"><span>CONTINUE WATCHING</span><span>80S BLOCKBUSTERS</span><span>90S ESSENTIALS</span><span>CREATOR PICKS</span></nav><div class="vault-layout"><div id="vault" class="vault"></div><aside id="selection" class="selection"><span class="empty">Choose a movie to see its details.</span></aside></div></main><video id="player" controls autoplay></video><button id="close" class="close">BACK TO REWIND CINEMA</button><script src="/hls.js"></script><script>
-const $=s=>document.querySelector(s), esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let hls,vaultItems=[],vaultVisible=[],vaultRenderCount=0,vaultSearch='',vaultFilter='all',vaultGenre='all',vaultRating='all',vaultSort='title',studioLoadId=0,allCreators=[],liveChannels=[],activeStudio='all',guideSearch='',selectedCreator=null,loadedStudioId='',liveMode=false,guideWindowOffset=0,activeStreamUrl='',activeMedia=null,playerMini=false,favoriteChannels=readFavorites('cf-favorite-channels'),favoriteCreators=readFavorites('cf-favorite-creators');
-async function json(url){let r=await fetch('/proxy?url='+encodeURIComponent(url));if(!r.ok)throw Error(await r.text());return r.json()}
+const $=s=>document.querySelector(s), esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let hls,vaultItems=[],vaultVisible=[],vaultRenderCount=0,vaultSearch='',vaultFilter='all',vaultGenre='all',vaultRating='all',vaultSort='title',allCreators=[],liveChannels=[],activeStudio='all',guideSearch='',selectedCreator=null,liveMode=false,guideWindowOffset=0,activeStreamUrl='',activeMedia=null,playerMini=false,favoriteChannels=readFavorites('cf-favorite-channels'),favoriteCreators=readFavorites('cf-favorite-creators');
+async function creatorResponse(url, scan=false, signal){
+    const response=await fetch('/proxy?url='+encodeURIComponent(url)+(scan?'&scan=1':''),{signal});
+    if(!response.ok)throw Error(await response.text());
+    return response;
+}
+async function json(url, scan=false, signal){return (await creatorResponse(url,scan,signal)).json()}
 async function localJson(path,options={}){let r=await fetch(path,options),value=await r.json();if(!r.ok)throw Error(value.error||'Request failed');return value}
 async function checkUpdate(onLaunch=false){try{let r=await localJson('/api/update'),version=r.latest_version||r.current_version||'__VERSION__';if($('#home-release-version'))$('#home-release-version').textContent='v'+version;if($('#home-changelog'))$('#home-changelog').textContent=r.notes||'Playback, guide, discovery, and application reliability improvements.';if($('#home-update-state'))$('#home-update-state').textContent=r.update_available?'A verified update is available.':'You are running the newest public release.';if(!r.update_available){$('#update').textContent='UP TO DATE ✓ • v__VERSION__';return}$('#update').textContent='UPDATE v'+r.latest_version+' AVAILABLE';if(!onLaunch||confirm('ChannelForge TV v'+r.latest_version+' is available. Download and verify it now?'))downloadUpdate()}catch(e){$('#update').textContent='OFFLINE • v__VERSION__';if($('#home-update-state'))$('#home-update-state').textContent='Release check is offline. The installed application still works normally.';if($('#home-changelog'))$('#home-changelog').textContent='v__VERSION__\n• Restored Windows video playback\n• Added automatic channel scanning and offline filtering\n• Added a full live program guide\n• Rebuilt Rewind Cinema as a vertical VHS shelf'} }
 async function downloadUpdate(){
@@ -259,19 +276,254 @@ showProgramInfo=function(channel,program){
     $('#favorite-creator').onclick=()=>{toggleFavorite('creator',channel.creator_name);showProgramInfo(channel,program)};
     dialog.showModal();
 }
-async function scanChannels(manual=false){if(manual){await load();return liveChannels}let button=$('#scan-channels'),status=$('#scan-status');if(button){button.disabled=true;button.textContent='⌛ SCANNING…'}if(status)status.textContent='Checking every connected Creator…';let groups=await Promise.all(allCreators.map(async creator=>{try{if(creator.status_url){let value=await json(creator.status_url);return (value.channels||[]).filter(channel=>channel.online).map(channel=>({...channel,creator_name:creator.name}))}let response=await fetch('/proxy?url='+encodeURIComponent(creator.playlist_url));if(!response.ok)throw Error('offline');return parsePlaylist(await response.text(),creator)}catch(_error){return []}}));let seen=new Set();liveChannels=groups.flat().filter(channel=>channel.stream_url&&!seen.has(channel.stream_url)&&seen.add(channel.stream_url)).sort((a,b)=>String(a.number||'9999').localeCompare(String(b.number||'9999'),undefined,{numeric:true})||a.name.localeCompare(b.name));renderLiveGuide();if(status)status.textContent=liveChannels.length+' online channel'+(liveChannels.length===1?'':'s')+' • scanned '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});if(button){button.disabled=false;button.textContent='↻ SCAN FOR CHANNELS'}return liveChannels}
-async function load(){let creators=[],directoryError='';try{let local=await localJson('/api/local-creator');if(local.available&&local.creator)creators.push(local.creator)}catch(_error){}for(const source of ['__DIRECTORY__','__DIRECTORY_FALLBACK__']){try{let data=await json(source);for(const c of data.creators||[])if(!creators.some(existing=>existing.playlist_url===c.playlist_url))creators.push(c);if((data.creators||[]).length)break}catch(error){directoryError=error.message}}allCreators=creators;selectedCreator=creators[0]||null;$('#creators').innerHTML='';for(const c of creators){let b=document.createElement('button');b.className='creator';b.innerHTML=(c.logo_url?'<img src="'+esc(c.logo_url)+'" style="width:46px;height:46px;object-fit:contain;float:left;margin-right:12px">':'')+'<b>'+esc(c.name)+'</b><br><small>'+esc(c.description)+(c.local?' • THIS PC':'')+'</small>';b.onclick=()=>{selectedCreator=c;loadedStudioId='';studio(c);showScreen('cinema')};$('#creators').append(b)}if(creators.length){await scanChannels()}else{$('#creators').innerHTML='<span class="empty">No public creator studios are online right now.<br><small>ChannelForge TV works independently; Creator is only needed by people publishing channels.</small></span>';$('#live').innerHTML='<span class="empty">No public live channels are currently available.'+(directoryError?'<br><small>Both directory sources were checked. Try Scan Channels again shortly.</small>':'')+'</span>';$('#tv-guide').innerHTML=''}}
-function filteredVault(){let term=vaultSearch.trim().toLowerCase(),year=item=>Number(item.year)||0,values=vaultItems.filter(item=>{let genres=(item.genres||[]).map(value=>String(value).toLowerCase()),haystack=(item.title+' '+item.year+' '+item.type+' '+genres.join(' ')+' '+(item.summary||'')+' '+(item.library||'')).toLowerCase();return(!term||haystack.includes(term))&&(vaultGenre==='all'||genres.includes(vaultGenre.toLowerCase()))&&(vaultRating==='all'||String(item.content_rating||'Unrated')===vaultRating)&&(vaultFilter==='all'||vaultFilter==='80s'&&year(item)>=1980&&year(item)<1990||vaultFilter==='90s'&&year(item)>=1990&&year(item)<2000||vaultFilter==='2000s'&&year(item)>=2000&&year(item)<2010||vaultFilter==='recent'&&year(item)>=2010)});return values.sort((a,b)=>vaultSort==='newest'?(Number(b.year)||0)-(Number(a.year)||0)||a.title.localeCompare(b.title):vaultSort==='oldest'?(Number(a.year)||9999)-(Number(b.year)||9999)||a.title.localeCompare(b.title):a.title.localeCompare(b.title))}
-function applyVaultFilters(focusFirst=false){vaultVisible=filteredVault();let count=$('#movie-count');if(count)count.textContent=vaultVisible.length+' movie'+(vaultVisible.length===1?'':'s');document.querySelectorAll('[data-movie-filter]').forEach(button=>button.classList.toggle('active',button.dataset.movieFilter===vaultFilter));renderVaultPage(focusFirst)}
-function appendVaultBatch(amount=72){let box=$('#vault'),end=Math.min(vaultVisible.length,vaultRenderCount+amount);for(const x of vaultVisible.slice(vaultRenderCount,end)){let b=document.createElement('button');b.className='tape';b.innerHTML='<span class="tape-ridge"></span><img loading="lazy" src="'+esc(x.poster_url)+'" alt=""><span class="tape-label"><b>'+esc(x.title)+'</b><small><span>CF HOME VIDEO • VHS / HI-FI</span><mark>'+esc(x.year||'N/A')+'</mark></small></span><i>INSERT ▷</i>';b.onfocus=()=>selectTape(x);b.onmouseenter=()=>selectTape(x);b.onclick=()=>play(x.stream_url,{kind:'movie',title:x.title,movie:x});box.append(b)}vaultRenderCount=end}
-function renderVaultPage(focusFirst=false){let box=$('#vault');box.innerHTML='';vaultRenderCount=0;if(!vaultVisible.length){box.innerHTML='<span class="empty">No movies match this search and filter.</span>';$('#selection').innerHTML='<span class="empty">Try another title, year, or decade.</span>';return}appendVaultBatch();selectTape(vaultVisible[0]);if(focusFirst)box.firstElementChild?.focus()}
+let directoryScan=null, pendingGuideRender=0;
+const channelsByStudio=new Map();
+let creatorsSignature='';
+function refreshGuideFromStudios(){
+    const seen=new Set();
+    liveChannels=allCreators.flatMap(creator=>channelsByStudio.get(creator.playlist_url)||[])
+        .filter(channel=>channel.stream_url&&!seen.has(channel.stream_url)&&seen.add(channel.stream_url))
+        .sort((a,b)=>String(a.number||'9999').localeCompare(String(b.number||'9999'),undefined,{numeric:true})||a.name.localeCompare(b.name));
+    if(!pendingGuideRender)pendingGuideRender=requestAnimationFrame(()=>{
+        pendingGuideRender=0;
+        if(document.body.classList.contains('guide-mode'))renderLiveGuide();
+        else renderFavorites();
+    });
+}
+function adoptCreators(creators){
+    allCreators=creators;
+    const current=creators.find(creator=>creator.playlist_url===selectedCreator?.playlist_url);
+    const next=current||creators[0]||null;
+    if(next?.vault_url!==selectedCreator?.vault_url){
+        vaultController?.abort();
+        selectedVaultUrl='';
+        vaultItems=[];
+    }
+    selectedCreator=next;
+    const urls=new Set(creators.map(creator=>creator.playlist_url));
+    for(const key of channelsByStudio.keys())if(!urls.has(key))channelsByStudio.delete(key);
+    const signature=JSON.stringify(creators.map(c=>[c.id,c.playlist_url,c.vault_url,c.name,c.description,c.logo_url,c.local]));
+    if(signature!==creatorsSignature || !$('#creators').hasChildNodes()){
+        creatorsSignature=signature;
+        const list=$('#creators'),fragment=document.createDocumentFragment();
+        list.textContent='';
+        for(const c of creators){
+            const b=document.createElement('button');
+            b.className='creator';
+            b.innerHTML=(c.logo_url?'<img loading="lazy" src="'+esc(c.logo_url)+'" style="width:46px;height:46px;object-fit:contain;float:left;margin-right:12px">':'')+'<b>'+esc(c.name)+'</b><br><small>'+esc(c.description)+(c.local?' • THIS PC':'')+'</small>';
+            b.onclick=()=>{selectedCreator=c;showScreen('cinema');studio(c)};
+            fragment.append(b);
+        }
+        if(!creators.length)list.innerHTML='<span class="empty">No public creator studios are online right now.</span>';
+        else list.append(fragment);
+    }
+    if(!selectedCreator){
+        $('#vault').innerHTML='<span class="empty">No movie libraries are online right now.</span>';
+        $('#selection').textContent='';
+    }else if(!document.querySelector('.vault-layout').hidden&&!vaultItems.length)studio(selectedCreator);
+    refreshGuideFromStudios();
+}
+async function discoverDirectory(url){
+    const controller=new AbortController();
+    const deadline=setTimeout(()=>controller.abort(),6500);
+    try {
+        return (await json(url,true,controller.signal)).creators||[];
+    } finally {
+        clearTimeout(deadline);
+    }
+}
+async function publicDirectory(){
+    try {
+        return await discoverDirectory('__DIRECTORY__');
+    } catch (_error) {
+        return discoverDirectory('__DIRECTORY_FALLBACK__');
+    }
+}
+async function scanStudio(creator){
+    let channels=[];
+    const controller=new AbortController();
+    const deadline=setTimeout(()=>controller.abort(),6500);
+    try {
+        if(creator.status_url){
+            const value=await json(creator.status_url,true,controller.signal);
+            channels=(value.channels||[]).filter(channel=>channel.online)
+                .map(channel=>({...channel,creator_name:creator.name}));
+        }else{
+            const response=await creatorResponse(creator.playlist_url,true,controller.signal);
+            channels=parsePlaylist(await response.text(),creator);
+        }
+    } catch (_error) {
+        // Other studios remain available if this origin cannot be reached.
+    } finally {
+        clearTimeout(deadline);
+    }
+    channelsByStudio.set(creator.playlist_url,channels);
+    refreshGuideFromStudios();
+}
+async function refreshDirectory(){
+    const button=$('#scan-channels'), status=$('#scan-status');
+    button.disabled=true;
+    button.textContent='⌛ SCANNING…';
+    status.textContent='Checking worldwide channels…';
+    const checked=new Map();
+    const check=creator=>{
+        if(!checked.has(creator.playlist_url))checked.set(creator.playlist_url,scanStudio(creator));
+        return checked.get(creator.playlist_url);
+    };
+    let local;
+    const localLookup=localJson('/api/local-creator').then(value=>{
+        local=value.available?value.creator:null;
+        if(local){
+            adoptCreators([local,...allCreators.filter(c=>!c.local&&c.playlist_url!==local.playlist_url)]);
+            check(local);
+        }
+    }).catch(()=>{});
+    let unavailable=false;
+    try{
+        const remotePromise=publicDirectory().catch(()=>{unavailable=true;return allCreators.filter(c=>!c.local)});
+        const remote=await remotePromise;
+        adoptCreators([...(local?[local]:[]),...remote.filter(c=>c.playlist_url&&c.playlist_url!==local?.playlist_url)]);
+        const pending=allCreators.filter(c=>!c.local);
+        let next=0;
+        await Promise.all(Array.from({length:Math.min(8,pending.length)},async()=>{
+            while(next<pending.length)await check(pending[next++]);
+        }));
+        await localLookup;
+        if(local)await check(local);
+        refreshGuideFromStudios();
+        const count=liveChannels.length;
+        status.textContent=(count+' online channel'+(count===1?'':'s'))+(unavailable?' • directory unavailable':' • scanned '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}));
+        return liveChannels;
+    }finally{
+        button.disabled=false;
+        button.textContent='↻ SCAN FOR CHANNELS';
+    }
+}
+async function scanChannels(){
+    if(!directoryScan)directoryScan=refreshDirectory().finally(()=>{directoryScan=null});
+    return directoryScan;
+}
+async function load(){return scanChannels()}
+let vaultController, loadingVaultUrl='', selectedVaultUrl='', vaultSearchTimer, selectedTape=null;
+const movieIndex=new WeakMap();
+const movieOrders=new Map();
+function indexVault(items){
+    movieOrders.clear();
+    for(const item of items){
+        const genres=(item.genres||[]).map(value=>String(value).toLowerCase());
+        movieIndex.set(item,{
+            genres, year:Number(item.year)||0, rating:String(item.content_rating||'Unrated'),
+            search:[item.title,item.year,...genres,item.summary,item.library].join(' ').toLowerCase()
+        });
+    }
+}
+function filteredVault(){
+    const terms=vaultSearch.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const genre=vaultGenre.toLowerCase();
+    const bounds={ '80s':[1980,1990], '90s':[1990,2000], '2000s':[2000,2010], recent:[2010,Infinity] }[vaultFilter];
+    if(!movieOrders.has(vaultSort)){
+        const byTitle=(a,b)=>String(a.title).localeCompare(String(b.title));
+        const byYear=movie=>movieIndex.get(movie).year;
+        const compare=vaultSort==='newest'?(a,b)=>byYear(b)-byYear(a)||byTitle(a,b)
+            :vaultSort==='oldest'?(a,b)=>(byYear(a)||9999)-(byYear(b)||9999)||byTitle(a,b):byTitle;
+        movieOrders.set(vaultSort,[...vaultItems].sort(compare));
+    }
+    return movieOrders.get(vaultSort).filter(item=>{
+        const {search,genres,year,rating}=movieIndex.get(item);
+        return terms.every(term=>search.includes(term))&&(genre==='all'||genres.includes(genre))
+            &&(vaultRating==='all'||rating===vaultRating)&&(!bounds||year>=bounds[0]&&year<bounds[1]);
+    });
+}
+function applyVaultFilters(focusFirst=false){
+    vaultVisible=filteredVault();
+    $('#movie-count').textContent=vaultVisible.length+' movie'+(vaultVisible.length===1?'':'s');
+    document.querySelectorAll('[data-movie-filter]').forEach(button=>button.classList.toggle('active',button.dataset.movieFilter===vaultFilter));
+    renderVaultPage(focusFirst);
+}
+function appendVaultBatch(amount=24){
+    const box=$('#vault'), fragment=document.createDocumentFragment(), end=Math.min(vaultVisible.length,vaultRenderCount+amount);
+    for(const x of vaultVisible.slice(vaultRenderCount,end)){
+        const b=document.createElement('button');
+        b.className='tape';
+        b.innerHTML='<span class="tape-ridge"></span>'+(x.poster_url?'<img loading="lazy" decoding="async" src="'+esc(x.poster_url)+'" alt="">':'<span class="empty">&nbsp;</span>')+'<span class="tape-label"><b>'+esc(x.title)+'</b><small><span>CF HOME VIDEO • VHS / HI-FI</span><mark>'+esc(x.year||'N/A')+'</mark></small></span><i>INSERT ▷</i>';
+        b.onfocus=b.onmouseenter=()=>selectTape(x);
+        b.onclick=()=>play(x.stream_url,{kind:'movie',title:x.title,movie:x});
+        fragment.append(b);
+    }
+    box.append(fragment);
+    vaultRenderCount=end;
+}
+function renderVaultPage(focusFirst=false){
+    const box=$('#vault');
+    box.textContent='';
+    box.scrollTop=0;
+    vaultRenderCount=0;
+    if(!vaultVisible.length){
+        box.innerHTML='<span class="empty">'+(vaultItems.length?'No movies match these filters.':'No movies are available in this studio.')+'</span>';
+        selectedTape=null;
+        $('#selection').textContent='';
+        return;
+    }
+    appendVaultBatch();
+    selectTape(vaultVisible[0]);
+    if(focusFirst)box.firstElementChild?.focus({preventScroll:true});
+}
 function renderVaultBatch(){renderVaultPage(false)}
-async function studio(c){if(!c||loadedStudioId===c.id&&vaultItems.length)return;let loadId=++studioLoadId;$('#vault').innerHTML='<span class="empty">Loading movies and posters…</span>';try{let v=await json(c.vault_url);if(loadId!==studioLoadId)return;loadedStudioId=c.id;vaultItems=Array.isArray(v.items)?v.items.filter(item=>item?.type==='movie'):[];vaultSearch='';vaultFilter='all';vaultGenre='all';vaultRating='all';vaultSort='title';if($('#movie-search'))$('#movie-search').value='';let genre=$('#movie-genre'),rating=$('#movie-rating'),sort=$('#movie-sort');if(genre)genre.innerHTML='<option value="all">ALL GENRES</option>'+[...new Set(vaultItems.flatMap(item=>item.genres||[]).filter(Boolean))].sort().map(value=>'<option value="'+esc(value)+'">'+esc(value).toUpperCase()+'</option>').join('');if(rating)rating.innerHTML='<option value="all">ALL RATINGS</option>'+[...new Set(vaultItems.map(item=>item.content_rating||'Unrated'))].sort().map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join('');if(sort)sort.value='title';applyVaultFilters(true)}catch(e){if(loadId!==studioLoadId)return;loadedStudioId='';$('#vault').innerHTML='<span class="empty">Could not load this studio: '+esc(e.message)+'</span>'}}
-function selectTape(x){$('#selection').innerHTML='<div class="vhs-box"><img src="'+esc(x.poster_url)+'" alt="'+esc(x.title)+' poster"><span>CHANNELFORGE HOME VIDEO</span></div><div><span class="eyebrow">SELECTED CASSETTE</span><h2>'+esc(x.title)+'</h2><b class="pink">'+esc(x.year)+'</b> • '+esc(x.type)+'<p>'+esc(x.summary||'No description supplied.')+'</p><button id="selected-play">▷ INSERT MOVIE</button><small>Insert this movie to begin playback. Poster and details come from the connected creator library.</small></div>';$('#selected-play').onclick=()=>play(x.stream_url,{kind:'movie',title:x.title,movie:x})}
+async function studio(c){
+    if(!c?.vault_url||selectedVaultUrl===c.vault_url||loadingVaultUrl===c.vault_url)return;
+    vaultController?.abort();
+    const controller=new AbortController();
+    vaultController=controller;
+    loadingVaultUrl=c.vault_url;
+    selectedVaultUrl='';
+    vaultItems=[];
+    indexVault(vaultItems);
+    selectedTape=null;
+    $('#movie-count').textContent='';
+    $('#selection').textContent='';
+    $('#vault').innerHTML='<span class="empty">Loading movies and posters…</span>';
+    try{
+        const value=await json(c.vault_url,false,controller.signal);
+        if(controller.signal.aborted)return;
+        vaultItems=Array.isArray(value.items)?value.items.filter(item=>item?.type==='movie'):[];
+        indexVault(vaultItems);
+        selectedVaultUrl=c.vault_url;
+        vaultSearch='';
+        vaultFilter=vaultGenre=vaultRating='all';
+        vaultSort='title';
+        $('#movie-search').value='';
+        const genre=$('#movie-genre'),rating=$('#movie-rating');
+        genre.innerHTML='<option value="all">ALL GENRES</option>'+[...new Set(vaultItems.flatMap(item=>item.genres||[]).filter(Boolean))].sort().map(value=>'<option value="'+esc(value)+'">'+esc(value).toUpperCase()+'</option>').join('');
+        rating.innerHTML='<option value="all">ALL RATINGS</option>'+[...new Set(vaultItems.map(item=>item.content_rating||'Unrated'))].sort().map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join('');
+        $('#movie-sort').value='title';
+        applyVaultFilters();
+    }catch(error){
+        if(!controller.signal.aborted)$('#vault').innerHTML='<span class="empty">Could not load this studio: '+esc(error.message)+'</span>';
+    }finally{
+        if(vaultController===controller)loadingVaultUrl='';
+    }
+}
+function selectTape(x){if(selectedTape===x)return;selectedTape=x;$('#selection').innerHTML='<div class="vhs-box"><img src="'+esc(x.poster_url)+'" alt="'+esc(x.title)+' poster"><span>CHANNELFORGE HOME VIDEO</span></div><div><span class="eyebrow">SELECTED CASSETTE</span><h2>'+esc(x.title)+'</h2><b class="pink">'+esc(x.year)+'</b> • '+esc(x.type)+'<p>'+esc(x.summary||'No description supplied.')+'</p><button id="selected-play">▷ INSERT MOVIE</button><small>Insert this movie to begin playback. Poster and details come from the connected creator library.</small></div>';$('#selected-play').onclick=()=>play(x.stream_url,{kind:'movie',title:x.title,movie:x})}
 function liveEdge(v){if(!liveMode)return;if(hls?.liveSyncPosition&&Math.abs(v.currentTime-hls.liveSyncPosition)>6)v.currentTime=hls.liveSyncPosition;else if(v.buffered.length&&v.currentTime<v.buffered.end(v.buffered.length-1)-8)v.currentTime=v.buffered.end(v.buffered.length-1)-2}
-function setPlayerState(message,error=false){let state=$('#player-state');if(state){state.textContent=message;state.classList.toggle('error',error)}}
+function setPlayerState(message,error=false,canRetry=error){
+    const state=$('#player-state');
+    if(!state)return;
+    state.textContent=message;
+    state.classList.toggle('error',error);
+    if(!error)return;
+    clearTimeout(playerControlsTimer);
+    document.body.classList.remove('player-controls-hidden');
+    if(canRetry&&activeStreamUrl){
+        const retry=document.createElement('button');
+        retry.type='button';
+        retry.className='retry-stream';
+        retry.textContent='Retry playback';
+        retry.onclick=()=>play(activeStreamUrl,activeMedia);
+        state.append(' ',retry);
+    }
+}
 let playbackGeneration=0, liveRetryTimer, liveRetries=0;
-function advanceLive(failed=false, failureMessage='PLAYBACK FAILED · SELECT CHANNEL TO RETRY'){
+function advanceLive(failed=false, failureMessage='COULD NOT PLAY THIS CHANNEL'){
     if(!liveMode||!activeStreamUrl||liveRetryTimer)return;
     if(failed&&++liveRetries>3){setPlayerState(failureMessage,true);return}
     const generation=playbackGeneration;
@@ -321,11 +573,11 @@ function play(url,media=null,continuing=false){
                 return;
             }
             if(data.type===Hls.ErrorTypes.MEDIA_ERROR&&!movieRecovery){movieRecovery=true;player.recoverMediaError();return}
-            setPlayerState('PLAYBACK FAILED · INSERT MOVIE TO RETRY',true);
+            setPlayerState('COULD NOT PLAY THIS MOVIE',true);
         });
         player.loadSource(source);player.attachMedia(v);
     }else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=source;start()}
-    else setPlayerState('VIDEO ENGINE IS NOT AVAILABLE',true);
+    else setPlayerState('VIDEO ENGINE UNAVAILABLE. ON LINUX, INSTALL THE CURRENT CHANNELFORGE PACKAGE.',true,false);
     v.classList.add('playing');$('#close').classList.add('show');
 }
 function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}
@@ -337,17 +589,17 @@ $('#player').addEventListener('ended',()=>advanceLive());
 $('#player').addEventListener('error',()=>{if(!hls)advanceLive(true)});
 $('#player').addEventListener('waiting',()=>setPlayerState('BUFFERING…'));
 $('#player').addEventListener('pause',event=>{const video=event.currentTarget;if(liveMode&&!video.ended&&video.readyState>=2&&video.classList.contains('playing'))video.play().catch(()=>{})});
-$('#scan-channels').onclick=()=>scanChannels(true);
+$('#scan-channels').onclick=()=>scanChannels();
 $('#guide-search').oninput=event=>{guideSearch=event.target.value;renderLiveGuide()};
 $('#guide-earlier').onclick=()=>{guideWindowOffset=Math.max(0,guideWindowOffset-2);renderLiveGuide()};
 $('#guide-now').onclick=()=>{guideWindowOffset=0;renderLiveGuide()};
 $('#guide-later').onclick=()=>{guideWindowOffset=Math.min(10,guideWindowOffset+2);renderLiveGuide()};
-$('#movie-search').oninput=event=>{vaultSearch=event.target.value;applyVaultFilters()};
+$('#movie-search').oninput=event=>{vaultSearch=event.target.value;clearTimeout(vaultSearchTimer);vaultSearchTimer=setTimeout(applyVaultFilters,90)};
 $('#movie-genre').onchange=event=>{vaultGenre=event.target.value;applyVaultFilters(true)};
 $('#movie-rating').onchange=event=>{vaultRating=event.target.value;applyVaultFilters(true)};
 $('#movie-sort').onchange=event=>{vaultSort=event.target.value;applyVaultFilters(true)};
 document.querySelectorAll('[data-movie-filter]').forEach(button=>button.onclick=()=>{vaultFilter=button.dataset.movieFilter;applyVaultFilters(true)});
-setInterval(()=>{if(!document.hidden)scanChannels(true)},60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)scanChannels(true)});
+setInterval(()=>{if(!document.hidden)scanChannels()},60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)scanChannels()});
 $('#close').onclick=()=>playerMini?stopPlayer():minimizePlayer();
 $('#update').onclick=()=>checkUpdate(false);
 $('#dismiss-update').onclick=()=>$('#update-panel').hidden=true;
@@ -385,7 +637,7 @@ function updateTunedIndicator(media,status='PLAYING'){let box=$('#tuned-channel'
 function ensurePlayerShell(){if(playerShell)return playerShell;playerShell=document.createElement('section');playerShell.id='mini-player-shell';playerShell.className='mini-player-shell';let player=$('#player');player.parentNode.insertBefore(playerShell,player);playerShell.append(player,$('#player-hud'),$('#close'));return playerShell}
 function syncMiniPlayerPoster(){let poster=$('#mini-player-poster'),preview=$('#live .guide-preview');if(!poster||!preview)return;let image=preview.querySelector('img'),title=preview.querySelector('b')?.textContent||'LIVE CHANNEL';poster.innerHTML=(image?'<img src="'+esc(image.src)+'" alt="">':'<strong>CF</strong>')+'<span>'+esc(title)+'</span>'}
 function dockMiniPlayer(screen='live'){let shell=ensurePlayerShell(),slot=$('#mini-player-slot');document.body.classList.remove('player-controls-hidden');if(screen==='live'&&slot){slot.append(shell);shell.className='mini-player-shell guide-dock'}else{document.querySelector('main.wrap')?.prepend(shell);shell.className='mini-player-shell section-dock'}}
-function showPlayerControls(){document.body.classList.remove('player-controls-hidden');clearTimeout(playerControlsTimer);if(!playerMini)playerControlsTimer=setTimeout(()=>document.body.classList.add('player-controls-hidden'),3200)}
+function showPlayerControls(){document.body.classList.remove('player-controls-hidden');clearTimeout(playerControlsTimer);if(!playerMini&&!$('#player-state.error'))playerControlsTimer=setTimeout(()=>document.body.classList.add('player-controls-hidden'),3200)}
 function surfChannel(direction){if(!liveChannels.length)return;let index=liveChannels.findIndex(channel=>channel.stream_url===activeStreamUrl);index=index<0?0:(index+direction+liveChannels.length)%liveChannels.length;let channel=liveChannels[index],program=programAt(channel);play(channel.stream_url,{kind:'live',channel,title:program?.title||channel.name})}
 document.addEventListener('mousemove',showPlayerControls,{passive:true});document.addEventListener('keydown',showPlayerControls);document.addEventListener('click',event=>{let surf=event.target.closest('[data-player-surf]');if(surf)surfChannel(Number(surf.dataset.playerSurf)||1)});
 '''
@@ -418,12 +670,13 @@ HTML = HTML.replace('</main><video id="player"', f'{EXTRA_SCREENS}</main><aside 
 HTML = HTML.replace("let playbackGeneration=0", PLAYER_DOCK_JS + "\nlet playbackGeneration=0", 1)
 HTML = HTML.replace("function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}", "function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');dockMiniPlayer('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}", 1)
 HTML = HTML.replace("function stopPlayer(){liveMode=false;", "function stopPlayer(){++playbackGeneration;clearTimeout(liveRetryTimer);liveRetryTimer=null;let shell=ensurePlayerShell();document.body.append(shell);shell.className='mini-player-shell';document.body.classList.remove('player-controls-hidden');liveMode=false;", 1)
-HTML = HTML.replace("async function checkUpdate(onLaunch=false)", "function showScreen(name){document.querySelectorAll('[data-section-block]').forEach(block=>block.hidden=block.dataset.sectionBlock!==name);document.querySelectorAll('[data-screen]').forEach(button=>button.classList.toggle('active',button.dataset.screen===name));document.body.classList.toggle('guide-mode',name==='live');if(name==='live'&&innerWidth>900)document.body.classList.add('menu-collapsed');if(name==='cinema'&&selectedCreator&&!vaultItems.length)studio(selectedCreator);if(innerWidth<=900)document.body.classList.remove('menu-open');window.scrollTo(0,0)}\nasync function checkUpdate(onLaunch=false)", 1)
+HTML = HTML.replace("async function checkUpdate(onLaunch=false)", "function showScreen(name){document.querySelectorAll('[data-section-block]').forEach(block=>block.hidden=block.dataset.sectionBlock!==name);document.querySelectorAll('[data-screen]').forEach(button=>button.classList.toggle('active',button.dataset.screen===name));document.body.classList.toggle('guide-mode',name==='live');if(name==='live'&&innerWidth>900)document.body.classList.add('menu-collapsed');if(name==='live')renderLiveGuide();if(name==='cinema'&&selectedCreator)studio(selectedCreator);if(innerWidth<=900)document.body.classList.remove('menu-open');window.scrollTo(0,0)}\nasync function checkUpdate(onLaunch=false)", 1)
 HTML = HTML.replace("b.onclick=()=>studio(c)", "b.onclick=()=>{studio(c);showScreen('cinema')}", 1)
 HTML = HTML.replace("$('#close').onclick", "ensurePlayerShell();new MutationObserver(syncMiniPlayerPoster).observe($('#live'),{childList:true,subtree:true});$('#vault').addEventListener('scroll',event=>{let box=event.currentTarget;if(box.scrollTop+box.clientHeight>box.scrollHeight-500&&vaultRenderCount<vaultVisible.length)appendVaultBatch()},{passive:true});$('#menu-toggle').onclick=()=>{if(innerWidth<=900)document.body.classList.toggle('menu-open');else document.body.classList.toggle('menu-collapsed')};document.querySelectorAll('[data-screen]').forEach(button=>button.onclick=event=>{event.preventDefault();const screen=button.dataset.screen;showScreen(screen);if(playerMini)dockMiniPlayer(screen);if(screen==='updates')checkUpdate(false)});$('#screen-check-update').onclick=()=>checkUpdate(false);$('#close').onclick", 1)
 HTML = HTML.replace("$('#update').onclick=()=>checkUpdate(false)", "$('#update').onclick=()=>{showScreen('updates');checkUpdate(false)}", 1)
 HTML = HTML.replace("if(location.search.includes('demo=1'))demo();else load();checkUpdate(true);", "if(location.search.includes('demo=1'))demo();else load();showScreen(new URLSearchParams(location.search).get('screen')||'home');checkUpdate(true);", 1)
 HTML = HTML.replace("if(location.search.includes('demo=1'))", CONTROLLER_JS + "\nif(location.search.includes('demo=1'))", 1)
+HTML = HTML.replace('</head>', '<style>.retry-stream{margin-left:7px;padding:4px 9px;color:#fff;background:#131838;border:1px solid #26dffa;border-radius:5px;cursor:pointer}</style></head>', 1)
 HTML = HTML.replace("OPEN VERIFIED UPDATE", "RESTART & INSTALL UPDATE").replace("Opening the verified update…", "Restarting to install the verified update in place…")
 
 
@@ -451,10 +704,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ValueError("Update job was not found.")
                 return self.send(200, json.dumps(value).encode(), "application/json")
             if parsed.path == "/proxy":
-                url = approved_content_url(parse_qs(parsed.query).get("url", [""])[0])
-                request = urllib.request.Request(url, headers={"User-Agent": f"ChannelForge-TV/{VERSION}"})
-                with urllib.request.urlopen(request, timeout=20) as response:
-                    return self.send(response.status, response.read(64 * 1024 * 1024), response.headers.get_content_type())
+                query = parse_qs(parsed.query)
+                url = approved_content_url(query.get("url", [""])[0])
+                request = urllib.request.Request(url, headers={"User-Agent": f"ChannelForge-TV/{VERSION}", "Accept-Encoding": "gzip"})
+                timeout = 6 if query.get("scan") == ["1"] else 20
+                limit = 64 * 1024 * 1024
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    if response.headers.get("Content-Encoding", "").lower() == "gzip":
+                        with gzip.GzipFile(fileobj=response) as decoded:
+                            body = decoded.read(limit + 1)
+                    else:
+                        body = response.read(limit + 1)
+                    if len(body) > limit:
+                        raise ValueError("Creator response exceeded 64 MB.")
+                    return self.send(response.status, body, response.headers.get_content_type())
             if parsed.path == "/stream":
                 url = approved_content_url(parse_qs(parsed.query).get("url", [""])[0])
                 headers = {"Accept": "*/*", "User-Agent": f"ChannelForge-TV/{VERSION}"}
@@ -462,19 +725,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     headers["Range"] = self.headers["Range"]
                 request = urllib.request.Request(url, headers=headers)
                 with urllib.request.urlopen(request, timeout=45) as response:
-                    data = response.read(64 * 1024 * 1024 + 1)
-                    if len(data) > 64 * 1024 * 1024:
-                        raise ValueError("The media segment exceeded the 64 MB safety limit.")
                     content_type = response.headers.get_content_type()
                     final_url = response.geturl()
-                    if data.lstrip().startswith(b"#EXTM3U") or "mpegurl" in content_type:
-                        data = rewrite_stream_manifest(data, final_url)
-                        content_type = "application/vnd.apple.mpegurl"
+                    if "mpegurl" in content_type or urlsplit(final_url).path.lower().endswith(".m3u8"):
+                        manifest = response.read(2 * 1024 * 1024 + 1)
+                        if len(manifest) > 2 * 1024 * 1024 or not manifest.decode("utf-8-sig").lstrip().startswith("#EXTM3U"):
+                            raise ValueError("Creator returned an invalid HLS playlist.")
+                        return self.send(response.status, rewrite_stream_manifest(manifest, final_url), "application/vnd.apple.mpegurl")
                     extra = {"Accept-Ranges": response.headers.get("Accept-Ranges", "bytes")}
                     if response.headers.get("Content-Range"):
                         extra["Content-Range"] = response.headers["Content-Range"]
-                    return self.send(getattr(response, "status", 200), data, content_type, extra)
+                    return self.send_stream(response, content_type, extra)
             self.send_error(404)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+            exc.close()
+            self.send(code, json.dumps({"error": f"Creator returned HTTP {code}."}).encode(), "application/json")
         except Exception as exc:
             self.send(502, json.dumps({"error": str(exc)}).encode(), "application/json")
 
@@ -493,11 +761,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
 
     def send(self, status, body, content_type, extra_headers=None):
-        self.send_response(status); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store")
-        for name, value in (extra_headers or {}).items():
+        try:
+            self.send_content_headers(status, content_type, len(body), extra_headers or {})
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
+    def send_content_headers(self, status, content_type, length, extra_headers):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        if length is not None:
+            self.send_header("Content-Length", str(length))
+        self.send_header("Cache-Control", "no-store")
+        for name, value in extra_headers.items():
             if value:
                 self.send_header(name, value)
-        self.end_headers(); self.wfile.write(body)
+        self.end_headers()
+
+    def send_stream(self, response, content_type, extra_headers):
+        raw_length = response.headers.get("Content-Length", "")
+        length = int(raw_length) if raw_length.isdecimal() else None
+        remaining = 64 * 1024 * 1024
+        if length is not None and length > remaining:
+            raise ValueError("The media segment exceeded the 64 MB safety limit.")
+        try:
+            self.send_content_headers(response.status, content_type, length, extra_headers)
+            while remaining:
+                chunk = response.read1(min(16 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+        except (OSError, http.client.HTTPException):
+            self.close_connection = True
 
     def log_message(self, *_args):
         pass

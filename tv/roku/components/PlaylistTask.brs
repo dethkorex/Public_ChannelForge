@@ -5,9 +5,28 @@ sub load()
   transfer = CreateObject("roUrlTransfer")
   transfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
   transfer.InitClientCertificates()
+  transfer.EnableEncodings(true)
+  transfer.SetMinimumTransferRate(128, 6)
   transfer.SetUrl(m.top.url)
-  lines = transfer.GetToString().Tokenize(chr(10))
+  payload = transfer.GetToString()
   root = CreateObject("roSGNode", "ContentNode")
+  if m.top.onlineCatalog
+    catalog = ParseJson(payload)
+    if catalog <> invalid and catalog.channels <> invalid
+      for each channel in catalog.channels
+        if channel.online = true
+          node = root.CreateChild("ContentNode")
+          node.title = channel.name
+          node.shortDescriptionLine1 = channel.number
+          node.url = channel.stream_url
+          node.streamFormat = "hls"
+        end if
+      end for
+    end if
+    m.top.content = root
+    return
+  end if
+  lines = payload.Tokenize(chr(10))
   pending = ""
   number = 1
   for each raw in lines
