@@ -17,6 +17,7 @@ class CoreTests(unittest.TestCase):
         app.DATA_DIR.mkdir(parents=True, exist_ok=True)
         app.atomic_json(app.CONFIG_FILE, {"plex_url": "http://127.0.0.1:32400", "plex_token": "test", "guide_hours": 2, "port": 8787, "bind_host": "127.0.0.1", "public_url": ""})
         app.atomic_json(app.CHANNELS_FILE, [])
+        app.VAULT_CATALOG_FILE.unlink(missing_ok=True)
         app.LOCAL_LIBRARY_CACHE.clear()
 
     def test_public_config_hides_token(self):
@@ -68,12 +69,13 @@ class CoreTests(unittest.TestCase):
 
     def test_tv_library_returns_playable_episodes(self):
         libraries = [{"key": "2", "title": "TV", "type": "show"}]
-        root = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentTitle="Example Show" parentIndex="1" index="1" duration="1800000" key="/library/metadata/99"><Media container="mkv" videoCodec="hevc" audioCodec="aac"><Part key="/library/parts/99/file.mkv"/></Media></Video></MediaContainer>')
+        root = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentTitle="Example Show" grandparentThumb="/library/metadata/10/thumb/1" parentIndex="1" index="1" duration="1800000" key="/library/metadata/99"><Media container="mkv" videoCodec="hevc" audioCodec="aac"><Part key="/library/parts/99/file.mkv"/></Media></Video></MediaContainer>')
         with mock.patch.object(app, "plex_libraries", return_value=libraries), mock.patch.object(app, "plex_request", return_value=root) as request:
             items = app.plex_items("2")
         request.assert_called_once_with("/library/sections/2/all?type=4")
         self.assertEqual(items[0]["key"], "/library/metadata/99")
         self.assertEqual(items[0]["series"], "Example Show")
+        self.assertEqual(items[0]["series_thumb"], "/library/metadata/10/thumb/1")
         self.assertIn("S01E01", items[0]["title"])
         self.assertEqual(items[0]["part_key"], "/library/parts/99/file.mkv")
 
@@ -272,7 +274,7 @@ class CoreTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
-    def test_public_vhs_vault_uses_proxied_posters_and_playable_urls(self):
+    def test_public_rewind_cinema_uses_proxied_posters_and_playable_urls(self):
         app.save_channel({"name": "Vault TV", "number": "80", "items": [{"id": "99", "title": "Retro Movie", "year": "1985", "duration_ms": 600000, "key": "/library/metadata/99", "thumb": "/library/metadata/99/thumb/1"}]})
         items = app.vault_items()
         self.assertEqual(items[0]["title"], "Retro Movie")
@@ -280,6 +282,17 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("X-Plex-Token", items[0]["poster_url"])
         self.assertRegex(items[0]["stream_url"], r"/vault/[a-f0-9]{24}\.m3u8$")
         self.assertEqual(app.vault_source(items[0]["id"])["id"], "99")
+
+    def test_rewind_cinema_automatically_indexes_all_plex_movies(self):
+        libraries = [{"key": "1", "title": "Movies", "type": "movie"}, {"key": "2", "title": "TV", "type": "show"}]
+        movies = [{"id": "10", "title": "Movie One", "type": "movie", "thumb": "/library/metadata/10/thumb/1", "key": "/library/metadata/10"}]
+        with mock.patch.object(app, "plex_libraries", return_value=libraries), mock.patch.object(app, "plex_items", return_value=movies) as plex_items:
+            result = app.refresh_plex_movie_catalog()
+        self.assertEqual(result["movies"], 1)
+        plex_items.assert_called_once_with("1")
+        catalog = app.vault_items()
+        self.assertEqual(catalog[0]["title"], "Movie One")
+        self.assertEqual(app.vault_source(catalog[0]["id"])["id"], "10")
 
     def test_idle_playback_session_is_stopped(self):
         process = mock.Mock()

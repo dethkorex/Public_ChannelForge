@@ -14,13 +14,13 @@ if (-not $ffmpeg) { throw "The real FFmpeg binary was not found (a Chocolatey sh
 $ffprobe = Get-Item (Join-Path $ffmpeg.DirectoryName "ffprobe.exe") -ErrorAction SilentlyContinue
 if (-not $ffprobe) { throw "ffprobe.exe was not found beside FFmpeg. Install the complete FFmpeg package and run this script again." }
 Write-Host "Bundling FFmpeg from $($ffmpeg.FullName) ($([math]::Round($ffmpeg.Length / 1MB, 1)) MB)"
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Creator --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.FullName);." --add-binary "$($ffprobe.FullName);." Public_ChannelForge.py
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_TV --add-data "web\hls.min.js;web" ChannelForge_TV.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Creator --icon "assets\channel-forge-creator.ico" --add-data "assets;assets" --add-data "web;web" --add-data "plugins;plugins" --add-binary "$($ffmpeg.FullName);." --add-binary "$($ffprobe.FullName);." Public_ChannelForge.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_TV --icon "assets\channel-forge-tv.ico" --add-data "web\hls.min.js;web" --add-data "assets\channel-forge-tv.png;assets" ChannelForge_TV.py
 
 $payload = Join-Path $root "installer\payload"
 New-Item -ItemType Directory -Force -Path $payload | Out-Null
 Copy-Item -Force (Join-Path $root "dist\ChannelForge_Creator.exe") (Join-Path $payload "ChannelForge_Creator.exe")
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Creator_Setup --add-data "installer\payload;payload" installer\windows_installer.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Creator_Setup --icon "assets\channel-forge-creator.ico" --add-data "installer\payload;payload" --add-data "assets\channel-forge-creator-installer.png;assets" installer\windows_installer.py
 
 $release = Join-Path $root "release"
 New-Item -ItemType Directory -Force -Path $release | Out-Null

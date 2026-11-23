@@ -28,7 +28,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.3.3"
+VERSION = "3.4.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -49,12 +49,14 @@ def app_dir() -> Path:
 DATA_DIR = app_dir()
 CONFIG_FILE = DATA_DIR / "config.json"
 CHANNELS_FILE = DATA_DIR / "channels.json"
+VAULT_CATALOG_FILE = DATA_DIR / "rewind-cinema.json"
 EXPORT_DIR = DATA_DIR / "exports"
 PLUGINS_DIR = DATA_DIR / "plugins"
 ASSETS_DIR = DATA_DIR / "assets"
 BACKUP_DIR = DATA_DIR / "backups"
 POSTER_CACHE_DIR = DATA_DIR / "poster-cache"
 WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
+CREATOR_ICON = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets" / "channel-forge-creator.png"
 LOCK = threading.RLock()
 HLS_PROXY: dict[str, tuple[str, float]] = {}
 UPDATE_JOBS: dict[str, dict] = {}
@@ -693,6 +695,7 @@ def poll_plex_signin(pin_id: int) -> dict:
     updated["plex_profile"] = plex_profile(root)
     atomic_json(CONFIG_FILE, updated)
     generate_exports()
+    sync_plex_movies_async()
     return {"complete": True, "config": config(True)}
 
 
@@ -728,6 +731,7 @@ def plex_items(section: str) -> list[dict]:
             "duration_ms": int(node.get("duration", "1800000") or 1800000),
             "key": node.get("key", f"/library/metadata/{rating_key}"),
             "thumb": node.get("thumb", ""),
+            "series_thumb": node.get("grandparentThumb", ""),
             "summary": node.get("summary", "")[:600],
             "content_rating": node.get("contentRating", ""),
             "rating": node.get("rating", ""),
@@ -740,6 +744,37 @@ def plex_items(section: str) -> list[dict]:
             "audio_codec": media_node.get("audioCodec", "") if media_node is not None else "",
         })
     return result
+
+
+def refresh_plex_movie_catalog() -> dict:
+    """Cache every playable Plex movie for Rewind Cinema."""
+    movies = []
+    for library in plex_libraries():
+        if library.get("type") != "movie":
+            continue
+        for item in plex_items(str(library["key"])):
+            movies.append({**item, "source": "plex", "section": str(library["key"]), "library": library.get("title", "Movies")})
+    payload = {"updated_at": datetime.now(timezone.utc).isoformat(), "items": movies}
+    atomic_json(VAULT_CATALOG_FILE, payload)
+    return {"movies": len(movies), "updated_at": payload["updated_at"]}
+
+
+def cached_plex_movies() -> list[dict]:
+    payload = load_json(VAULT_CATALOG_FILE, {})
+    items = payload.get("items", []) if isinstance(payload, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def sync_plex_movies_async() -> None:
+    if not config().get("plex_token"):
+        return
+    def worker() -> None:
+        try:
+            result = refresh_plex_movie_catalog()
+            print(f'Rewind Cinema indexed {result["movies"]} Plex movies.')
+        except Exception as exc:
+            print(f"Rewind Cinema sync failed: {exc}")
+    threading.Thread(target=worker, daemon=True, name="channel-forge-rewind-sync").start()
 
 
 def all_libraries() -> list[dict]:
@@ -1302,9 +1337,10 @@ def vault_item_id(item: dict) -> str:
 def vault_items() -> list[dict]:
     result, seen = [], set()
     base = server_base()
-    for channel in channels():
-        section = str(channel.get("section", ""))
-        for item in channel.get("items", []):
+    sources = [(str(item.get("section", "")), [item]) for item in cached_plex_movies()]
+    sources.extend((str(channel.get("section", "")), channel.get("items", [])) for channel in channels())
+    for section, items in sources:
+        for item in items:
             item_id = vault_item_id(item)
             if item_id in seen:
                 continue
@@ -1326,6 +1362,9 @@ def vault_items() -> list[dict]:
 
 
 def vault_source(item_id: str) -> dict:
+    for item in cached_plex_movies():
+        if vault_item_id(item) == item_id:
+            return item
     for channel in channels():
         for item in channel.get("items", []):
             if vault_item_id(item) == item_id:
@@ -1571,6 +1610,7 @@ class Handler(BaseHTTPRequestHandler):
                     updated["plex_profile"] = {}
                 atomic_json(CONFIG_FILE, updated)
                 generate_exports()
+                sync_plex_movies_async()
                 self.send_json(200, {"ok": True, "config": config(True)})
             elif parsed.path == "/api/plex/test":
                 old = config()
@@ -1581,6 +1621,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"ok": True, "profile": plex_profile(root), "libraries": len(libraries_root.findall("Directory"))})
             elif parsed.path == "/api/plex/signin/start":
                 self.send_json(200, start_plex_signin())
+            elif parsed.path == "/api/rewind/refresh":
+                self.send_json(200, refresh_plex_movie_catalog())
             elif parsed.path == "/api/local/libraries":
                 self.send_json(200, {"library": save_local_library(str(payload.get("name", "")), str(payload.get("path", "")))})
             elif parsed.path == "/api/directory/publish":
@@ -1712,12 +1754,44 @@ def main() -> None:
     threading.Thread(target=reap_idle_sessions, daemon=True, name="channel-forge-idle-reaper").start()
     if not args.no_browser and sys.platform == "win32":
         import webview
+        import ctypes
+        import pystray
+        from PIL import Image
         thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server")
         thread.start()
-        webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(1100, 720), background_color="#08111f")
+        window = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(1100, 720), background_color="#08111f")
+        state = {"quitting": False, "notified": False}
+        tray: pystray.Icon | None = None
+
+        def open_window(_icon=None, _item=None) -> None:
+            window.show()
+
+        def exit_application(_icon=None, _item=None) -> None:
+            state["quitting"] = True
+            if tray:
+                tray.stop()
+            window.destroy()
+
+        def minimize_to_tray(*_event) -> bool:
+            if state["quitting"]:
+                return True
+            window.hide()
+            if not state["notified"]:
+                state["notified"] = True
+                ctypes.windll.user32.MessageBoxW(0, "ChannelForge Creator is still hosting your channels.\n\nUse its system-tray icon to reopen it or choose Exit to take the server offline.", "ChannelForge Creator is still running", 0x40)
+            return False
+
+        window.events.closing += minimize_to_tray
+        tray = pystray.Icon("ChannelForge Creator", Image.open(CREATOR_ICON), "ChannelForge Creator — hosting channels", pystray.Menu(
+            pystray.MenuItem("Open ChannelForge Creator", open_window, default=True),
+            pystray.MenuItem("Exit and stop channels", exit_application),
+        ))
+        tray.run_detached()
         try:
             webview.start(debug=False)
         finally:
+            if tray:
+                tray.stop()
             server.shutdown()
             server.server_close()
         return

@@ -11,24 +11,46 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 APP = "ChannelForge_Creator"
-ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-PAYLOAD = ROOT / "payload" / f"{APP}.exe"
+BUNDLED = hasattr(sys, "_MEIPASS")
+ROOT = Path(sys._MEIPASS) if BUNDLED else Path(__file__).resolve().parents[1]
+PAYLOAD = (ROOT / "payload" if BUNDLED else ROOT / "installer" / "payload") / f"{APP}.exe"
+ICON = ROOT / "assets" / "channel-forge-creator-installer.png"
 
 
 class Installer(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f"{APP} Setup")
-        self.geometry("620x410")
+        self.title("ChannelForge Creator Setup")
+        self.geometry("700x530")
         self.resizable(False, False)
+        self.configure(background="#08111f")
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TFrame", background="#101827")
+        style.configure("TLabel", background="#101827", foreground="#eaf2ff", font=("Segoe UI", 10))
+        style.configure("TCheckbutton", background="#101827", foreground="#eaf2ff", font=("Segoe UI", 10))
+        style.map("TCheckbutton", background=[("active", "#101827")], foreground=[("active", "#67e8f9")])
+        style.configure("TButton", background="#173456", foreground="#ffffff", padding=(14, 8), font=("Segoe UI", 10, "bold"))
+        style.map("TButton", background=[("active", "#1f5d88"), ("disabled", "#263342")])
+        self.brand_image = tk.PhotoImage(file=str(ICON))
+        self.iconphoto(True, self.brand_image)
+        banner = tk.Frame(self, background="#08111f", height=150)
+        banner.pack(fill="x")
+        banner.pack_propagate(False)
+        tk.Label(banner, image=self.brand_image, background="#08111f").pack(side="left", padx=(28, 18), pady=14)
+        brand = tk.Frame(banner, background="#08111f")
+        brand.pack(side="left", fill="y", pady=18)
+        tk.Label(brand, text="CHANNELFORGE", background="#08111f", foreground="#54e7ff", font=("Segoe UI", 21, "bold")).pack(anchor="w")
+        tk.Label(brand, text="CREATOR  •  PUBLIC EDITION", background="#08111f", foreground="#b7c7dc", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(2, 0))
+        tk.Label(brand, text="Build and host your own live TV channels", background="#08111f", foreground="#ffffff", font=("Segoe UI", 10)).pack(anchor="w", pady=(10, 0))
         default = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Programs" / APP
         self.destination = tk.StringVar(value=str(default))
         self.shortcut = tk.BooleanVar(value=True)
         self.autostart = tk.BooleanVar(value=True)
         self.page = 0
-        self.body = ttk.Frame(self, padding=28)
+        self.body = ttk.Frame(self, padding=(32, 22))
         self.body.pack(fill="both", expand=True)
-        self.footer = ttk.Frame(self, padding=(28, 8, 28, 22))
+        self.footer = ttk.Frame(self, padding=(32, 8, 32, 22))
         self.footer.pack(fill="x")
         self.back = ttk.Button(self.footer, text="Back", command=self.previous)
         self.back.pack(side="left")
@@ -44,17 +66,17 @@ class Installer(tk.Tk):
         self.clear()
         self.back.configure(state="normal" if self.page else "disabled")
         if self.page == 0:
-            ttk.Label(self.body, text="Welcome to ChannelForge Creator", font=("Segoe UI", 20, "bold")).pack(anchor="w", pady=(18, 12))
+            ttk.Label(self.body, text="Welcome to ChannelForge Creator", font=("Segoe UI", 20, "bold"), foreground="#67e8f9").pack(anchor="w", pady=(8, 12))
             ttk.Label(self.body, text="Create personal TV channels from local folders, Plex, or both.\n\nThis public build contains no private APIs, artwork, presets, or user data.", wraplength=530).pack(anchor="w")
         elif self.page == 1:
-            ttk.Label(self.body, text="Choose an install folder", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(8, 18))
+            ttk.Label(self.body, text="Choose an install folder", font=("Segoe UI", 16, "bold"), foreground="#67e8f9").pack(anchor="w", pady=(8, 18))
             row = ttk.Frame(self.body); row.pack(fill="x")
             ttk.Entry(row, textvariable=self.destination).pack(side="left", fill="x", expand=True)
             ttk.Button(row, text="Browse…", command=self.browse).pack(side="left", padx=(8, 0))
             ttk.Checkbutton(self.body, text="Create a Desktop shortcut", variable=self.shortcut).pack(anchor="w", pady=(24, 5))
             ttk.Checkbutton(self.body, text="Start automatically when I sign in", variable=self.autostart).pack(anchor="w")
         else:
-            ttk.Label(self.body, text="Ready to install", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(8, 18))
+            ttk.Label(self.body, text="Ready to install", font=("Segoe UI", 16, "bold"), foreground="#67e8f9").pack(anchor="w", pady=(8, 18))
             ttk.Label(self.body, text=f"Install to:\n{self.destination.get()}\n\nAfter launch, add local media folders, connect Plex, or use both.", wraplength=530).pack(anchor="w")
             self.next.configure(text="Install")
 

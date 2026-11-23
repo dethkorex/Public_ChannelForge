@@ -12,6 +12,8 @@ Version 3.2 adds three public components without changing the owner's private Ch
 
 Publishing remains opt-in because channel names and stream endpoints may be private. The directory never receives Plex credentials, local filesystem paths, media databases, or video files. A creator's ChannelForge server must have a public HTTPS URL while viewers watch; the hosted directory removes the need for the project owner to run a separate discovery server, but it is not a video relay or CDN.
 
+Viewers never need Plex: ChannelForge TV talks only to the creator's published ChannelForge HTTPS endpoint. Plex is an optional source used privately by ChannelForge Creator. The public endpoint should be supplied by a privacy-preserving HTTPS tunnel or relay so viewers are not given the creator's home IP address. A tunnel/relay and the hosted directory must be deployed before worldwide playback is available; installing the desktop apps alone cannot create a global video CDN.
+
 Source and deployment instructions are in [`directory/`](directory/), [`tv/firetv/`](tv/firetv/), and [`tv/roku/`](tv/roku/). Tagged releases build the installable Fire TV APK and Roku ZIP automatically.
 
 Version 3 introduces the studio workspace inspired by the private ChannelForge manager: a fixed sidebar and status bar, overview metrics and live lineup, dedicated searchable poster library, draggable channel ordering, a four-step channel builder, expanded ordered/shuffle/marathon/franchise modes, branding and guide-artwork workspaces, system health cards, and automatic credential-free configuration backups. Private artwork, private APIs, Fish Audio, and ErsatzTV-specific operations are intentionally not copied.
@@ -30,7 +32,7 @@ The built-in **Asset Studio** creates original channel logos, guide backgrounds,
 
 Every installation also includes 24 coordinated starter assets: logos, guide/player backgrounds, and corner bugs across Classic TV, Neon Night, Cinema, Kids Pop, Sports Arena, News Desk, Spooky, and Minimal themes. These are original neutral assets created for the public edition. Users can assign all three asset types while creating a channel, then replace them with generated or uploaded artwork later.
 
-The **Updates** screen automatically checks the official GitHub Releases feed, compares versions, downloads the correct platform installer, and verifies its published SHA-256 checksum. A live progress display reports the download stage, percentage, transferred bytes, verification, and any error. Windows can open the verified setup wizard directly; Linux users receive an explicit “installation required” state, the verified Debian, Arch/Omarchy, or portable package, and a copyable install command. The page detects a restarted server, reloads itself, and updates both version labels automatically. ChannelForge never silently installs an update without confirmation.
+Both native apps check the official GitHub Releases feed when they launch. When a newer release exists, the user is notified immediately and can approve an automatic download. Creator and ChannelForge TV show live download progress and verify the published SHA-256 checksum before offering the installer or executable. Windows Creator opens the verified setup wizard; Linux users receive an explicit “installation required” state, the verified Debian, Arch/Omarchy, or portable package, and a copyable install command. ChannelForge never silently installs or launches an update without confirmation.
 
 This repository is the sanitized public edition. It contains **no private API credentials, Plex tokens, personal channel presets, media databases, logs, backups, or custom artwork** from the original ChannelForge installation.
 
@@ -42,10 +44,14 @@ The interface and asset workflow remain part of ChannelForge. Only the original 
 2. Run it and choose the install folder, Desktop shortcut, and optional startup shortcut.
 3. `ChannelForge_Creator.exe` opens as a dedicated desktop application window and starts its TV server at `http://127.0.0.1:8787` inside the same process.
 4. On first launch, choose **Add a local media folder**, **Sign in with Plex**, or configure both.
-5. Open **Channels**, create a channel, choose any configured library, and select titles.
+5. Open **Channels**, create a channel, choose any configured library, and select movies or entire TV shows. Selecting a show adds every playable episode in season/episode order.
 6. Open **Guide exports** to copy the hosted XMLTV and M3U URLs into your DVR, tuner client, or IPTV player.
 
-Leave the Public ChannelForge application open while viewers use its channels. The window hosts the XMLTV guide, M3U playlist, artwork, and on-demand HLS streams; closing it deliberately takes that creator's channels offline. `ChannelForge_TV.exe` is a separate native-window viewer for watching published studios and does not open the default browser.
+Leave ChannelForge Creator running while viewers use its channels. It hosts the XMLTV guide, M3U playlist, artwork, and on-demand HLS streams. `ChannelForge_TV.exe` is a separate native-window viewer for watching published studios and does not open the default browser.
+
+On Windows, closing the Creator window minimizes it to the notification area so hosting continues. The first close displays a reminder. Use the tray icon to reopen ChannelForge Creator or choose **Exit and stop channels** to shut down XMLTV, M3U, and playback hosting.
+
+The setup wizard and installed executables use separate ChannelForge Creator and ChannelForge TV icons. The setup wizard includes a dark ChannelForge banner instead of the default plain white Tk appearance.
 
 Windows may show a SmartScreen warning because community builds are not code-signed. Verify the SHA-256 checksum shown in the GitHub release before running the installer.
 
