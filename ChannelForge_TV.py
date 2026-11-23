@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-VERSION = "3.5.3"
+VERSION = "3.5.4"
 DIRECTORY = "https://directory.channelforge.tv/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"

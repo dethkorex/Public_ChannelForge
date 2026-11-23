@@ -30,7 +30,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.3"
+VERSION = "3.5.4"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -73,6 +73,7 @@ TUNNEL_LOCK = threading.RLock()
 TUNNEL_PROCESS: subprocess.Popen | None = None
 TUNNEL_URL = ""
 APP_WINDOW = None
+UPDATE_EXITING = False
 DEFAULT_ASSET_THEMES = {
     "kids": ("Kids Club", "#ffea3d", "#ff5ebc", "star"),
     "anime": ("Anime Pulse", "#ff4d7d", "#6de8ff", "anime"),
@@ -236,6 +237,15 @@ def launch_verified_windows_update(installer: str) -> None:
     subprocess.Popen(command, cwd=str(Path(installer).parent), creationflags=0x08000000 if sys.platform == "win32" else 0)
 
 
+def exit_for_update(shutdown) -> None:
+    """Release the web server, tray host, and executable before replacement."""
+    global UPDATE_EXITING
+    UPDATE_EXITING = True
+    shutdown()
+    if APP_WINDOW is not None:
+        APP_WINDOW.destroy()
+
+
 def start_update_job(launch: bool, shutdown) -> str:
     job_id = secrets.token_urlsafe(18)
     with LOCK:
@@ -251,8 +261,8 @@ def start_update_job(launch: bool, shutdown) -> str:
             with LOCK:
                 UPDATE_JOBS[job_id].update({"status": "complete", "result": result, "stage": "complete", "percent": 100})
             if launch and result["can_launch"]:
-                threading.Timer(1.5, lambda: launch_verified_windows_update(result["path"])).start()
-                threading.Timer(4.0, shutdown).start()
+                threading.Timer(0.8, lambda: launch_verified_windows_update(result["path"])).start()
+                threading.Timer(1.5, lambda: exit_for_update(shutdown)).start()
         except Exception as exc:
             with LOCK:
                 UPDATE_JOBS[job_id].update({"status": "error", "stage": "error", "error": str(exc)})
@@ -2151,7 +2161,7 @@ class Handler(BaseHTTPRequestHandler):
                 if payload.get("launch") and result["can_launch"]:
                     installer = result["path"]
                     threading.Timer(0.8, lambda: launch_verified_windows_update(installer)).start()
-                    threading.Timer(2.0, self.server.shutdown).start()
+                    threading.Timer(1.5, lambda: exit_for_update(self.server.shutdown)).start()
             elif parsed.path == "/api/update/start":
                 self.send_json(202, {"job_id": start_update_job(bool(payload.get("launch")), self.server.shutdown)})
             elif parsed.path.startswith("/api/tools/"):
@@ -2300,7 +2310,7 @@ def main() -> None:
             window.destroy()
 
         def minimize_to_tray(*_event) -> bool:
-            if state["quitting"]:
+            if state["quitting"] or UPDATE_EXITING:
                 return True
             window.hide()
             if not state["notified"]:

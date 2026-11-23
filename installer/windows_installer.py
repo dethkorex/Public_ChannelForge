@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import sys
@@ -110,6 +111,24 @@ def silent_update_target(arguments: list[str] | None = None) -> tuple[Path, int,
     return target, wait_pid, product
 
 
+def stop_locked_channel_forge_apps(targets: list[Path]) -> None:
+    """Stop only ChannelForge processes running from the exact install paths."""
+    if sys.platform != "win32":
+        return
+    environment = os.environ.copy()
+    environment["CHANNELFORGE_UPDATE_TARGETS"] = json.dumps([str(path.resolve()).lower() for path in targets])
+    script = (
+        "$targets=ConvertFrom-Json $env:CHANNELFORGE_UPDATE_TARGETS;"
+        "Get-CimInstance Win32_Process | Where-Object {"
+        "$_.ExecutablePath -and ($targets -contains $_.ExecutablePath.ToLower())"
+        "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        check=False, env=environment, creationflags=0x08000000, timeout=20,
+    )
+
+
 def apply_silent_update(target: Path, wait_pid: int, product: str | None = None) -> None:
     """Replace both installed apps after they exit, then reopen the app the user updated."""
     product = product or target_product(target)
@@ -120,7 +139,9 @@ def apply_silent_update(target: Path, wait_pid: int, product: str | None = None)
             replacement = installed.with_name(installed.name + ".updating")
             shutil.copy2(payload_for(key), replacement)
             replacements.append((key, installed, replacement))
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + 120
+    force_close_at = time.monotonic() + 8
+    force_close_attempted = False
     last_error: Exception | None = None
     pending = list(replacements)
     while pending and time.monotonic() < deadline:
@@ -134,6 +155,9 @@ def apply_silent_update(target: Path, wait_pid: int, product: str | None = None)
                 still_pending.append((key, installed, replacement))
         pending = still_pending
         if pending:
+            if not force_close_attempted and time.monotonic() >= force_close_at:
+                force_close_attempted = True
+                stop_locked_channel_forge_apps([installed for _key, installed, _replacement in pending])
             time.sleep(0.5)
     if not pending:
         subprocess.Popen([str(target)], cwd=str(target.parent))
@@ -258,6 +282,23 @@ class Installer(tk.Tk):
             for name in legacy_names:
                 (root / name).unlink(missing_ok=True)
 
+    def clean_legacy_desktop_files(self, installed_targets: list[Path]):
+        desktop = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop"
+        keep = {path.resolve() for path in installed_targets}
+        obsolete = [desktop / name for name in (
+            "ChannelForge_Creator.exe", "ChannelForge_TV.exe", "Public_ChannelForge.exe",
+            "Public ChannelForge.exe", "ChannelForge.exe",
+        )]
+        old_apps = [path for path in obsolete if path.exists() and path.resolve() not in keep]
+        if old_apps:
+            stop_locked_channel_forge_apps(old_apps)
+            time.sleep(0.5)
+        for path in old_apps:
+            path.unlink(missing_ok=True)
+        if not any(path.parent.resolve() == desktop.resolve() for path in installed_targets):
+            for name in ("channel-forge-creator.ico", "channel-forge-tv.ico"):
+                (desktop / name).unlink(missing_ok=True)
+
     def configure_autostart(self, target: Path):
         startup_shortcut = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "ChannelForge Creator.lnk"
         startup_shortcut.unlink(missing_ok=True)
@@ -292,6 +333,7 @@ class Installer(tk.Tk):
                     desktop = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop" / f"{definition['name']}.lnk"
                     self.shortcut_file(desktop, target, installed_icon)
                 targets[key] = target
+            self.clean_legacy_desktop_files(list(targets.values()))
             self.configure_autostart(targets["creator"])
             messagebox.showinfo("Installation complete", "ChannelForge Creator and ChannelForge TV are installed together. Both shortcuts are ready on your Desktop.")
             subprocess.Popen([str(targets["creator"])], cwd=str(destination))

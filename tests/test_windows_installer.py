@@ -77,6 +77,17 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(creator.read_bytes(), b"new-creator")
         self.assertEqual(tv.read_bytes(), b"new-tv")
 
+    def test_silent_updater_closes_only_exact_installed_app_paths(self):
+        source = (Path(__file__).parents[1] / "installer" / "windows_installer.py").read_text(encoding="utf-8")
+        self.assertIn("stop_locked_channel_forge_apps", source)
+        self.assertIn("$_.ExecutablePath.ToLower()", source)
+        self.assertIn("force_close_at", source)
+
+    def test_regular_installer_removes_obsolete_desktop_executables(self):
+        source = (Path(__file__).parents[1] / "installer" / "windows_installer.py").read_text(encoding="utf-8")
+        self.assertIn("clean_legacy_desktop_files", source)
+        self.assertIn('"ChannelForge_Creator.exe", "ChannelForge_TV.exe"', source)
+
 
 if __name__ == "__main__":
     unittest.main()
