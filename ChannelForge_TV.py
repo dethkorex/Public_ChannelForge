@@ -19,7 +19,7 @@ from pathlib import Path
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.15"
+VERSION = "3.5.16"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -909,6 +909,7 @@ GUIDE_LAYOUT_CSS = r'''
 @keyframes buffer-spin{to{transform:rotate(360deg)}}
 .player-bug{position:fixed;z-index:11;top:18px;left:19px;display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid #3bebfb;border-radius:7px;background:#0b1225cc;color:#c8f7fc;font-size:12px;font-weight:700;pointer-events:none}
 .player-bug img{width:43px;height:34px;object-fit:contain}
+#player-buffer[hidden],#player-bug[hidden],.buffer-spinner[hidden]{display:none!important}
 .guide-dock .player-buffer,.section-dock .player-buffer{position:absolute}
 .guide-dock .player-bug,.section-dock .player-bug{display:none}
 .guide-dock .player-hud{display:none!important}
