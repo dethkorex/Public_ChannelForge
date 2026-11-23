@@ -46,7 +46,7 @@ $payload = Join-Path $root "installer\payload"
 New-Item -ItemType Directory -Force -Path $payload | Out-Null
 Copy-Item -Force (Join-Path $root "dist\ChannelForge_Creator.exe") (Join-Path $payload "ChannelForge_Creator.exe")
 Copy-Item -Force (Join-Path $root "dist\ChannelForge_TV.exe") (Join-Path $payload "ChannelForge_TV.exe")
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Setup --icon "assets\channel-forge-creator.ico" --add-data "installer\payload\ChannelForge_Creator.exe;payload" --add-data "installer\payload\ChannelForge_TV.exe;payload" --add-data "assets\channel-forge-creator-installer.png;assets" --add-data "assets\channel-forge-tv.png;assets" --add-data "assets\channel-forge-creator.ico;assets" --add-data "assets\channel-forge-tv.ico;assets" installer\windows_installer.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Setup --paths "$root" --icon "assets\channel-forge-creator.ico" --add-data "installer\payload\ChannelForge_Creator.exe;payload" --add-data "installer\payload\ChannelForge_TV.exe;payload" --add-data "assets\channel-forge-creator-installer.png;assets" --add-data "assets\channel-forge-tv.png;assets" --add-data "assets\channel-forge-creator.ico;assets" --add-data "assets\channel-forge-tv.ico;assets" installer\windows_installer.py
 
 $release = $releaseRoot
 New-Item -ItemType Directory -Force -Path $release | Out-Null

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import http.server
-import hashlib
 import json
 import os
 import re
@@ -14,12 +13,14 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-VERSION = "3.5.6"
+from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
+
+VERSION = "3.5.7"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
 GITHUB = "https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"
-UPDATE_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "ChannelForge_TV" / "updates"
+UPDATE_DIR = windows_update_cache()
 UPDATE_JOBS: dict[str, dict] = {}
 UPDATE_LOCK = threading.RLock()
 APP_WINDOW = None
@@ -113,7 +114,7 @@ def start_tv_update() -> str:
             if not release["update_available"]:
                 raise ValueError("ChannelForge TV is already up to date.")
             assets = release["assets"]
-            asset_name = "ChannelForge_TV_Setup.exe" if "ChannelForge_TV_Setup.exe" in assets else "ChannelForge_TV.exe"
+            asset_name = windows_setup_asset(assets, "ChannelForge_TV_Setup.exe")
             checksum_name = "SHA256SUMS.txt"
             if asset_name not in assets or checksum_name not in assets:
                 raise ValueError("The GitHub release is missing the TV app or its checksum.")
@@ -121,29 +122,23 @@ def start_tv_update() -> str:
             checksum_request = urllib.request.Request(approved_download(assets[checksum_name]), headers={"User-Agent": f"ChannelForge-TV/{VERSION}"})
             with urllib.request.urlopen(checksum_request, timeout=30) as response:
                 checksum_text = response.read(1_000_000).decode("utf-8", "replace")
-            expected = next((line.split()[0].lower() for line in checksum_text.splitlines() if line.strip().endswith(asset_name)), "")
-            if len(expected) != 64:
-                raise ValueError("The TV app checksum was not published correctly.")
-            UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-            suffix = "Setup" if asset_name.endswith("_Setup.exe") else "Portable"
-            destination = UPDATE_DIR / f"ChannelForge_TV-{suffix}-v{release['latest_version']}.exe"
-            temporary = destination.with_suffix(".downloading")
-            request = urllib.request.Request(approved_download(assets[asset_name]), headers={"User-Agent": f"ChannelForge-TV/{VERSION}"})
-            digest, downloaded = hashlib.sha256(), 0
-            with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as output:
-                total = int(response.headers.get("Content-Length", "0") or 0)
-                if total > 500_000_000:
-                    raise ValueError("The update file is unexpectedly large.")
-                while chunk := response.read(1024 * 1024):
-                    downloaded += len(chunk)
-                    if downloaded > 500_000_000:
-                        raise ValueError("The update file exceeded the safety limit.")
-                    output.write(chunk); digest.update(chunk); report("downloading", downloaded, total)
-            report("verifying", downloaded, downloaded)
-            if digest.hexdigest().lower() != expected:
-                temporary.unlink(missing_ok=True)
-                raise ValueError("The downloaded TV app failed SHA-256 verification.")
-            temporary.replace(destination)
+            expected = published_hash(checksum_text, asset_name)
+
+            def download_setup(temporary):
+                request = urllib.request.Request(approved_download(assets[asset_name]), headers={"User-Agent": f"ChannelForge-TV/{VERSION}"})
+                downloaded = 0
+                with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+                    total = int(response.headers.get("Content-Length", "0") or 0)
+                    if total > 200_000_000:
+                        raise ValueError("The update file is unexpectedly large.")
+                    while chunk := response.read(1024 * 1024):
+                        downloaded += len(chunk)
+                        if downloaded > 200_000_000:
+                            raise ValueError("The update file exceeded the safety limit.")
+                        output.write(chunk)
+                        report("downloading", downloaded, total)
+
+            destination = verified_windows_setup(UPDATE_DIR, release["latest_version"], expected, download_setup, report)
             with UPDATE_LOCK:
                 UPDATE_JOBS[job_id].update({"status": "complete", "stage": "complete", "percent": 100, "result": {"version": release["latest_version"], "path": str(destination)}})
         except Exception as exc:
@@ -161,7 +156,7 @@ def launch_tv_update(job_id: str) -> None:
     if not path.is_file() or path.parent != UPDATE_DIR.resolve():
         raise ValueError("No verified ChannelForge TV update is ready.")
     command = [str(path)]
-    if getattr(sys, "frozen", False) and "setup" in path.name.lower():
+    if getattr(sys, "frozen", False):
         command.extend(["--silent-update", "--target-exe", str(Path(sys.executable).resolve()), "--wait-pid", str(os.getpid())])
         try:
             request = urllib.request.Request("http://127.0.0.1:8787/api/update/prepare", data=b"{}", method="POST", headers={"Content-Type": "application/json"})
@@ -441,6 +436,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def main():
     global APP_WINDOW
     import webview
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        threading.Thread(target=clean_windows_update_cache, args=(VERSION,), daemon=True).start()
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     url = f"http://127.0.0.1:{server.server_port}/"
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-tv-server")

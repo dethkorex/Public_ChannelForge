@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import os
 import json
+import errno
 import shutil
 import subprocess
 import sys
+import tempfile
 import tkinter as tk
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+
+from windows_distribution import sha256_file, windows_data
 
 try:
     import winreg
@@ -75,6 +80,8 @@ PRODUCT = PRODUCTS["suite"]
 PAYLOAD_ROOT = ROOT / "payload" if BUNDLED else ROOT / "installer" / "payload"
 BRAND_IMAGE = ROOT / "assets" / PRODUCT["image"]
 INSTALL_PRODUCT_KEYS = ("creator", "tv")
+LEGACY_PUBLIC_NAMES = ("Public_ChannelForge.exe", "Public ChannelForge.exe")
+LEGACY_SHORTCUTS = ("ChannelForge_Creator.lnk", "ChannelForge_TV.lnk", "Public ChannelForge.lnk", "Public_ChannelForge.lnk")
 
 
 def payload_for(key: str) -> Path:
@@ -87,7 +94,7 @@ def icon_for(key: str) -> Path:
 
 def target_product(target: Path) -> str:
     names = {f"{PRODUCTS[key]['app']}.exe".lower(): key for key in INSTALL_PRODUCT_KEYS}
-    names["public_channelforge.exe"] = "creator"
+    names.update((name.lower(), "creator") for name in LEGACY_PUBLIC_NAMES)
     key = names.get(target.name.lower())
     if not key:
         raise ValueError("The installed ChannelForge application could not be verified.")
@@ -106,7 +113,7 @@ def silent_update_target(arguments: list[str] | None = None) -> tuple[Path, int,
     except (ValueError, IndexError) as exc:
         raise ValueError("The in-place update request was incomplete.") from exc
     product = target_product(target)
-    if not target.is_file():
+    if not target.is_file() and not app_target(registered_installation() or target.parent, product).is_file():
         raise ValueError("The installed ChannelForge application could not be verified.")
     return target, wait_pid, product
 
@@ -129,16 +136,129 @@ def stop_locked_channel_forge_apps(targets: list[Path]) -> None:
     )
 
 
-def apply_silent_update(target: Path, wait_pid: int, product: str | None = None) -> None:
-    """Replace both installed apps after they exit, then reopen the app the user updated."""
-    product = product or target_product(target)
+def app_target(folder: Path, key: str) -> Path:
+    return folder / f"{PRODUCTS[key]['app']}.exe"
+
+
+def has_app(folder: Path, key: str) -> bool:
+    if app_target(folder, key).is_file():
+        return True
+    return key == "creator" and any((folder / name).is_file() for name in LEGACY_PUBLIC_NAMES)
+
+
+def desktop_folder() -> Path:
+    if winreg is not None:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
+                return Path(os.path.expandvars(winreg.QueryValueEx(key, "Desktop")[0]))
+        except OSError:
+            pass
+    return Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop"
+
+
+def start_menu() -> Path:
+    return Path(os.environ.get("APPDATA", Path.home())) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+
+
+def default_installation() -> Path:
+    return windows_data() / "Programs" / "ChannelForge"
+
+
+def registered_installation() -> Path | None:
+    try:
+        folder = Path(json.loads((windows_data() / "ChannelForge" / "installation.json").read_text(encoding="utf-8"))["folder"])
+        if folder.is_absolute() and any(app_target(folder, key).is_file() for key in INSTALL_PRODUCT_KEYS):
+            return folder.resolve()
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def discovered_installation() -> Path | None:
+    registered = registered_installation()
+    if registered:
+        return registered
+    if any(app_target(default_installation(), key).is_file() for key in INSTALL_PRODUCT_KEYS):
+        return default_installation().resolve()
+    if sys.platform != "win32":
+        return None
+    shortcuts = [start_menu() / f"{PRODUCTS[key]['name']}.lnk" for key in INSTALL_PRODUCT_KEYS]
+    if not any(path.is_file() for path in shortcuts):
+        return None
+    script = (
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;$w=New-Object -ComObject WScript.Shell;"
+        "ConvertFrom-Json $env:CHANNELFORGE_SHORTCUTS | ForEach-Object { "
+        "if(Test-Path -LiteralPath $_) { $w.CreateShortcut($_).TargetPath } }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True,
+            env={**os.environ, "CHANNELFORGE_SHORTCUTS": json.dumps([str(path) for path in shortcuts])},
+            text=True, encoding="utf-8", timeout=10, creationflags=0x08000000,
+        )
+        for line in result.stdout.splitlines():
+            target = Path(line.strip())
+            if not target.is_absolute() or not target.is_file() or target.parent.resolve() == desktop_folder().resolve():
+                continue
+            try:
+                target_product(target)
+            except ValueError:
+                continue
+            return target.parent.resolve()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+@contextmanager
+def installation_lock():
+    if sys.platform != "win32":
+        yield
+        return
+    import msvcrt
+
+    lock = windows_data() / "ChannelForge" / "installation.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+b") as handle:
+        deadline = time.monotonic() + 120
+        while True:
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.25)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def install_binaries(folder: Path, keys: tuple[str, ...]) -> bool:
+    folder.mkdir(parents=True, exist_ok=True)
     replacements = []
-    for key in INSTALL_PRODUCT_KEYS:
-        installed = target.parent / f"{PRODUCTS[key]['app']}.exe"
-        if installed.exists() or key == product:
-            replacement = installed.with_name(installed.name + ".updating")
-            shutil.copy2(payload_for(key), replacement)
-            replacements.append((key, installed, replacement))
+    try:
+        for key in keys:
+            installed = app_target(folder, key)
+            if installed.is_file() and sha256_file(installed) == sha256_file(payload_for(key)):
+                continue
+            with tempfile.NamedTemporaryFile(dir=folder, prefix=f".{installed.name}.", suffix=".updating", delete=False) as file:
+                staged = Path(file.name)
+            replacements.append((installed, staged))
+            shutil.copy2(payload_for(key), staged)
+        replace_binaries(replacements)
+        for key in keys:
+            shutil.copy2(icon_for(key), folder / PRODUCTS[key]["icon"])
+    finally:
+        for _installed, staged in replacements:
+            staged.unlink(missing_ok=True)
+    return bool(replacements)
+
+
+def replace_binaries(replacements: list[tuple[Path, Path]]) -> None:
     deadline = time.monotonic() + 120
     force_close_at = time.monotonic() + 8
     force_close_attempted = False
@@ -146,25 +266,137 @@ def apply_silent_update(target: Path, wait_pid: int, product: str | None = None)
     pending = list(replacements)
     while pending and time.monotonic() < deadline:
         still_pending = []
-        for key, installed, replacement in pending:
+        for installed, replacement in pending:
             try:
                 os.replace(replacement, installed)
-                shutil.copy2(icon_for(key), target.parent / PRODUCTS[key]["icon"])
             except PermissionError as exc:
                 last_error = exc
-                still_pending.append((key, installed, replacement))
+                still_pending.append((installed, replacement))
         pending = still_pending
         if pending:
             if not force_close_attempted and time.monotonic() >= force_close_at:
                 force_close_attempted = True
-                stop_locked_channel_forge_apps([installed for _key, installed, _replacement in pending])
+                stop_locked_channel_forge_apps([installed for installed, _replacement in pending])
             time.sleep(0.5)
-    if not pending:
-        subprocess.Popen([str(target)], cwd=str(target.parent))
-        return
-    for _key, _installed, replacement in replacements:
-        replacement.unlink(missing_ok=True)
-    raise ValueError(f"ChannelForge did not close in time to finish the update: {last_error or wait_pid}")
+    if pending:
+        raise ValueError(f"ChannelForge did not close in time to finish the update: {last_error}")
+
+
+def create_shortcut(location: Path, target: Path, icon: Path) -> None:
+    location.parent.mkdir(parents=True, exist_ok=True)
+    environment = {**os.environ, "CHANNELFORGE_SHORTCUT": str(location), "CHANNELFORGE_TARGET": str(target),
+                   "CHANNELFORGE_WORKDIR": str(target.parent), "CHANNELFORGE_ICON": f"{icon},0"}
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:CHANNELFORGE_SHORTCUT);"
+        "$s.TargetPath=$env:CHANNELFORGE_TARGET;$s.WorkingDirectory=$env:CHANNELFORGE_WORKDIR;"
+        "$s.IconLocation=$env:CHANNELFORGE_ICON;$s.Save()"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True, env=environment, creationflags=0x08000000)
+
+
+def clean_legacy_shortcuts() -> None:
+    for root in (desktop_folder(), start_menu(), start_menu() / "Startup"):
+        for name in LEGACY_SHORTCUTS:
+            (root / name).unlink(missing_ok=True)
+
+
+def clean_legacy_desktop_files(folder: Path, obsolete_folders: tuple[Path, ...] = (), include_desktop: bool = True) -> None:
+    desktop = desktop_folder().resolve()
+    names = ("ChannelForge_Creator.exe", "ChannelForge_TV.exe", *LEGACY_PUBLIC_NAMES)
+    roots = {directory.resolve() for directory in obsolete_folders}
+    if include_desktop:
+        roots.add(desktop)
+    old_apps = [root / name for root in roots if root != folder
+                for name in names if (root / name).is_file() and not (root / name).is_symlink()]
+    old_apps.extend(folder / name for name in LEGACY_PUBLIC_NAMES if (folder / name).is_file() and not (folder / name).is_symlink())
+    if old_apps:
+        stop_locked_channel_forge_apps(old_apps)
+        for path in old_apps:
+            for attempt in range(10):
+                try:
+                    path.unlink(missing_ok=True)
+                    break
+                except PermissionError:
+                    if attempt == 9:
+                        raise
+                    time.sleep(0.3)
+    for root in roots | {folder}:
+        for name in names:
+            (root / (name + ".updating")).unlink(missing_ok=True)
+    if desktop != folder and any(path.parent == desktop for path in old_apps):
+        for name in ("channel-forge-creator.ico", "channel-forge-tv.ico"):
+            (desktop / name).unlink(missing_ok=True)
+
+
+def configure_autostart(target: Path, enabled: bool | None) -> None:
+    startup_shortcut = start_menu() / "Startup" / "ChannelForge Creator.lnk"
+    previous_shortcut = startup_shortcut.is_file()
+    if winreg is not None:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            if enabled is None:
+                try:
+                    winreg.QueryValueEx(key, "ChannelForge Creator")
+                    enabled = True
+                except FileNotFoundError:
+                    enabled = previous_shortcut
+            if enabled:
+                winreg.SetValueEx(key, "ChannelForge Creator", 0, winreg.REG_SZ, f'"{target}"')
+            else:
+                try:
+                    winreg.DeleteValue(key, "ChannelForge Creator")
+                except FileNotFoundError:
+                    pass
+    startup_shortcut.unlink(missing_ok=True)
+
+
+def register_installation(folder: Path, keys: tuple[str, ...], desktop_shortcuts: bool, autostart: bool | None) -> None:
+    for key in keys:
+        target = app_target(folder, key)
+        icon = folder / PRODUCTS[key]["icon"]
+        shortcut = f"{PRODUCTS[key]['name']}.lnk"
+        create_shortcut(start_menu() / shortcut, target, icon)
+        if desktop_shortcuts:
+            create_shortcut(desktop_folder() / shortcut, target, icon)
+        else:
+            (desktop_folder() / shortcut).unlink(missing_ok=True)
+    if "creator" in keys:
+        configure_autostart(app_target(folder, "creator"), autostart)
+    clean_legacy_shortcuts()
+    marker = windows_data() / "ChannelForge" / "installation.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    staged = marker.with_suffix(".tmp")
+    staged.write_text(json.dumps({"folder": str(folder)}), encoding="utf-8")
+    staged.replace(marker)
+
+
+def apply_silent_update(target: Path, wait_pid: int, product: str | None = None) -> None:
+    """Update the registered suite, or migrate a legacy Desktop installation once."""
+    product = product or target_product(target)
+    with installation_lock():
+        source = target.parent.resolve()
+        desktop = desktop_folder().resolve()
+        downloads = (Path(os.environ.get("USERPROFILE", Path.home())) / "Downloads").resolve()
+        known = discovered_installation()
+        # A standalone viewer in its own folder can still be replaced in place.
+        # Desktop/Downloads copies belong in the installed suite folder.
+        loose = source in (desktop, downloads)
+        managed = bool(known or loose)
+        folder = known or (default_installation().resolve() if loose else source)
+        keys = tuple(key for key in INSTALL_PRODUCT_KEYS if (
+            key == product or any(has_app(root, key) for root in (folder, source, desktop))
+        ))
+        changed = install_binaries(folder, keys)
+        if managed:
+            desktop_shortcuts = source == desktop or any(
+                (desktop / f"{PRODUCTS[key]['name']}.lnk").is_file() for key in keys
+            )
+            register_installation(folder, keys, desktop_shortcuts, None)
+            clean_legacy_desktop_files(folder, (source,))
+        elif target != app_target(folder, product):
+            clean_legacy_desktop_files(folder, include_desktop=False)
+        if changed or target != app_target(folder, product):
+            subprocess.Popen([str(app_target(folder, product))], cwd=str(folder))
 
 
 class Installer(tk.Tk):
@@ -196,7 +428,7 @@ class Installer(tk.Tk):
         tk.Label(brand, text="CHANNELFORGE", background="#08111f", foreground="#54e7ff", font=("Segoe UI", 21, "bold")).pack(anchor="w")
         tk.Label(brand, text=PRODUCT["edition"], background="#08111f", foreground="#b7c7dc", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(2, 0))
         tk.Label(brand, text=PRODUCT["tagline"], background="#08111f", foreground="#ffffff", font=("Segoe UI", 10)).pack(anchor="w", pady=(10, 0))
-        default = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Programs" / "ChannelForge"
+        default = discovered_installation() or default_installation()
         self.destination = tk.StringVar(value=str(default))
         self.shortcut = tk.BooleanVar(value=True)
         self.autostart = tk.BooleanVar(value=bool(PRODUCT["autostart"]))
@@ -250,93 +482,16 @@ class Installer(tk.Tk):
             return
         self.install()
 
-    def shortcut_file(self, location: Path, target: Path, icon: Path):
-        location.parent.mkdir(parents=True, exist_ok=True)
-        environment = os.environ.copy()
-        environment.update({
-            "CHANNELFORGE_SHORTCUT": str(location),
-            "CHANNELFORGE_TARGET": str(target),
-            "CHANNELFORGE_WORKDIR": str(target.parent),
-            "CHANNELFORGE_ICON": f"{icon},0",
-        })
-        script = (
-            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:CHANNELFORGE_SHORTCUT);"
-            "$s.TargetPath=$env:CHANNELFORGE_TARGET;"
-            "$s.WorkingDirectory=$env:CHANNELFORGE_WORKDIR;"
-            "$s.IconLocation=$env:CHANNELFORGE_ICON;"
-            "$s.Save()"
-        )
-        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True, env=environment, creationflags=0x08000000)
-
-    def clean_legacy_shortcuts(self):
-        roots = [
-            Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop",
-            Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
-            Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup",
-        ]
-        legacy_names = {
-            "ChannelForge.lnk", "ChannelForge_Creator.lnk", "Public ChannelForge.lnk",
-            "Public_ChannelForge.lnk", "ChannelForge Creator.lnk", "ChannelForge TV.lnk",
-        }
-        for root in roots:
-            for name in legacy_names:
-                (root / name).unlink(missing_ok=True)
-
-    def clean_legacy_desktop_files(self, installed_targets: list[Path]):
-        desktop = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop"
-        keep = {path.resolve() for path in installed_targets}
-        obsolete = [desktop / name for name in (
-            "ChannelForge_Creator.exe", "ChannelForge_TV.exe", "Public_ChannelForge.exe",
-            "Public ChannelForge.exe", "ChannelForge.exe",
-        )]
-        old_apps = [path for path in obsolete if path.exists() and path.resolve() not in keep]
-        if old_apps:
-            stop_locked_channel_forge_apps(old_apps)
-            time.sleep(0.5)
-        for path in old_apps:
-            path.unlink(missing_ok=True)
-        if not any(path.parent.resolve() == desktop.resolve() for path in installed_targets):
-            for name in ("channel-forge-creator.ico", "channel-forge-tv.ico"):
-                (desktop / name).unlink(missing_ok=True)
-
-    def configure_autostart(self, target: Path):
-        startup_shortcut = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "ChannelForge Creator.lnk"
-        startup_shortcut.unlink(missing_ok=True)
-        if winreg is None:
-            return
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
-            if self.autostart.get():
-                winreg.SetValueEx(key, "ChannelForge Creator", 0, winreg.REG_SZ, f'"{target}"')
-            else:
-                try:
-                    winreg.DeleteValue(key, "ChannelForge Creator")
-                except FileNotFoundError:
-                    pass
-
     def install(self):
         try:
             destination = Path(self.destination.get()).expanduser().resolve()
-            destination.mkdir(parents=True, exist_ok=True)
-            self.clean_legacy_shortcuts()
-            for legacy in ("Public_ChannelForge.exe", "Public ChannelForge.exe", "ChannelForge.exe"):
-                (destination / legacy).unlink(missing_ok=True)
-            targets = {}
-            for key in INSTALL_PRODUCT_KEYS:
-                definition = PRODUCTS[key]
-                target = destination / f"{definition['app']}.exe"
-                installed_icon = destination / definition["icon"]
-                shutil.copy2(payload_for(key), target)
-                shutil.copy2(icon_for(key), installed_icon)
-                start_menu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / f"{definition['name']}.lnk"
-                self.shortcut_file(start_menu, target, installed_icon)
-                if self.shortcut.get():
-                    desktop = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop" / f"{definition['name']}.lnk"
-                    self.shortcut_file(desktop, target, installed_icon)
-                targets[key] = target
-            self.clean_legacy_desktop_files(list(targets.values()))
-            self.configure_autostart(targets["creator"])
-            messagebox.showinfo("Installation complete", "ChannelForge Creator and ChannelForge TV are installed together. Both shortcuts are ready on your Desktop.")
-            subprocess.Popen([str(targets["creator"])], cwd=str(destination))
+            with installation_lock():
+                previous = discovered_installation()
+                install_binaries(destination, INSTALL_PRODUCT_KEYS)
+                register_installation(destination, INSTALL_PRODUCT_KEYS, self.shortcut.get(), self.autostart.get())
+                clean_legacy_desktop_files(destination, (previous,) if previous else ())
+            messagebox.showinfo("Installation complete", "ChannelForge Creator and ChannelForge TV are installed together.")
+            subprocess.Popen([str(app_target(destination, "creator"))], cwd=str(destination))
             self.destroy()
         except Exception as exc:
             messagebox.showerror("Installation failed", str(exc))

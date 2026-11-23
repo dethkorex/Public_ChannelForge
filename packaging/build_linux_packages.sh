@@ -9,7 +9,7 @@ APP_ROOT="$WORK/app"
 
 rm -rf "$WORK" "$OUT"
 mkdir -p "$OUT" "$APP_ROOT/ChannelForge"
-cp "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$APP_ROOT/ChannelForge/"
+cp "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$APP_ROOT/ChannelForge/"
 cp -R "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$APP_ROOT/ChannelForge/"
 cp "$ROOT/scripts/install_linux.sh" "$APP_ROOT/ChannelForge/install.sh"
 cp "$ROOT/scripts/uninstall_linux.sh" "$APP_ROOT/ChannelForge/uninstall.sh"
@@ -20,7 +20,7 @@ cp "$OUT/ChannelForge-${VERSION}-linux-x64.tar.gz" "$OUT/Public_ChannelForge-${V
 
 DEB="$WORK/deb"
 mkdir -p "$DEB/DEBIAN" "$DEB/opt/public-channelforge" "$DEB/usr/bin" "$DEB/usr/share/applications" "$DEB/usr/lib/systemd/user"
-cp "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$DEB/opt/public-channelforge/"
+cp "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$DEB/opt/public-channelforge/"
 cp -R "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$DEB/opt/public-channelforge/"
 cat > "$DEB/DEBIAN/control" <<EOF
 Package: public-channelforge
@@ -78,7 +78,7 @@ dpkg-deb --root-owner-group --build "$DEB" "$OUT/Public_ChannelForge-${VERSION}-
 
 ARCH="$WORK/arch"
 mkdir -p "$ARCH/opt/public-channelforge" "$ARCH/usr/bin" "$ARCH/usr/share/applications" "$ARCH/usr/lib/systemd/user"
-cp "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$ARCH/opt/public-channelforge/"
+cp "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$ARCH/opt/public-channelforge/"
 cp -R "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$ARCH/opt/public-channelforge/"
 cp "$DEB/usr/bin/public-channelforge" "$ARCH/usr/bin/"
 cp "$DEB/usr/bin/channelforge-tv" "$ARCH/usr/bin/"

@@ -41,7 +41,7 @@ BIN_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$SYSTEMD_DIR"
-cp -R "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$ROOT/PLUGIN_DEVELOPMENT.md" "$APP_DIR/"
+cp -R "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$ROOT/PLUGIN_DEVELOPMENT.md" "$APP_DIR/"
 cat > "$BIN_DIR/public-channelforge" <<EOF
 #!/usr/bin/env bash
 exec python3 "$APP_DIR/Public_ChannelForge.py" "\$@"

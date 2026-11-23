@@ -1,12 +1,29 @@
 import unittest
 import tempfile
+import hashlib
+import os
 from pathlib import Path
 from unittest import mock
 
 from installer import windows_installer
+import windows_distribution
 
 
 class WindowsInstallerTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        environment = mock.patch.dict(os.environ, {
+            "USERPROFILE": str(self.root),
+            "LOCALAPPDATA": str(self.root / "Local"),
+            "APPDATA": str(self.root / "Roaming"),
+        })
+        registry = mock.patch.object(windows_installer, "winreg", None)
+        for patch in (environment, registry):
+            patch.start()
+            self.addCleanup(patch.stop)
+
     def test_creator_setup_selects_creator_branding(self):
         self.assertEqual(windows_installer.product_key("ChannelForge_Creator_Setup.exe"), "creator")
 
@@ -76,6 +93,66 @@ class WindowsInstallerTests(unittest.TestCase):
             windows_installer.apply_silent_update(tv, 44, "tv")
         self.assertEqual(creator.read_bytes(), b"new-creator")
         self.assertEqual(tv.read_bytes(), b"new-tv")
+
+    def test_desktop_update_migrates_both_apps_and_reuses_shortcuts(self):
+        desktop = self.root / "Desktop"
+        desktop.mkdir()
+        creator = desktop / "ChannelForge_Creator.exe"
+        tv = desktop / "ChannelForge_TV.exe"
+        unrelated = desktop / "ChannelForge.exe"
+        for path in (creator, tv, unrelated, desktop / "ChannelForge_Creator.lnk"):
+            path.write_bytes(b"old")
+        payload = self.root / "new.exe"
+        payload.write_bytes(b"new")
+        icon = self.root / "new.ico"
+        icon.write_bytes(b"icon")
+
+        def shortcut(path, target, _icon):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(target))
+
+        with mock.patch.object(windows_installer, "payload_for", return_value=payload), \
+             mock.patch.object(windows_installer, "icon_for", return_value=icon), \
+             mock.patch.object(windows_installer, "create_shortcut", side_effect=shortcut), \
+             mock.patch.object(windows_installer, "stop_locked_channel_forge_apps"), \
+             mock.patch.object(windows_installer.subprocess, "Popen") as launch:
+            windows_installer.apply_silent_update(creator, 44)
+            folder = windows_installer.default_installation()
+            windows_installer.apply_silent_update(folder / creator.name, 45)
+
+        self.assertEqual(windows_installer.registered_installation(), folder.resolve())
+        self.assertEqual((folder / creator.name).read_bytes(), b"new")
+        self.assertEqual((folder / tv.name).read_bytes(), b"new")
+        self.assertEqual((desktop / "ChannelForge TV.lnk").read_text(), str(folder / tv.name))
+        self.assertEqual(sorted(path.name for path in desktop.iterdir()), [
+            "ChannelForge Creator.lnk", "ChannelForge TV.lnk", "ChannelForge.exe",
+        ])
+        launch.assert_called_once_with([str(folder / creator.name)], cwd=str(folder))
+
+    def test_apps_share_verified_download_and_prune_only_old_updaters(self):
+        directory = windows_distribution.windows_update_cache()
+        setup = b"verified package"
+        checksum = hashlib.sha256(setup).hexdigest()
+        download = mock.Mock(side_effect=lambda path: path.write_bytes(setup))
+        report = mock.Mock()
+        first = windows_distribution.verified_windows_setup(directory, "3.5.7", checksum, download, report)
+        second = windows_distribution.verified_windows_setup(directory, "3.5.7", checksum, download, report)
+        self.assertEqual(first, second)
+        self.assertEqual(list(directory.iterdir()), [first])
+        self.assertEqual(download.call_count, 1)
+
+        old_tv = self.root / "Local" / "ChannelForge_TV" / "updates" / "ChannelForge_TV-Setup-v3.5.2.exe"
+        old_tv.parent.mkdir(parents=True)
+        old_tv.write_bytes(setup)
+        retained = directory / "ChannelForge_Setup-v3.5.8.exe"
+        retained.write_bytes(setup)
+        unrelated = directory / "notes.txt"
+        unrelated.write_text("keep")
+        windows_distribution.clean_windows_update_cache("3.5.7")
+        self.assertFalse(first.exists())
+        self.assertFalse(old_tv.exists())
+        self.assertTrue(retained.exists())
+        self.assertTrue(unrelated.exists())
 
     def test_silent_updater_closes_only_exact_installed_app_paths(self):
         source = (Path(__file__).parents[1] / "installer" / "windows_installer.py").read_text(encoding="utf-8")

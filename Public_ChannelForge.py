@@ -30,8 +30,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
+
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.6"
+VERSION = "3.5.7"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -196,8 +198,7 @@ def update_asset_name(release: dict) -> tuple[str, str]:
     names = {item["name"] for item in release["assets"]}
     version = release["latest_version"]
     if sys.platform == "win32":
-        candidate = "ChannelForge_Creator_Setup.exe" if "ChannelForge_Creator_Setup.exe" in names else "Public_ChannelForge_Setup.exe"
-        return candidate, "SHA256SUMS.txt"
+        return windows_setup_asset(names, "ChannelForge_Creator_Setup.exe"), "SHA256SUMS.txt"
     if Path("/etc/arch-release").exists():
         candidate = f"public-channelforge-{version}-1-any.pkg.tar.zst"
     elif Path("/etc/debian_version").exists():
@@ -222,9 +223,18 @@ def download_verified_update(progress=None) -> dict:
         raise ValueError("The release is missing its installer or checksum file.")
     progress("checksum", 0, 0)
     checksum_text = github_bytes(by_name[checksum_name]["url"], 1_000_000).decode("utf-8", "replace")
-    expected = next((line.split()[0].lower() for line in checksum_text.splitlines() if line.strip().endswith(asset_name)), "")
-    if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
-        raise ValueError("The release checksum could not be verified.")
+    expected = published_hash(checksum_text, asset_name)
+    if sys.platform == "win32":
+        def download_setup(path):
+            if report_progress:
+                github_file(by_name[asset_name]["url"], path, 200_000_000, progress)
+            else:
+                path.write_bytes(github_bytes(by_name[asset_name]["url"], 200_000_000))
+
+        destination = verified_windows_setup(windows_update_cache(), release["latest_version"], expected, download_setup, progress)
+        progress("complete", destination.stat().st_size, destination.stat().st_size)
+        return {"version": release["latest_version"], "asset": asset_name, "path": str(destination), "sha256": expected,
+                "command": f'Run the verified installer: "{destination}"', "can_launch": True}
     update_dir = DATA_DIR / "updates"
     update_dir.mkdir(parents=True, exist_ok=True)
     destination = update_dir / asset_name
@@ -240,9 +250,7 @@ def download_verified_update(progress=None) -> dict:
     if actual != expected:
         raise ValueError("The downloaded installer failed SHA-256 verification.")
     temporary.replace(destination)
-    if sys.platform == "win32":
-        command = f'Run the verified installer: "{destination}"'
-    elif asset_name.endswith(".deb"):
+    if asset_name.endswith(".deb"):
         command = f'sudo apt install "{destination}"'
     elif asset_name.endswith(".pkg.tar.zst"):
         command = f'sudo pacman -U "{destination}"'
@@ -2501,6 +2509,8 @@ def main() -> None:
     parser.add_argument("--data-dir", action="store_true", help="Open the application data directory and exit")
     args = parser.parse_args()
     ensure_files()
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        threading.Thread(target=clean_windows_update_cache, args=(VERSION,), daemon=True).start()
     if args.data_dir:
         open_data_folder()
         return

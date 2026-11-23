@@ -504,7 +504,7 @@ class CoreTests(unittest.TestCase):
         ]}
         def download(url, _limit):
             return f"{digest}  Public_ChannelForge_Setup.exe\n".encode() if url.endswith("sums") else installer
-        with mock.patch.object(app, "latest_release", return_value=release), mock.patch.object(app, "github_bytes", side_effect=download), mock.patch.object(app.sys, "platform", "win32"):
+        with mock.patch.object(app, "latest_release", return_value=release), mock.patch.object(app, "github_bytes", side_effect=download), mock.patch.object(app, "windows_update_cache", return_value=app.DATA_DIR / "test-updates"), mock.patch.object(app.sys, "platform", "win32"):
             result = app.download_verified_update()
         self.assertEqual(result["sha256"], digest)
         self.assertTrue(result["can_launch"])
@@ -521,7 +521,7 @@ class CoreTests(unittest.TestCase):
         def download(_url, destination, _limit, progress):
             destination.write_bytes(installer)
             progress("downloading", len(installer), len(installer))
-        with mock.patch.object(app, "latest_release", return_value=release), mock.patch.object(app, "github_bytes", return_value=f"{digest}  Public_ChannelForge_Setup.exe\n".encode()), mock.patch.object(app, "github_file", side_effect=download), mock.patch.object(app.sys, "platform", "win32"):
+        with mock.patch.object(app, "latest_release", return_value=release), mock.patch.object(app, "github_bytes", return_value=f"{digest}  Public_ChannelForge_Setup.exe\n".encode()), mock.patch.object(app, "github_file", side_effect=download), mock.patch.object(app, "windows_update_cache", return_value=app.DATA_DIR / "test-updates"), mock.patch.object(app.sys, "platform", "win32"):
             result = app.download_verified_update(lambda *event: events.append(event))
         self.assertEqual(result["sha256"], digest)
         self.assertTrue(any(event[0] == "downloading" for event in events))
