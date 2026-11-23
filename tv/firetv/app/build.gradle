@@ -13,10 +13,9 @@ android {
         applicationId 'tv.channelforge.viewer'
         minSdk 21
         targetSdk 35
-        versionCode 366
-        versionName '3.5.16'
+        versionCode 367
+        versionName '3.5.17'
         buildConfigField 'String', 'GITHUB_RELEASES_API', '"https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"'
-        buildConfigField 'String', 'GITHUB_RELEASES_URL', '"https://github.com/dethkorex/Public_ChannelForge/releases/latest"'
         buildConfigField 'String', 'DIRECTORY_URL', '"' + directoryUrl + '"'
         buildConfigField 'String', 'DIRECTORY_FALLBACK_URL', '"https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"'
     }

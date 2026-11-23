@@ -1,16 +1,25 @@
 package tv.channelforge.viewer;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.PendingIntent;
+import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.content.pm.PackageInstaller;
 import android.graphics.Color;
 import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
 import android.net.Uri;
-import android.content.Intent;
-import android.content.SharedPreferences;
+import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -49,6 +58,39 @@ public class MainActivity extends Activity {
     private boolean directoryLoading = false;
     private final ExecutorService posterLoader = Executors.newFixedThreadPool(3);
     private final ExecutorService studioLoader = Executors.newFixedThreadPool(4);
+    private final ExecutorService updateLoader = Executors.newSingleThreadExecutor();
+    private static final String UPDATE_RESULT = BuildConfig.APPLICATION_ID + ".UPDATE_RESULT";
+    private static final String UPDATE_PERMISSION = BuildConfig.APPLICATION_ID + ".permission.UPDATE_RESULT";
+    private static final int INSTALL_SETTINGS_REQUEST = 21;
+    private FireTvUpdate pendingUpdate;
+    private boolean updateBusy, resumed;
+    private int updateSession = -1;
+    private boolean sessionCommitted, installerOpened;
+    private Intent installConfirmation;
+    private final BroadcastReceiver updateResult = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (updateSession < 0 || intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1) != updateSession) return;
+            int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
+            if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+                installConfirmation = intent.getParcelableExtra(Intent.EXTRA_INTENT);
+                if (installConfirmation == null) {
+                    abandonUpdate(updateSession);
+                    finishUpdate("Fire TV did not provide an installation prompt. Try again.");
+                } else {
+                    openInstallConfirmation();
+                }
+            } else if (status == PackageInstaller.STATUS_SUCCESS) {
+                pendingUpdate = null;
+                finishUpdate("Update installed.");
+            } else if (status == PackageInstaller.STATUS_FAILURE_ABORTED) {
+                finishUpdate("Installation canceled. Select Updates to try again.");
+            } else if (status == PackageInstaller.STATUS_FAILURE_BLOCKED && !canInstallUpdates()) {
+                finishUpdate("Fire TV blocked the update. Allow ChannelForge TV to install unknown apps and try again.");
+            } else {
+                finishUpdate("Fire TV could not install the update. Select Updates to try again.");
+            }
+        }
+    };
     private LinearLayout liveRail;
     private LinearLayout movieRail;
     private int studioRequest = 0;
@@ -69,9 +111,20 @@ public class MainActivity extends Activity {
         super.onCreate(state);
         getWindow().getDecorView().setSystemUiVisibility(5894);
         buildUi();
+        registerUpdateResult();
         loadDirectory();
         guide.postDelayed(directoryRefresh, DIRECTORY_REFRESH_MS);
-        checkUpdates(updateButton);
+        checkUpdates(false);
+    }
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag") // Earlier Fire OS versions use the signature permission.
+    private void registerUpdateResult() {
+        IntentFilter updateFilter = new IntentFilter(UPDATE_RESULT);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(updateResult, updateFilter, UPDATE_PERMISSION, null, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(updateResult, updateFilter, UPDATE_PERMISSION, null);
+        }
     }
 
     private TextView text(String value, int size, boolean bold) {
@@ -95,7 +148,7 @@ public class MainActivity extends Activity {
         ImageView logo=new ImageView(this);logo.setImageResource(R.mipmap.channel_forge_tv_icon);logo.setScaleType(ImageView.ScaleType.FIT_CENTER);header.addView(logo,new LinearLayout.LayoutParams(dp(68),dp(68)));
         LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);TextView brand=text("CHANNELFORGE TV",25,true);brand.setTextColor(color("#FFF229"));brand.setLetterSpacing(.16f);brandBox.addView(brand);TextView subtitle=text("THE COMMUNITY DIAL",11,true);subtitle.setTextColor(color("#55EFFF"));subtitle.setLetterSpacing(.28f);brandBox.addView(subtitle);header.addView(brandBox,new LinearLayout.LayoutParams(0,-2,1));
         TextView pair=focusButton("OPTIONAL DIRECT PAIR");pair.setOnClickListener(v->showPairingDialog());header.addView(pair);
-        updateButton=focusButton("UPDATES  •  v"+BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->checkUpdates(updateButton));LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
+        updateButton=focusButton("UPDATES  •  v"+BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->selectUpdate());LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
         View line=new View(this);line.setBackgroundColor(color("#16DFF5"));guide.addView(line,new LinearLayout.LayoutParams(-1,dp(2)));
         status = text("●  CONNECTING TO THE PUBLIC CHANNEL DIRECTORY…", 12, true); status.setTextColor(color("#77F6A3"));status.setBackground(surface(new int[]{color("#111A3B"),color("#0A0B20")},color("#225E8B"),1,11));LinearLayout.LayoutParams statusLayout=new LinearLayout.LayoutParams(-1,-2);statusLayout.setMargins(0,dp(12),0,dp(12));guide.addView(status,statusLayout);
         LinearLayout columns = new LinearLayout(this); columns.setOrientation(LinearLayout.HORIZONTAL); guide.addView(columns, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -413,9 +466,141 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void checkUpdates(TextView button){button.setText("UPDATES  •  CHECKING…");new Thread(()->{try{JSONObject release=new JSONObject(get(BuildConfig.GITHUB_RELEASES_API));String latest=release.optString("tag_name").replaceFirst("^v","");boolean newer=compareVersions(latest,BuildConfig.VERSION_NAME)>0;String apk=BuildConfig.GITHUB_RELEASES_URL;JSONArray assets=release.optJSONArray("assets");if(assets!=null)for(int i=0;i<assets.length();i++){JSONObject asset=assets.getJSONObject(i);if("ChannelForgeTV-FireTV.apk".equals(asset.optString("name"))){apk=asset.optString("browser_download_url",apk);break;}}final String downloadUrl=apk;runOnUiThread(()->{button.setText(newer?"DOWNLOAD UPDATE v"+latest+" ✓":"UP TO DATE ✓  v"+BuildConfig.VERSION_NAME);showBanner(newer?"Press Updates again to download the official Fire TV APK":"ChannelForge TV is up to date");if(newer)button.setOnClickListener(v->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(downloadUrl)));}catch(Exception e){showBanner(downloadUrl);}});});}catch(Exception e){runOnUiThread(()->{button.setText("UPDATES  •  RETRY");showBanner("Could not reach GitHub Releases");});}}).start();}
-    private int compareVersions(String a,String b){String[] x=a.split("\\."),y=b.split("\\.");for(int i=0;i<3;i++){int xv=i<x.length?number(x[i]):0,yv=i<y.length?number(y[i]):0;if(xv!=yv)return Integer.compare(xv,yv);}return 0;}
-    private int number(String value){try{return Integer.parseInt(value.replaceAll("[^0-9].*$",""));}catch(Exception ignored){return 0;}}
+    private void selectUpdate() {
+        if (updateBusy) return;
+        if (pendingUpdate == null) {
+            checkUpdates(true);
+        } else if (canInstallUpdates()) {
+            downloadUpdate();
+        } else {
+            new AlertDialog.Builder(this)
+                    .setTitle("Allow ChannelForge TV to install updates")
+                    .setMessage("In Fire TV settings, turn on Install Unknown Apps for ChannelForge TV. Then return here to install the update.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Open settings", (dialog, which) -> openInstallSettings())
+                    .show();
+        }
+    }
+
+    private boolean canInstallUpdates() {
+        return Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls();
+    }
+
+    private void openInstallSettings() {
+        try {
+            Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName()));
+            startActivityForResult(settings, INSTALL_SETTINGS_REQUEST);
+        } catch (ActivityNotFoundException | SecurityException unsupported) {
+            showBanner("Open Fire TV Settings → My Fire TV → Developer Options → Install Unknown Apps. Allow ChannelForge TV, then select Updates again.");
+        }
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != INSTALL_SETTINGS_REQUEST || pendingUpdate == null || updateBusy) return;
+        if (canInstallUpdates()) downloadUpdate();
+        else showBanner("Allow ChannelForge TV to install unknown apps, then select Updates again.");
+    }
+
+    private void checkUpdates(boolean requested) {
+        updateBusy = true;
+        updateButton.setText("UPDATES  •  CHECKING…");
+        updateLoader.execute(() -> {
+            try {
+                FireTvUpdate release = FireTvUpdate.latest();
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    pendingUpdate = release;
+                    finishUpdate(requested ? (release == null ? "ChannelForge TV is up to date."
+                            : "Select Update to install version " + release.version + ".") : "");
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    updateBusy = false;
+                    updateButton.setText("UPDATES  •  RETRY");
+                    if (requested) showBanner("Could not check for updates. Select Updates to try again.");
+                });
+            }
+        });
+    }
+
+    private void downloadUpdate() {
+        FireTvUpdate release = pendingUpdate;
+        updateBusy = true;
+        updateButton.setText("DOWNLOADING UPDATE…");
+        updateLoader.execute(() -> {
+            try {
+                int session = release.stage(getApplicationContext(), percent -> runOnUiThread(() -> {
+                    if (!isDestroyed()) updateButton.setText(percent == 100 ? "VERIFYING UPDATE…"
+                            : "DOWNLOADING  •  " + percent + "%");
+                }));
+                runOnUiThread(() -> {
+                    if (isDestroyed() || isFinishing()) {
+                        abandonUpdate(session);
+                        return;
+                    }
+                    updateSession = session;
+                    updateButton.setText("UPDATE READY");
+                    commitUpdate();
+                });
+            } catch (Exception error) {
+                String message = error instanceof IOException ? error.getMessage()
+                        : "Could not prepare the update. Select Updates to try again.";
+                runOnUiThread(() -> {
+                    if (!isDestroyed()) finishUpdate(message);
+                });
+            }
+        });
+    }
+
+    private void commitUpdate() {
+        if (!resumed || updateSession < 0 || sessionCommitted) return;
+        PackageInstaller installer = getPackageManager().getPackageInstaller();
+        Intent callback = new Intent(UPDATE_RESULT).setPackage(getPackageName());
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= 31) flags |= PendingIntent.FLAG_MUTABLE;
+        PendingIntent result = PendingIntent.getBroadcast(this, updateSession, callback, flags);
+        try (PackageInstaller.Session session = installer.openSession(updateSession)) {
+            session.commit(result.getIntentSender());
+            sessionCommitted = true;
+        } catch (IOException | RuntimeException error) {
+            abandonUpdate(updateSession);
+            finishUpdate("Fire TV could not open the update installer. Try again.");
+        }
+    }
+
+    private void openInstallConfirmation() {
+        if (!resumed || installConfirmation == null) return;
+        Intent confirmation = installConfirmation;
+        installConfirmation = null;
+        try {
+            updateButton.setText("CONFIRM INSTALL");
+            startActivity(confirmation);
+            installerOpened = true;
+        } catch (ActivityNotFoundException | SecurityException error) {
+            abandonUpdate(updateSession);
+            finishUpdate("Fire TV could not open its installation prompt. Try again.");
+        }
+    }
+
+    private void abandonUpdate(int sessionId) {
+        try {
+            getPackageManager().getPackageInstaller().abandonSession(sessionId);
+        } catch (RuntimeException ignored) {
+            // The installer can already have closed the session.
+        }
+    }
+
+    private void finishUpdate(String message) {
+        updateBusy = sessionCommitted = installerOpened = false;
+        updateSession = -1;
+        installConfirmation = null;
+        updateButton.setText(pendingUpdate == null ? "UP TO DATE ✓  v" + BuildConfig.VERSION_NAME
+                : "UPDATE TO v" + pendingUpdate.version);
+        if (resumed && guideVisible && !message.isEmpty()) showBanner(message);
+    }
 
     private void scheduleLive(long delay) {
         video.removeCallbacks(continueLive);
@@ -535,7 +720,17 @@ public class MainActivity extends Activity {
         return super.onKeyDown(key, event);
     }
 
-    @Override protected void onResume(){super.onResume();if(guide!=null)loadDirectory();}
+    @Override protected void onResume() {
+        super.onResume();
+        resumed = true;
+        if (guide != null) loadDirectory();
+        commitUpdate();
+        openInstallConfirmation();
+    }
+    @Override protected void onPause() {
+        resumed = false;
+        super.onPause();
+    }
     @Override protected void onStop() {
         returnToGuide();
         super.onStop();
@@ -552,7 +747,16 @@ public class MainActivity extends Activity {
         bufferPanel.setVisibility(View.GONE);
         streamTitle = "";
     }
-    @Override protected void onDestroy(){if(guide!=null)guide.removeCallbacks(directoryRefresh);posterLoader.shutdownNow();studioLoader.shutdownNow();video.stopPlayback();super.onDestroy();}
+    @Override protected void onDestroy() {
+        unregisterReceiver(updateResult);
+        updateLoader.shutdownNow();
+        if (updateSession >= 0 && !installerOpened) abandonUpdate(updateSession);
+        if (guide != null) guide.removeCallbacks(directoryRefresh);
+        posterLoader.shutdownNow();
+        studioLoader.shutdownNow();
+        video.stopPlayback();
+        super.onDestroy();
+    }
 
     private static class Creator {
         final String name, description, playlist, vault, channelStatus;

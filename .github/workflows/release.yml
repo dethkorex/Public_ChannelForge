@@ -90,7 +90,7 @@ jobs:
         with:
           gradle-version: "8.9"
       - name: Build Fire TV viewer
-        run: gradle -p tv/firetv :app:assembleRelease
+        run: gradle -p tv/firetv :app:assembleRelease :app:lintRelease
       - name: Sign and verify the Fire TV APK
         env:
           CHANNELFORGE_TV_SIGNING: ${{ secrets.CHANNELFORGE_TV_SIGNING }}

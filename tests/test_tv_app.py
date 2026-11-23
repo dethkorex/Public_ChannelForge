@@ -41,7 +41,7 @@ class TvAppTests(unittest.TestCase):
         gradle = (root / "tv/firetv/app/build.gradle").read_text(encoding="utf-8")
         self.assertIn("showPairingDialog", activity)
         self.assertIn("SCAN PUBLIC DIRECTORY", activity)
-        self.assertIn("checkUpdates(updateButton)", activity)
+        self.assertIn("checkUpdates(false)", activity)
         self.assertIn("if (!guideVisible)", activity)
         self.assertIn("DIRECTORY_FALLBACK_URL", activity)
         self.assertIn("DIRECTORY_REFRESH_MS", activity)
@@ -52,6 +52,19 @@ class TvAppTests(unittest.TestCase):
         for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi"):
             self.assertTrue((root / f"tv/firetv/app/src/main/res/mipmap-{density}/channel_forge_tv_icon.png").is_file())
         self.assertTrue((root / "tv/firetv/app/src/main/res/drawable-nodpi/channel_forge_tv_banner.png").is_file())
+
+    def test_fire_tv_updates_stage_a_verified_apk_for_the_system_installer(self):
+        root = Path(__file__).resolve().parents[1] / "tv/firetv/app/src/main"
+        activity = (root / "java/tv/channelforge/viewer/MainActivity.java").read_text(encoding="utf-8")
+        updater = (root / "java/tv/channelforge/viewer/FireTvUpdate.java").read_text(encoding="utf-8")
+        manifest = (root / "AndroidManifest.xml").read_text(encoding="utf-8")
+        self.assertIn("REQUEST_INSTALL_PACKAGES", manifest)
+        self.assertIn("STATUS_PENDING_USER_ACTION", activity)
+        self.assertIn("session.commit(result.getIntentSender())", activity)
+        self.assertNotIn("Intent.ACTION_VIEW", activity)
+        self.assertIn("MessageDigest.isEqual(checksum, digest.digest())", updater)
+        self.assertIn("Arrays.equals(expected, signatures(candidate))", updater)
+        self.assertLess(updater.index("verifyPackage(context, apk)"), updater.index("return stagePackage("))
 
     def test_roku_is_viewer_only_with_fallback_pairing_and_branding(self):
         root = Path(__file__).resolve().parents[1]
