@@ -17,3 +17,4 @@
 - Update checks have a fallback. The Windows and Linux badge says when the update check needs a retry.
 - Fire TV keeps the guide and navigation visible at 720p. Closing video cleanly cancels network requests that are still running.
 - Creator reconnects the public relay when it stops serving viewers, even if the connection still appears open.
+- Creator has separate TV Shows and Movies library tabs. Add both to one channel and keep your selections while switching libraries.

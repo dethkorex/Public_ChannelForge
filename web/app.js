@@ -2,6 +2,8 @@ let state={channels:[],assets:[],tools:[],config:{}},libraries=[],mediaChoices=[
 const selectedLineup = new Map();
 let mediaLoadRequest = 0, workspaceLibraryRequest = 0, workspaceMediaRequest = 0;
 let libraryRequest, libraryFetchedAt = 0;
+let builderLibraryKind = "all", builderLibraries = [], builderLibraryRequest = 0;
+const builderLibrarySelections = new Map();
 const workspaceBatchSize = 96;
 let workspaceDisplayLimit = workspaceBatchSize;
 const $=s=>document.querySelector(s),escapeHtml=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -163,10 +165,56 @@ async function loadGuide(){try{const guide=await api(`/api/guide?offset=${guideO
 async function showPlaybackError(channelId,fallback="Playback could not start."){let message=fallback;try{const status=await api(`/api/playback/status?channel=${encodeURIComponent(channelId||"")}`);if(status.error)message=status.error}catch(_error){}const box=$("#playback-status");box.className="danger";box.textContent=message;toast(message,true)}
 function watchChannel(channelId){const channel=state.channels.find(item=>item.id===channelId);if(!channel)return;activeChannel=channelId;$("#playback-status").textContent="";clearTimeout(retuneTimer);renderWatchChannels();applyChannelOverlays(channel);const live=state.now_playing?.[channel.id];$("#playing-channel").textContent=`CH ${channel.number} · ${channel.name}`;$("#playing-title").textContent=live?.title||"Live stream";if(live){const start=Date.parse(live.start),stop=Date.parse(live.stop),percent=Math.max(0,Math.min(100,(Date.now()-start)/(stop-start)*100));$("#playing-progress").style.width=`${percent}%`;$("#playing-time").textContent=`${new Date(start).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})} – ${new Date(stop).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`;retuneTimer=setTimeout(async()=>{await refresh();watchChannel(channelId)},Math.max(1000,stop-Date.now()+500))}const video=$("#tv-player"),url=`/live/${encodeURIComponent(channelId)}.m3u8`;$("#player-placeholder").hidden=true;video.style.display="block";video.pause();video.removeAttribute("src");video.load();if(hlsPlayer){hlsPlayer.destroy();hlsPlayer=null}if(window.Hls&&Hls.isSupported()){hlsPlayer=new Hls({enableWorker:true,startPosition:-1,liveSyncDurationCount:3});hlsPlayer.loadSource(url);hlsPlayer.attachMedia(video);hlsPlayer.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{}));hlsPlayer.on(Hls.Events.ERROR,(_event,data)=>{if(!data.fatal)return;if(data.type===Hls.ErrorTypes.MEDIA_ERROR){hlsPlayer.recoverMediaError();return}showPlaybackError(channelId,`Playback error: ${data.details}`)})}else if(video.canPlayType("application/vnd.apple.mpegurl")){video.src=url;video.play().catch(()=>{})}else{showPlaybackError(channelId,"This browser cannot play HLS video.")}}
 async function refresh(){state=await api("/api/status");$("#version").textContent=`v${state.version}`;$("#plex-url").value=state.config.plex_url;$("#guide-hours").value=state.config.guide_hours;$("#bind-host").value=state.config.bind_host;$("#public-url").value=state.config.public_url;$("#token-status").textContent=state.config.token_saved?"Connected and ready.":"Plex is optional and not connected.";const hasMedia=state.config.token_saved||state.config.local_libraries?.length;$("#step-connect-status").textContent=state.config.local_libraries?.length?`${state.config.local_libraries.length} local folder(s) ready${state.config.token_saved?" · Plex connected":""}.`:state.config.token_saved?`Connected to ${state.config.plex_profile?.server_name||"Plex"}.`:"Add a local folder or connect Plex.";$("#data-dir").textContent=`Application data: ${state.data_dir}`;const base=state.server_base||location.origin;$("#xmltv-url").textContent=`${base}/exports/guide.xml`;$("#m3u-url").textContent=`${base}/exports/channels.m3u`;renderChannels();renderWatchChannels();renderAssets();renderTools();renderPlexProfile();renderLocalLibraries();renderStudioSummary();if(document.querySelector("#watch.active"))loadGuide();const onboarding=$("#plex-onboarding");if(hasMedia&&onboarding.open)onboarding.close()}
-async function loadLibraries() {
-  $("#channel-library").innerHTML = libraryOptions(await requestLibraries());
+function resetBuilderFilters() {
+  $("#media-filter").value = "";
+  $("#smart-genre").value = $("#smart-rating").value = "all";
+  $("#smart-year-min").value = $("#smart-year-max").value = "";
 }
-function smartMatches(choice){const type=$("#smart-type").value,genre=$("#smart-genre").value.toLocaleLowerCase(),rating=$("#smart-rating").value.toLocaleLowerCase(),min=Number($("#smart-year-min").value)||0,max=Number($("#smart-year-max").value)||9999,year=Number(choice.year)||0,genres=(choice.genres||[]).map(value=>String(value).toLocaleLowerCase()),contentRating=String(choice.content_rating||"Unrated").toLocaleLowerCase();return(type==="all"||choice.type===type)&&(genre==="all"||genres.includes(genre))&&(rating==="all"||contentRating===rating)&&(!year||year>=min&&year<=max)}
+function setBuilderLibraries(preferred = "") {
+  const select = $("#channel-library"), old = select.value;
+  const sources = builderLibraries.filter(library => builderLibraryKind === "all" || library.type === builderLibraryKind);
+  const remembered = builderLibrarySelections.get(builderLibraryKind) || preferred;
+  const available = sources.find(library => library.key === remembered) || sources[0];
+  select.innerHTML = libraryOptions(sources);
+  select.value = available?.key || "";
+  for (const button of document.querySelectorAll("[data-builder-library-kind]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.builderLibraryKind === builderLibraryKind));
+  }
+  if (!available) {
+    loadMedia("");
+    return;
+  }
+  if (select.value !== old) {
+    resetBuilderFilters();
+    loadMedia(select.value);
+  }
+}
+async function loadBuilderLibraries(preferred) {
+  const request = ++builderLibraryRequest;
+  const status = $("#builder-library-status");
+  status.textContent = "Finding connected and shared libraries…";
+  let finished = false;
+  const show = items => {
+    if (request !== builderLibraryRequest || !$("#channel-dialog").open) return;
+    builderLibraries = items;
+    setBuilderLibraries(preferred);
+  };
+  if (libraries.length) show(libraries);
+  else api("/api/libraries?scope=connected").then(data => {
+    if (!finished) show(data.libraries);
+  }).catch(() => {});
+  try {
+    const items = await requestLibraries();
+    finished = true;
+    if (request !== builderLibraryRequest || !$("#channel-dialog").open) return;
+    show(items);
+    status.textContent = "";
+  } catch (error) {
+    finished = true;
+    if (request === builderLibraryRequest && $("#channel-dialog").open) status.textContent = error.message;
+  }
+}
+function smartMatches(choice){const genre=$("#smart-genre").value.toLocaleLowerCase(),rating=$("#smart-rating").value.toLocaleLowerCase(),min=Number($("#smart-year-min").value)||0,max=Number($("#smart-year-max").value)||9999,year=Number(choice.year)||0,genres=(choice.genres||[]).map(value=>String(value).toLocaleLowerCase()),contentRating=String(choice.content_rating||"Unrated").toLocaleLowerCase();return(genre==="all"||genres.includes(genre))&&(rating==="all"||contentRating===rating)&&(!year||year>=min&&year<=max)}
 function mediaSearchMatches(choice){const query=$("#media-filter").value.trim().toLocaleLowerCase();return!query||`${choice.title} ${choice.year||""} ${choice.content_rating||""} ${(choice.genres||[]).join(" ")} ${choice.summary||""}`.toLocaleLowerCase().includes(query)}
 function filteredMediaChoices(){return mediaChoices.filter(choice=>smartMatches(choice)&&mediaSearchMatches(choice))}
 function applyMediaFilters(){const visible=new Set(filteredMediaChoices());document.querySelectorAll("#media-list .media-item").forEach((row,index)=>row.hidden=!visible.has(mediaChoices[index]));return [...visible]}
@@ -205,7 +253,8 @@ async function loadMedia(section) {
   const box = $("#media-list");
   mediaChoices = [];
   if (!section) {
-    status.textContent = "Choose a media library to add titles.";
+    status.textContent = builderLibraryKind === "show" ? "No TV show libraries available."
+      : builderLibraryKind === "movie" ? "No movie libraries available." : "Choose a media library to add titles.";
     box.innerHTML = "";
     refreshSmartMatches();
     return;
@@ -257,7 +306,49 @@ function renderChannelBrandingPreview(){
 for(const control of ["#channel-background","#channel-logo","#channel-corner-bug","#channel-name","#channel-number"]){
   $(control).addEventListener("input",renderChannelBrandingPreview);
 }
-async function openChannel(channel=null){try{if(!state.config.token_saved&&!state.config.local_libraries?.length)throw new Error("Add a local folder or connect Plex in Media Sources first.");$("#channel-form").reset();$("#channel-id").value=channel?.id||"";$("#channel-name").value=channel?.name||"";$("#channel-number").value=channel?.number||nextChannelNumber();$("#playback-mode").value=channel?.playback_mode||"ordered";$("#channel-logo").innerHTML='<option value="">No logo</option>'+state.assets.filter(a=>a.kind==="logo").map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");$("#channel-background").innerHTML='<option value="">Default background</option>'+state.assets.filter(a=>a.kind==="guide-background").map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");$("#channel-corner-bug").innerHTML='<option value="">No corner bug</option>'+state.assets.filter(a=>a.kind==="corner-bug").map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");$("#channel-logo").value=channel?.logo_asset_id||"";$("#channel-background").value=channel?.background_asset_id||"";$("#channel-corner-bug").value=channel?.corner_bug_asset_id||"";$("#dialog-title").textContent=channel?"Edit channel":"Create channel";++mediaLoadRequest;mediaChoices=[];selectedLineup.clear();for(const choice of buildMediaChoices(channel?.items||[],channel?.section||""))selectedLineup.set(choice.key,choice);$("#media-list").innerHTML="";$("#selected-media-list").innerHTML='<div class="muted">Loading current selections…</div>';$("#media-status").textContent="Opening Channel Builder…";$("#media-filter").value="";for(const selector of ["#smart-type","#smart-genre","#smart-rating"])$(selector).value="all";$("#smart-year-min").value="";$("#smart-year-max").value="";$("#worldwide-on-save").hidden=Boolean(channel);$("#publish-on-save").checked=state.config.creator_published||state.config.auto_publish_channels!==false;$("#publish-on-save").disabled=Boolean(state.config.creator_published);renderChannelBrandingPreview();$("#channel-dialog").showModal();setBuilderStep(channel?2:1);await loadLibraries();if(channel?.section){$("#channel-library").value=channel.section;await loadMedia($("#channel-library").value)}else{$("#media-status").textContent="Choose a media library to load titles.";updateMediaSelection()}}catch(error){toast(error.message,true);$("#media-status").textContent=error.message}}
+async function openChannel(channel = null) {
+  if (!state.config.token_saved && !state.config.local_libraries?.length) {
+    toast("Add a local folder or connect Plex in Sources & Sharing first.", true);
+    return;
+  }
+  $("#channel-form").reset();
+  $("#channel-id").value = channel?.id || "";
+  $("#channel-name").value = channel?.name || "";
+  $("#channel-number").value = channel?.number || nextChannelNumber();
+  $("#playback-mode").value = channel?.playback_mode || "ordered";
+  for (const [control, kind, fallback, selected] of [
+    ["#channel-logo", "logo", "No logo", channel?.logo_asset_id],
+    ["#channel-background", "guide-background", "Default background", channel?.background_asset_id],
+    ["#channel-corner-bug", "corner-bug", "No corner bug", channel?.corner_bug_asset_id],
+  ]) {
+    const select = $(control);
+    select.innerHTML = '<option value="">' + fallback + '</option>' +
+      state.assets.filter(asset => asset.kind === kind)
+        .map(asset => '<option value="' + escapeHtml(asset.id) + '">' + escapeHtml(asset.name) + '</option>').join("");
+    select.value = selected || "";
+  }
+  $("#dialog-title").textContent = channel ? "Edit channel" : "Create channel";
+  ++mediaLoadRequest;
+  mediaChoices = [];
+  selectedLineup.clear();
+  for (const choice of buildMediaChoices(channel?.items || [], channel?.section || "")) {
+    selectedLineup.set(choice.key, choice);
+  }
+  builderLibrarySelections.clear();
+  builderLibraryKind = "all";
+  builderLibraries = [];
+  resetBuilderFilters();
+  setBuilderLibraries();
+  updateMediaSelection();
+  $("#worldwide-on-save").hidden = Boolean(channel);
+  $("#publish-on-save").checked = state.config.creator_published || state.config.auto_publish_channels !== false;
+  $("#publish-on-save").disabled = Boolean(state.config.creator_published);
+  renderChannelBrandingPreview();
+  $("#channel-dialog").showModal();
+  setBuilderStep(channel ? 2 : 1);
+  await loadBuilderLibraries(channel?.section);
+}
+
 document.addEventListener("click",async event=>{const button=event.target.closest("button,article[data-watch]");if(!button)return;if(button.dataset.watch)watchChannel(button.dataset.watch);if(button.dataset.view){document.querySelectorAll(".view,nav button").forEach(e=>e.classList.remove("active"));$(`#${button.dataset.view}`).classList.add("active");button.classList.add("active")}if(button.id==="refresh-guide")loadGuide();if(button.id==="new-channel")openChannel();if(button.dataset.edit)openChannel(state.channels.find(c=>c.id===button.dataset.edit));if(button.dataset.delete&&confirm("Delete this channel?")){try{await api(`/api/channels/${button.dataset.delete}`,{method:"DELETE"});await refresh();toast("Channel deleted.")}catch(e){toast(e.message,true)}}if(button.dataset.deleteAsset&&confirm("Delete this artwork? Channels using it will keep working without the logo.")){try{await api(`/api/assets/${button.dataset.deleteAsset}`,{method:"DELETE"});await refresh();toast("Artwork deleted.")}catch(e){toast(e.message,true)}}if(button.dataset.tool){try{const data=await api(`/api/tools/${button.dataset.tool}`,{method:"POST",body:"{}"});toast(typeof data.result==="string"?data.result:"Tool finished.")}catch(e){toast(e.message,true)}}});
 $("#setup-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/setup",{method:"POST",body:JSON.stringify({plex_url:$("#plex-url").value,plex_token:$("#plex-token").value,guide_hours:$("#guide-hours").value,bind_host:$("#bind-host").value,public_url:$("#public-url").value,directory_url:$("#directory-url").value})});$("#plex-token").value="";await refresh();toast("Standalone TV server settings saved.")}catch(e){toast(e.message,true)}});
 async function publishStudio(event){
@@ -282,8 +373,18 @@ async function publishStudio(event){
 }
 $("#creator-publish-form").addEventListener("submit",publishStudio);
 $("#unpublish-creator").onclick=async()=>{if(!confirm("Remove this studio from ChannelForge TV? Your local channels will not be deleted."))return;try{await api("/api/directory/publish",{method:"DELETE"});await refresh();toast("Studio removed from the TV directory.")}catch(error){toast(error.message,true)}};
-$("#channel-library").addEventListener("change",event=>{$("#media-filter").value="";for(const selector of ["#smart-type","#smart-genre","#smart-rating"])$(selector).value="all";$("#smart-year-min").value="";$("#smart-year-max").value="";loadMedia(event.target.value)});
-$("#channel-form").addEventListener("submit",async event=>{event.preventDefault();const items=[...selectedLineup.values()].flatMap(choice=>choice.items);if(!items.length){toast("Select at least one playable title.",true);return}const id=$("#channel-id").value,payload={name:$("#channel-name").value,number:$("#channel-number").value,section:$("#channel-library").value||items[0].section,playback_mode:$("#playback-mode").value,logo_asset_id:$("#channel-logo").value,background_asset_id:$("#channel-background").value,corner_bug_asset_id:$("#channel-corner-bug").value,items};if(!id)payload.publish_worldwide=$("#publish-on-save").checked;try{const saved=await api(id?`/api/channels/${id}`:"/api/channels",{method:id?"PUT":"POST",body:JSON.stringify(payload)});$("#channel-dialog").close();await refresh();toast(saved.publishing_pending?"Channel saved. Publishing this studio worldwide in the background.":"Channel saved and guide regenerated.")}catch(e){toast(e.message,true)}});
+$("#builder-library-types").addEventListener("click", event => {
+  const type = event.target.closest("[data-builder-library-kind]")?.dataset.builderLibraryKind;
+  if (!type || type === builderLibraryKind) return;
+  builderLibraryKind = type;
+  setBuilderLibraries();
+});
+$("#channel-library").addEventListener("change", event => {
+  builderLibrarySelections.set(builderLibraryKind, event.target.value);
+  resetBuilderFilters();
+  loadMedia(event.target.value);
+});
+$("#channel-form").addEventListener("submit",async event=>{event.preventDefault();const items=[...selectedLineup.values()].flatMap(choice=>choice.items);if(!items.length){toast("Select at least one playable title.",true);return}const id=$("#channel-id").value,payload={name:$("#channel-name").value,number:$("#channel-number").value,section:items[0].section,playback_mode:$("#playback-mode").value,logo_asset_id:$("#channel-logo").value,background_asset_id:$("#channel-background").value,corner_bug_asset_id:$("#channel-corner-bug").value,items};if(!id)payload.publish_worldwide=$("#publish-on-save").checked;try{const saved=await api(id?`/api/channels/${id}`:"/api/channels",{method:id?"PUT":"POST",body:JSON.stringify(payload)});$("#channel-dialog").close();await refresh();toast(saved.publishing_pending?"Channel saved. Publishing this studio worldwide in the background.":"Channel saved and guide regenerated.")}catch(e){toast(e.message,true)}});
 $("#generate-asset").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/assets/generate",{method:"POST",body:JSON.stringify({name:$("#asset-name").value,kind:$("#asset-kind").value,primary:$("#asset-primary").value,secondary:$("#asset-secondary").value})});await refresh();toast("Original artwork generated.")}catch(e){toast(e.message,true)}});
 $("#upload-asset").addEventListener("submit",async event=>{event.preventDefault();const file=$("#upload-file").files[0];if(!file)return;try{const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error("Could not read that file."));reader.readAsDataURL(file)});await api("/api/assets/upload",{method:"POST",body:JSON.stringify({name:$("#upload-name").value,kind:$("#upload-kind").value,data})});event.target.reset();await refresh();toast("Artwork added to your library.")}catch(e){toast(e.message,true)}});
 $("#close-dialog").onclick=$("#cancel-dialog").onclick=()=>$("#channel-dialog").close();
@@ -305,7 +406,7 @@ $("#guide-now").onclick=()=>{guideOffsetHours=0;loadGuide()};
 $("#guide-later").onclick=()=>{guideOffsetHours=Math.min(168,guideOffsetHours+6);loadGuide()};
 $("#test-plex").onclick=async()=>{const result=$("#setup-result");result.className="connection-result wide";result.textContent="Testing Plex server and library access…";try{const data=await api("/api/plex/test",{method:"POST",body:JSON.stringify({plex_url:$("#plex-url").value,plex_token:$("#plex-token").value})});result.classList.add("success");result.textContent=`Connected to ${data.profile.server_name||"Plex"}. ${data.libraries} libraries are available.`}catch(error){result.classList.add("error");result.textContent=`Connection failed: ${error.message}`}};
 $("#media-filter").addEventListener("input",refreshSmartMatches);
-for(const selector of ["#smart-type","#smart-genre","#smart-year-min","#smart-year-max","#smart-rating"])$(selector).addEventListener("input",refreshSmartMatches);
+for(const selector of ["#smart-genre","#smart-year-min","#smart-year-max","#smart-rating"])$(selector).addEventListener("input",refreshSmartMatches);
 $("#smart-select").onclick = () => {
   const matches = filteredMediaChoices();
   for (const choice of matches) selectedLineup.set(choice.key, choice);
