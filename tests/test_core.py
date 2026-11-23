@@ -517,6 +517,20 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(app.playback_error("retry-channel"), "")
             self.assertNotIn("retry-channel", app.PLAYBACK_ERRORS)
 
+    def test_live_cleanup_keeps_recent_evicted_segments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            stale = directory / "segmenteconomy_000001.ts"
+            recent = directory / "segmenteconomy_000002.ts"
+            manifest = directory / "index_economy.m3u8"
+            for path, modified_at in ((stale, 50), (recent, 120), (manifest, 50)):
+                path.touch()
+                os.utime(path, (modified_at, modified_at))
+            app.prune_live_segments(directory, 100)
+            self.assertFalse(stale.exists())
+            self.assertTrue(recent.is_file())
+            self.assertTrue(manifest.is_file())
+
     def test_public_movie_catalog_negotiates_gzip(self):
         handler = object.__new__(app.Handler)
         handler.path = "/api/public/vault"

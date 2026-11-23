@@ -36,7 +36,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.11"
+VERSION = "3.5.12"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -1853,10 +1853,9 @@ def start_or_reuse_encoder(channel: dict) -> str:
     remaining = max(0.1, (position["stop"] - position["start"]).total_seconds() - position["offset_ms"] / 1000)
     input_timing = ["-re"] if on_demand else ["-re", "-ss", f'{position["offset_ms"] / 1000:.3f}']
     output_timing = [] if on_demand else ["-t", f"{remaining:.3f}"]
-    # Retain evicted segments briefly for remote viewers without increasing live delay.
+    # Keep a short playback window and retain evicted files for the server's timed cleanup.
     hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments"] if on_demand else
-                   ["-hls_list_size", "5", "-hls_delete_threshold", "60",
-                    "-hls_flags", "delete_segments+independent_segments"])
+                   ["-hls_list_size", "5", "-hls_flags", "independent_segments+temp_file"])
     audio_index, has_audio = playback_audio_track(item, media_input)
     relay = config()["public_tunnel"]
     if relay and has_audio is not None:
@@ -1911,6 +1910,7 @@ def reap_idle_sessions_once(now: float | None = None) -> int:
     moment = now if now is not None else time.time()
     with LOCK:
         expired = []
+        active_live_directories = []
         for key, value in FFMPEG_SESSIONS.items():
             # Cached, finished movies can resume without starting Plex again.
             # An active movie encoder times out like live TV when viewers leave.
@@ -1918,6 +1918,8 @@ def reap_idle_sessions_once(now: float | None = None) -> int:
             retention = 600 if value.get("on_demand") and value["process"].poll() == 0 else 60
             if moment - last_access > retention:
                 expired.append((key, value))
+            elif not value.get("on_demand") and value.get("directory"):
+                active_live_directories.append(value["directory"])
         for key, _value in expired:
             FFMPEG_SESSIONS.pop(key, None)
     for _key, session in expired:
@@ -1930,7 +1932,18 @@ def reap_idle_sessions_once(now: float | None = None) -> int:
             except subprocess.TimeoutExpired:
                 continue
             shutil.rmtree(session["directory"], ignore_errors=True)
+    for directory in active_live_directories:
+        prune_live_segments(directory, moment - 90)
     return len(expired)
+
+
+def prune_live_segments(directory: Path, cutoff: float) -> None:
+    for segment in directory.glob("segment*.ts"):
+        try:
+            if segment.stat().st_mtime < cutoff:
+                segment.unlink()
+        except OSError:
+            continue
 
 
 def reap_idle_sessions() -> None:

@@ -88,11 +88,39 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
-      - name: Build installable Fire TV APK
+      - name: Build Fire TV viewer
+        run: gradle -p tv/firetv :app:assembleRelease
+      - name: Sign and verify the Fire TV APK
+        env:
+          CHANNELFORGE_TV_SIGNING: ${{ secrets.CHANNELFORGE_TV_SIGNING }}
         run: |
-          gradle -p tv/firetv :app:assembleDebug
           mkdir -p tv-release
-          cp tv/firetv/app/build/outputs/apk/debug/app-debug.apk tv-release/ChannelForgeTV-FireTV.apk
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          signing = json.loads(os.environ.pop("CHANNELFORGE_TV_SIGNING"))
+          sdk_tools = Path(os.environ["ANDROID_HOME"]) / "build-tools"
+          apksigner = sorted(sdk_tools.glob("*/apksigner"))[-1]
+          apk = "tv-release/ChannelForgeTV-FireTV.apk"
+          with tempfile.TemporaryDirectory(dir=os.environ["RUNNER_TEMP"]) as work:
+              key = Path(work) / "channelforge-tv.p12"
+              key.write_bytes(base64.b64decode(signing["keystore"], validate=True))
+              key.chmod(0o600)
+              subprocess.run([
+                  apksigner, "sign", "--ks", key, "--ks-type", "PKCS12",
+                  "--ks-key-alias", "channelforge-tv", "--ks-pass", "env:CHANNELFORGE_STORE_PASSWORD",
+                  "--out", apk, "tv/firetv/app/build/outputs/apk/release/app-release-unsigned.apk",
+              ], check=True, env={**os.environ, "CHANNELFORGE_STORE_PASSWORD": signing["password"]})
+          certificate = subprocess.check_output([apksigner, "verify", "--print-certs", apk], text=True)
+          fingerprint = "ac423e2c883afc9b7687f9a732504f632f9b9092e8280d6d5d00363ecfbcf5d8"
+          if f"Signer #1 certificate SHA-256 digest: {fingerprint}" not in certificate:
+              raise SystemExit("The Fire TV APK was signed with a different release certificate.")
+          PY
           sha256sum tv-release/ChannelForgeTV-FireTV.apk > tv-release/SHA256SUMS-TV.txt
       - uses: actions/upload-artifact@v4
         with:

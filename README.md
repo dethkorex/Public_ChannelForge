@@ -46,6 +46,8 @@ ChannelForge v3.5.10 shows channels as each studio responds, compresses large gu
 
 ChannelForge v3.5.11 binds automatic worldwide sharing to the running Creator, while same-PC viewing uses the direct connection. The public relay offers an economical video rendition alongside 720p. **Publish worldwide when I save** is selected by default when creating a channel and can be turned off for a private studio.
 
+From v3.5.12 onward, Fire TV releases use one permanent signing certificate. To switch from an earlier sideloaded build, uninstall it once and install the new official APK. Future updates signed with this certificate can install in place. Live channels also keep recently evicted segments available for slow connections.
+
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
 ![ChannelForge TV home hub](preview/channel-forge-tv-v346-home.png)
@@ -98,7 +100,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.11-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.5.12-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation
