@@ -6,6 +6,7 @@ import android.graphics.Color;
 import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.media.MediaPlayer;
 import android.net.Uri;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -27,14 +28,20 @@ public class MainActivity extends Activity {
     private final List<Channel> channels = new ArrayList<>();
     private final List<VaultItem> vaultItems = new ArrayList<>();
     private VideoView video;
+    private MediaController movieControls;
     private LinearLayout guide, creatorRail, channelRail;
     private TextView status, banner, updateButton;
+    private LinearLayout bufferPanel, bannerPanel;
+    private ProgressBar bufferSpinner;
+    private TextView bufferLabel;
+    private String streamTitle = "";
     private int channelIndex = 0;
     private boolean guideVisible = true;
     private Channel tunedChannel;
     private int liveRetries;
     private final Runnable continueLive = () -> {
         if (tunedChannel != null && !guideVisible) {
+            showBuffering("Connecting to the studio…", true);
             video.setVideoURI(Uri.parse(tunedChannel.url));
             video.start();
         }
@@ -82,6 +89,7 @@ public class MainActivity extends Activity {
     private void buildUi() {
         FrameLayout root = new FrameLayout(this); root.setBackground(surface(new int[]{color("#050616"),color("#25073D"),color("#070312")},0,0,0));
         video = new VideoView(this); root.addView(video, new FrameLayout.LayoutParams(-1, -1));
+        movieControls = new MediaController(this);
         guide = new LinearLayout(this); guide.setOrientation(LinearLayout.VERTICAL); guide.setPadding(dp(26),dp(16),dp(26),dp(15)); guide.setBackgroundColor(Color.argb(238, 4, 5, 20));
         LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(10));
         ImageView logo=new ImageView(this);logo.setImageResource(R.mipmap.channel_forge_tv_icon);logo.setScaleType(ImageView.ScaleType.FIT_CENTER);header.addView(logo,new LinearLayout.LayoutParams(dp(68),dp(68)));
@@ -97,23 +105,52 @@ public class MainActivity extends Activity {
         channelRail.addView(sectionTitle("WELCOME TO CHANNELFORGE TV","#FF48C8"));TextView welcome=text("Live creator channels and Rewind Cinema in one standalone Fire TV app.",24,true);welcome.setTextColor(color("#FFF229"));channelRail.addView(welcome);channelRail.addView(text("No Plex setup is needed on this Fire TV. Public studios appear here automatically when they are online.",15,false));
         TextView help = text("↑↓  SURF CHANNELS     •     OK  WATCH / GUIDE     •     BACK  RETURN TO GUIDE", 10, true); help.setTextColor(color("#7184A9")); guide.addView(help);
         root.addView(guide, new FrameLayout.LayoutParams(-1,-1));
-        banner = text("", 18, true); banner.setBackground(surface(new int[]{color("#111938"),color("#290A3E")},color("#12DFF9"),2,12)); banner.setVisibility(View.GONE); FrameLayout.LayoutParams bp=new FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM); bp.setMargins(dp(35),0,dp(35),dp(35)); root.addView(banner,bp);
+        bufferPanel = panel();
+        bufferPanel.setGravity(Gravity.CENTER);
+        bufferSpinner = new ProgressBar(this);
+        bufferPanel.addView(bufferSpinner, new LinearLayout.LayoutParams(dp(38), dp(38)));
+        bufferLabel = text("", 18, true);
+        bufferLabel.setGravity(Gravity.CENTER);
+        bufferPanel.addView(bufferLabel, new LinearLayout.LayoutParams(-1, -2));
+        bufferPanel.setVisibility(View.GONE);
+        root.addView(bufferPanel, new FrameLayout.LayoutParams(dp(360), -2, Gravity.CENTER));
+        bannerPanel = new LinearLayout(this);
+        bannerPanel.setGravity(Gravity.CENTER_VERTICAL);
+        bannerPanel.setPadding(dp(12), dp(8), dp(12), dp(8));
+        bannerPanel.setBackground(surface(new int[]{color("#111938"),color("#290A3E")},color("#12DFF9"),2,12));
+        banner = text("", 18, true);
+        bannerPanel.setVisibility(View.GONE);
+        FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
+        bp.setMargins(dp(35), 0, dp(35), dp(35));
+        root.addView(bannerPanel, bp);
         setContentView(root);
         video.setOnPreparedListener(player -> {
-            liveRetries = 0;
             status.setText("●  STREAM READY  •  ENGLISH AUDIO PREFERRED");
             player.start();
         });
+        video.setOnInfoListener((player, event, extra) -> {
+            if (guideVisible) return false;
+            if (event == MediaPlayer.MEDIA_INFO_BUFFERING_START) showBuffering("Buffering video…", true);
+            if (event == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START || event == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                bufferPanel.setVisibility(View.GONE);
+                liveRetries = 0;
+                if (tunedChannel != null) showChannelBanner(tunedChannel);
+            }
+            return false;
+        });
         video.setOnCompletionListener(player -> {
-            if (tunedChannel != null && !guideVisible) scheduleLive(400);
+            if (tunedChannel != null && !guideVisible) {
+                showBuffering("Loading the next program…", true);
+                scheduleLive(400);
+            }
             else if (!guideVisible) returnToGuide();
         });
         video.setOnErrorListener((player, what, extra) -> {
             if (tunedChannel != null && !guideVisible && liveRetries < 3) {
-                showBanner("Reconnecting to " + tunedChannel.name + "…");
+                showBuffering("Reconnecting to the studio…", true);
                 scheduleLive(1200L * ++liveRetries);
             } else {
-                showBanner("Stream unavailable — check the creator server");
+                showBuffering("Stream unavailable. Press Back to return to the guide.", false);
             }
             return true;
         });
@@ -277,7 +314,11 @@ public class MainActivity extends Activity {
         for (int i = 0; i < entries.length(); i++) {
             JSONObject entry = entries.getJSONObject(i);
             if (entry.optBoolean("online")) {
-                result.add(new Channel(entry.getString("name"), entry.getString("stream_url")));
+                Channel channel = new Channel(entry.getString("name"), entry.getString("stream_url"));
+                channel.number = entry.optString("number");
+                channel.logo = entry.optString("logo_url");
+                channel.programs = entry.optJSONArray("programs");
+                result.add(channel);
             }
         }
         return result;
@@ -305,7 +346,8 @@ public class MainActivity extends Activity {
         for (int i = 0; i < channels.size(); i++) {
             final int index = i;
             Channel channel = channels.get(i);
-            TextView button = focusButton(String.format(Locale.US, "CH %03d   %s\n● LIVE NOW  •  PRESS OK TO WATCH", i + 1, channel.name));
+            TextView button = focusButton("CH " + displayNumber(channel, i) + "   " + channel.name
+                    + "\n● LIVE NOW  •  PRESS OK TO WATCH");
             button.setOnClickListener(v -> play(index));
             LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
             layout.setMargins(0, 0, 0, dp(8));
@@ -384,26 +426,114 @@ public class MainActivity extends Activity {
         if (channels.isEmpty()) return;
         channelIndex = (index + channels.size()) % channels.size();
         tunedChannel = channels.get(channelIndex);
+        streamTitle = tunedChannel.name;
         liveRetries = 0;
         guide.setVisibility(View.GONE);
         guideVisible = false;
+        movieControls.hide();
+        video.setMediaController(null);
+        video.requestFocus();
         video.removeCallbacks(continueLive);
         continueLive.run();
-        showBanner(String.format(Locale.US, "CH %03d   %s", channelIndex + 1, tunedChannel.name));
+        showChannelBanner(tunedChannel);
     }
 
     private void playUrl(String title, String url) {
         tunedChannel = null;
+        streamTitle = title;
         video.removeCallbacks(continueLive);
         guide.setVisibility(View.GONE);
         guideVisible = false;
+        video.setMediaController(movieControls);
+        video.requestFocus();
+        showBuffering("Connecting to the studio…", true);
         video.setVideoURI(Uri.parse(url));
         video.start();
         showBanner("REWIND CINEMA   •   " + title);
     }
-    private void showBanner(String message){banner.setText(message);banner.setVisibility(View.VISIBLE);banner.removeCallbacks(hideBanner);banner.postDelayed(hideBanner,4000);} private final Runnable hideBanner=()->banner.setVisibility(View.GONE);
+    private String displayNumber(Channel channel, int index) {
+        return channel.number.isEmpty() ? String.format(Locale.US, "%03d", index + 1) : channel.number;
+    }
 
-    @Override public boolean onKeyDown(int key, KeyEvent event){if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_CENTER||key==KeyEvent.KEYCODE_ENTER||key==KeyEvent.KEYCODE_BACK)){returnToGuide();channelRail.requestFocus();return true;}if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_UP||key==KeyEvent.KEYCODE_CHANNEL_UP)){play(channelIndex+1);return true;}if(!guideVisible&&(key==KeyEvent.KEYCODE_DPAD_DOWN||key==KeyEvent.KEYCODE_CHANNEL_DOWN)){play(channelIndex-1);return true;}return super.onKeyDown(key,event);}
+    private void showChannelBanner(Channel channel) {
+        String message = "CH " + displayNumber(channel, channelIndex) + "   " + channel.name;
+        long now = System.currentTimeMillis();
+        if (channel.programs != null) for (int i = 0; i < channel.programs.length(); i++) {
+            JSONObject program = channel.programs.optJSONObject(i);
+            if (program == null) continue;
+            long start = guideTimeMillis(program, "start");
+            long stop = guideTimeMillis(program, "stop");
+            if (start > now || stop <= now) continue;
+            message += "\nNOW  " + program.optString("title");
+            JSONObject next = channel.programs.optJSONObject(i + 1);
+            if (next != null) message += "\nCOMING UP NEXT  " + next.optString("title");
+            break;
+        }
+        showBanner(message, channel.logo);
+    }
+
+    private long guideTimeMillis(JSONObject program, String field) {
+        long milliseconds = program.optLong(field + "_epoch_ms");
+        if (milliseconds > 0) return milliseconds;
+        String utc = program.optString(field);
+        if (utc.length() < 19) return 0;
+        try {
+            java.text.SimpleDateFormat format = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US);
+            format.setTimeZone(TimeZone.getTimeZone("UTC"));
+            return format.parse(utc.substring(0, 19)).getTime();
+        } catch (java.text.ParseException error) {
+            return 0;
+        }
+    }
+
+    private void showBuffering(String message, boolean loading) {
+        bufferLabel.setText(message + (streamTitle.isEmpty() ? "" : "\n" + streamTitle));
+        bufferSpinner.setVisibility(loading ? View.VISIBLE : View.GONE);
+        bufferPanel.setVisibility(View.VISIBLE);
+    }
+
+    private void showBanner(String message) { showBanner(message, ""); }
+
+    private void showBanner(String message, String logo) {
+        bannerPanel.removeAllViews();
+        if (!logo.isEmpty()) {
+            ImageView mark = new ImageView(this);
+            mark.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            bannerPanel.addView(mark, new LinearLayout.LayoutParams(dp(55), dp(47)));
+            posterLoader.execute(() -> loadPoster(logo, mark));
+        }
+        banner.setText(message);
+        bannerPanel.addView(banner, new LinearLayout.LayoutParams(0, -2, 1));
+        bannerPanel.setVisibility(View.VISIBLE);
+        bannerPanel.removeCallbacks(hideBanner);
+        bannerPanel.postDelayed(hideBanner, 5000);
+    }
+
+    private final Runnable hideBanner = () -> bannerPanel.setVisibility(View.GONE);
+
+    @Override public boolean onKeyDown(int key, KeyEvent event) {
+        if (!guideVisible) {
+            boolean select = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER;
+            if (key == KeyEvent.KEYCODE_BACK || (select && tunedChannel != null)) {
+                returnToGuide();
+                channelRail.requestFocus();
+                return true;
+            }
+            if (select) {
+                movieControls.show();
+                return true;
+            }
+            if (tunedChannel != null && (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_CHANNEL_UP)) {
+                play(channelIndex + 1);
+                return true;
+            }
+            if (tunedChannel != null && (key == KeyEvent.KEYCODE_DPAD_DOWN || key == KeyEvent.KEYCODE_CHANNEL_DOWN)) {
+                play(channelIndex - 1);
+                return true;
+            }
+        }
+        return super.onKeyDown(key, event);
+    }
 
     @Override protected void onResume(){super.onResume();if(guide!=null)loadDirectory();}
     @Override protected void onStop() {
@@ -413,11 +543,14 @@ public class MainActivity extends Activity {
 
     private void returnToGuide() {
         tunedChannel = null;
+        movieControls.hide();
         video.removeCallbacks(continueLive);
         video.stopPlayback();
         guideVisible = true;
         guide.setVisibility(View.VISIBLE);
-        banner.setVisibility(View.GONE);
+        bannerPanel.setVisibility(View.GONE);
+        bufferPanel.setVisibility(View.GONE);
+        streamTitle = "";
     }
     @Override protected void onDestroy(){if(guide!=null)guide.removeCallbacks(directoryRefresh);posterLoader.shutdownNow();studioLoader.shutdownNow();video.stopPlayback();super.onDestroy();}
 
@@ -431,6 +564,11 @@ public class MainActivity extends Activity {
             this.channelStatus = channelStatus;
         }
     }
-    private static class Channel { final String name,url; Channel(String n,String u){name=n;url=u;} }
+    private static class Channel {
+        final String name, url;
+        String number = "", logo = "";
+        JSONArray programs;
+        Channel(String name, String url) { this.name = name; this.url = url; }
+    }
     private static class VaultItem { final String title,year,summary,poster,url; VaultItem(String t,String y,String s,String p,String u){title=t;year=y;summary=s;poster=p;url=u;} }
 }

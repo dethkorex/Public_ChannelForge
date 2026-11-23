@@ -42,7 +42,7 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("showPairingDialog", activity)
         self.assertIn("SCAN PUBLIC DIRECTORY", activity)
         self.assertIn("checkUpdates(updateButton)", activity)
-        self.assertIn("if(!guideVisible&&", activity)
+        self.assertIn("if (!guideVisible)", activity)
         self.assertIn("DIRECTORY_FALLBACK_URL", activity)
         self.assertIn("DIRECTORY_REFRESH_MS", activity)
         self.assertIn("guide.postDelayed(directoryRefresh", activity)
@@ -161,6 +161,34 @@ class TvAppTests(unittest.TestCase):
                     release_segment.set()
                     viewer.shutdown()
                     source.shutdown()
+
+    @unittest.skipIf(tv.STREAM_POOL is None, "urllib3 connection pooling is unavailable")
+    def test_stream_proxy_reuses_the_media_connection(self):
+        peers = []
+
+        class Origin(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                peers.append(self.client_address)
+                self.send_response(200)
+                self.send_header("Content-Length", "5")
+                self.end_headers()
+                self.wfile.write(b"video")
+
+            def log_message(self, *_args):
+                pass
+
+        with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Origin) as origin:
+            threading.Thread(target=origin.serve_forever, daemon=True).start()
+            try:
+                for index in range(2):
+                    with tv.open_creator_stream(f"http://127.0.0.1:{origin.server_port}/segment{index}.ts", {}) as (response, _):
+                        self.assertEqual(response.read1(16 * 1024), b"video")
+                        self.assertEqual(response.read1(16 * 1024), b"")
+                self.assertEqual(len(set(peers)), 1)
+            finally:
+                origin.shutdown()
 
     def test_tv_has_program_details_favorites_and_mini_player(self):
         self.assertIn('id="program-dialog"', tv.HTML)

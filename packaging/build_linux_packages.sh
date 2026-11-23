@@ -29,7 +29,7 @@ Version: $VERSION
 Section: video
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.10), python3-webview, python3-pil, gir1.2-webkit2-4.1, ffmpeg, openssh-client, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav
+Depends: python3 (>= 3.10), python3-webview, python3-pil, python3-urllib3, gir1.2-webkit2-4.1, ffmpeg, openssh-client, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav
 Maintainer: Public ChannelForge contributors
 Description: Local-first personal channel guide builder
  Build personal channel rotations and watch the public TV guide in two desktop apps.
@@ -102,6 +102,7 @@ depend = ffmpeg
 depend = openssh
 depend = python-pywebview
 depend = python-pillow
+depend = python-urllib3
 depend = python-gobject
 depend = webkit2gtk-4.1
 depend = gst-plugins-base

@@ -5,6 +5,11 @@ sub init()
   m.liveRetryTimer = m.top.findNode("liveRetryTimer")
   m.liveRetryTimer.observeField("fire", "continueLive")
   m.video.observeField("state", "videoStateChanged")
+  m.bannerTimer = m.top.findNode("bannerTimer")
+  m.bannerTimer.observeField("fire", "hideChannelBanner")
+  m.bufferPanel = m.top.findNode("buffering")
+  m.bufferTitle = m.top.findNode("bufferTitle")
+  m.bufferDetails = m.top.findNode("bufferDetails")
   m.liveItem = invalid
   m.liveRetries = 0
   m.catalogLoading = false
@@ -119,6 +124,8 @@ sub vaultSelected()
   if item = invalid then return
   m.liveItem = invalid
   m.liveRetryTimer.control = "stop"
+  hideChannelBanner()
+  showBuffering("CONNECTING TO THE STUDIO", item.title)
   m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
 end sub
 sub checkUpdates()
@@ -140,20 +147,74 @@ sub playChannel(index as integer)
   m.liveRetryTimer.control = "stop"
   m.liveItem = item
   m.liveRetries = 0
+  showBuffering("CONNECTING TO THE STUDIO", item.title)
   m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
-  m.top.findNode("banner").text = "CH " + item.shortDescriptionLine1 + "   " + item.title : m.top.findNode("banner").visible = true : m.top.findNode("bannerBg").visible = true
+  showChannelBanner(item)
 end sub
 sub videoStateChanged()
-  if m.liveItem = invalid or m.guide.visible then return
-  if m.video.state = "playing" then m.liveRetries = 0
-  if m.video.state = "finished"
+  if m.guide.visible then return
+  state = m.video.state
+  if state = "playing"
+    m.bufferPanel.visible = false
+    m.liveRetries = 0
+    if m.liveItem <> invalid then showChannelBanner(m.liveItem)
+  else if state = "buffering"
+    if m.video.content <> invalid then showBuffering("BUFFERING VIDEO", m.video.content.title)
+  else if state = "finished" and m.liveItem <> invalid
+    showBuffering("LOADING THE NEXT PROGRAM", m.liveItem.title)
     m.liveRetryTimer.duration = 1
     m.liveRetryTimer.control = "start"
-  else if m.video.state = "error" and m.liveRetries < 3
-    m.liveRetries = m.liveRetries + 1
-    m.liveRetryTimer.duration = m.liveRetries * 2
-    m.liveRetryTimer.control = "start"
+  else if state = "error"
+    if m.liveItem <> invalid and m.liveRetries < 3
+      showBuffering("RECONNECTING TO THE STUDIO", m.liveItem.title)
+      m.liveRetries = m.liveRetries + 1
+      m.liveRetryTimer.duration = m.liveRetries * 2
+      m.liveRetryTimer.control = "start"
+    else
+      showBuffering("STREAM UNAVAILABLE", "Press Back to return to the guide.")
+    end if
   end if
+end sub
+sub showBuffering(title as string, detail as string)
+  m.bufferTitle.text = title
+  m.bufferDetails.text = detail
+  m.bufferPanel.visible = true
+end sub
+sub hideChannelBanner()
+  m.top.findNode("banner").visible = false
+  m.top.findNode("bannerLogo").visible = false
+  m.top.findNode("bannerBg").visible = false
+end sub
+sub showChannelBanner(item as object)
+  message = "CH " + item.shortDescriptionLine1 + "   " + item.title
+  if item.programs <> invalid and item.programs.Count() > 0
+    now = CreateObject("roDateTime").AsSeconds()
+    for index = 0 to item.programs.Count() - 1
+      program = item.programs[index]
+      if program.start_epoch_ms = invalid or program.stop_epoch_ms = invalid
+        startsAt = CreateObject("roDateTime") : startsAt.FromISO8601String(program.start)
+        endsAt = CreateObject("roDateTime") : endsAt.FromISO8601String(program.stop)
+        onNow = startsAt.AsSeconds() <= now and endsAt.AsSeconds() > now
+      else
+        onNow = program.start_epoch_ms / 1000# <= now and program.stop_epoch_ms / 1000# > now
+      end if
+      if onNow
+        message = message + chr(10) + "NOW  " + program.title
+        if index + 1 < item.programs.Count()
+          message = message + chr(10) + "COMING UP NEXT  " + item.programs[index + 1].title
+        end if
+        exit for
+      end if
+    end for
+  end if
+  m.top.findNode("banner").text = message
+  m.top.findNode("banner").visible = true
+  logo = m.top.findNode("bannerLogo")
+  logo.uri = item.hdPosterUrl
+  logo.visible = item.hdPosterUrl <> ""
+  m.top.findNode("bannerBg").visible = true
+  m.bannerTimer.control = "stop"
+  m.bannerTimer.control = "start"
 end sub
 sub continueLive()
   if m.liveItem = invalid or m.guide.visible then return
@@ -168,17 +229,21 @@ end sub
 function onKeyEvent(key as string, press as boolean) as boolean
   if not press then return false
   if m.guide.visible = false
-    if key = "OK" or key = "back"
+    if key = "back" or (key = "OK" and m.liveItem <> invalid)
       m.liveItem = invalid
       m.liveRetryTimer.control = "stop"
       m.video.control = "stop"
       m.video.visible = false
       m.guide.visible = true
+      m.bufferPanel.visible = false
+      hideChannelBanner()
       m.channels.SetFocus(true)
       return true
     end if
-    if key = "up" then playChannel(m.channels.itemFocused + 1) : return true
-    if key = "down" then playChannel(m.channels.itemFocused - 1) : return true
+    if m.liveItem <> invalid
+      if key = "up" then playChannel(m.channels.itemFocused + 1) : return true
+      if key = "down" then playChannel(m.channels.itemFocused - 1) : return true
+    end if
   end if
   if key = "left" and m.guide.visible and not m.vault.HasFocus() then m.creators.SetFocus(true) : return true
   if key = "right" and m.guide.visible and not m.vault.HasFocus() then m.channels.SetFocus(true) : return true

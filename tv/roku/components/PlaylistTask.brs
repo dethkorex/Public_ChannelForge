@@ -18,6 +18,9 @@ sub load()
           node = root.CreateChild("ContentNode")
           node.title = channel.name
           node.shortDescriptionLine1 = channel.number
+          node.hdPosterUrl = channel.logo_url
+          node.AddField("programs", "array", false)
+          if channel.programs <> invalid then node.programs = channel.programs
           node.url = channel.stream_url
           node.streamFormat = "hls"
         end if
@@ -38,6 +41,7 @@ sub load()
       node = root.CreateChild("ContentNode")
       node.title = pending
       node.shortDescriptionLine1 = number.ToStr()
+      node.AddField("programs", "array", false)
       node.url = line
       node.streamFormat = "hls"
       pending = ""

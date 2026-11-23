@@ -13,12 +13,13 @@ import threading
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.12"
+VERSION = "3.5.13"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -28,6 +29,21 @@ UPDATE_DIR = (Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) /
 UPDATE_JOBS: dict[str, dict] = {}
 UPDATE_LOCK = threading.RLock()
 APP_WINDOW = None
+STREAM_ERRORS = (OSError, http.client.HTTPException)
+try:
+    import urllib3
+except ImportError:
+    urllib3 = None
+STREAM_POOL = None
+STREAM_PROXY_POOLS = {}
+if urllib3 and hasattr(urllib3.response.HTTPResponse, "read1"):
+    STREAM_POOL = urllib3.PoolManager(num_pools=12, maxsize=6)
+    STREAM_PROXY_POOLS = {
+        protocol: urllib3.ProxyManager(proxy, num_pools=8, maxsize=6)
+        for protocol, proxy in urllib.request.getproxies().items()
+        if protocol in {"http", "https"} and proxy.startswith(("http://", "https://"))
+    }
+    STREAM_ERRORS += (urllib3.exceptions.HTTPError,)
 
 
 def resource(name: str) -> Path:
@@ -65,6 +81,36 @@ def approved_content_url(url: str) -> str:
     if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port == 8787:
         return url
     raise ValueError("ChannelForge TV only opens HTTPS creator media or the local Creator on port 8787.")
+
+
+@contextmanager
+def open_creator_stream(url: str, headers: dict):
+    if STREAM_POOL is None:
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=35) as response:
+            yield response, response.geturl()
+        return
+    for _redirect in range(5):
+        target = urllib.parse.urlsplit(url)
+        proxy = None if urllib.request.proxy_bypass(target.hostname) else STREAM_PROXY_POOLS.get(target.scheme)
+        pool = proxy or STREAM_POOL
+        response = pool.request("GET", url, headers=headers, preload_content=False, redirect=False,
+                                timeout=urllib3.Timeout(connect=6, read=25),
+                                retries=urllib3.Retry(total=1, connect=1, read=0))
+        try:
+            location = response.headers.get("Location")
+            if response.status in {301, 302, 303, 307, 308} and location:
+                if response.headers.get("Content-Length") == "0":
+                    response.read()
+                url = approved_content_url(urllib.parse.urljoin(url, location))
+                continue
+            yield response, url
+            return
+        finally:
+            if not response.closed:
+                response.close()
+            response.release_conn()
+    raise ValueError("The creator returned too many stream redirects.")
 
 
 def local_creator() -> dict:
@@ -235,8 +281,123 @@ async function downloadUpdate(){
 }
 function parsePlaylist(text,creator){let result=[],pending=null;for(const line of text.split(/\r?\n/)){if(line.startsWith('#EXTINF:')){let name=line.slice(line.lastIndexOf(',')+1),id=(line.match(/tvg-id="([^"]+)"/)||[])[1]||'',number=(line.match(/tvg-chno="([^"]+)"/)||[])[1]||'',logo=(line.match(/tvg-logo="([^"]+)"/)||[])[1]||'';pending={id,name,number,logo_url:logo,programs:[],online:true,creator_name:creator.name}}else if(line&&!line.startsWith('#')&&pending){result.push({...pending,stream_url:new URL(line,creator.playlist_url).href});pending=null}}return result}
 function programAt(channel,moment=Date.now()){return(channel?.programs||[]).find(program=>Date.parse(program.start)<=moment&&moment<Date.parse(program.stop))}
-function updateTunedIndicator(media,status='PLAYING'){let box=$('#tuned-channel'),hud=$('#player-hud');if(!box||!hud)return;if(!media){box.classList.remove('active');box.innerHTML='<small>NOW WATCHING</small><b>Nothing tuned</b><span>Choose a live channel or movie</span>';hud.hidden=true;return}let channel=media.channel||{},title=media.title||programAt(channel)?.title||channel.name||'ChannelForge';box.classList.add('active');box.innerHTML='<small>'+esc(media.kind==='live'?'LIVE CHANNEL':'REWIND CINEMA')+'</small><b>'+(media.kind==='live'?'CH '+esc(channel.number||'—')+' · ':'')+esc(channel.name||media.title||'Now playing')+'</b><span>'+esc(title)+'</span>';hud.innerHTML='<span>'+(media.kind==='live'?'● LIVE · CH '+esc(channel.number||'—'):'▣ MOVIE')+'</span><b>'+esc(channel.name||media.title||'ChannelForge')+'</b><small id="player-state">'+esc(status)+'</small>';hud.hidden=false}
-function renderLiveGuide(){let hero=$('#live'),guide=$('#tv-guide'),filters=$('#studio-filters'),times=$('#guide-times'),now=Date.now(),studios=[...new Set(liveChannels.map(channel=>channel.creator_name||'ChannelForge Creator'))],term=guideSearch.trim().toLowerCase();filters.innerHTML=['all',...studios].map(studio=>'<button class="'+(activeStudio===studio?'active':'')+'" data-studio="'+esc(studio)+'">'+esc(studio==='all'?'ALL STUDIOS':studio)+'</button>').join('');filters.querySelectorAll('button').forEach(button=>button.onclick=()=>{activeStudio=button.dataset.studio;renderLiveGuide()});let channels=liveChannels.filter(channel=>(activeStudio==='all'||channel.creator_name===activeStudio)&&(!term||(channel.name+' '+channel.creator_name+' '+(channel.programs||[]).map(p=>p.title).join(' ')).toLowerCase().includes(term)));if(!channels.length){hero.innerHTML='<span class="empty">No online channels match this guide view. Keep Creator open, then scan again.</span>';guide.innerHTML='';times.innerHTML='';return}let tuned=channels.find(channel=>channel.stream_url===activeStreamUrl),featured=tuned||channels.find(channel=>programAt(channel,now))||channels[0],current=programAt(featured,now),progress=current?Math.max(0,Math.min(100,(now-Date.parse(current.start))/(Date.parse(current.stop)-Date.parse(current.start))*100)):0;hero.innerHTML='<button class="guide-preview '+(tuned?'tuned':'')+'">'+(featured.logo_url?'<img src="'+esc(featured.logo_url)+'" alt="">':'<strong>CF</strong>')+'<span><small>'+(tuned?'● YOU ARE WATCHING':'NOW PLAYING')+'</small><b>'+esc(current?.title||featured.name)+'</b><em>'+esc(featured.creator_name||'ChannelForge Creator')+' • CH '+esc(featured.number||'—')+'</em><i><u style="width:'+progress+'%"></u></i></span></button>';hero.firstElementChild.onclick=()=>play(featured.stream_url,{kind:'live',channel:featured,title:current?.title||featured.name});let halfHour=Math.floor((now+guideWindowOffset*1800000)/1800000)*1800000,windowEnd=halfHour+2*3600000;times.innerHTML='<span></span>'+[0,1,2,3].map(index=>'<time>'+new Date(halfHour+index*1800000).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+'</time>').join('');let label=$('#guide-window-label');if(label)label.textContent=guideWindowOffset?'LATER · '+new Date(halfHour).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}):'ON NOW';guide.innerHTML='';for(const channel of channels){let row=document.createElement('section'),isTuned=channel.stream_url===activeStreamUrl;row.className='guide-row'+(isTuned?' tuned':'');row.dataset.stream=channel.stream_url;let programs=(channel.programs||[]).filter(p=>Date.parse(p.stop)>halfHour&&Date.parse(p.start)<windowEnd).slice(0,10);row.innerHTML='<button class="guide-station">'+(channel.logo_url?'<img src="'+esc(channel.logo_url)+'" alt="">':'<strong>'+esc(channel.number||'•')+'</strong>')+'<span><b>'+esc(channel.name)+'</b><small>'+(isTuned?'● WATCHING NOW':esc(channel.creator_name||'ChannelForge Creator'))+'</small></span></button><div class="guide-programs">'+(programs.length?programs.map(p=>{let start=Date.parse(p.start),stop=Date.parse(p.stop),onNow=start<=now&&now<stop,visibleStart=Math.max(start,halfHour),visibleStop=Math.min(stop,windowEnd),width=Math.max(5,(visibleStop-visibleStart)/(windowEnd-halfHour)*100);return '<button class="guide-program '+(onNow?'current':'')+'" style="flex-basis:'+width+'%"><b>'+esc(p.title)+'</b><time>'+new Date(start).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+'–'+new Date(stop).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+'</time></button>'}).join(''):'<span class="guide-unavailable">Schedule unavailable</span>')+'</div>';let tune=()=>play(channel.stream_url,{kind:'live',channel,title:programAt(channel)?.title||channel.name});row.querySelector('.guide-station').onclick=tune;row.querySelectorAll('.guide-program').forEach(button=>button.onclick=tune);guide.append(row)}}
+const GUIDE_STEP=30*60*1000;
+const guideTime=new Intl.DateTimeFormat(undefined,{hour:'numeric',minute:'2-digit'});
+function formatDuration(milliseconds){
+    const seconds=Math.floor(Math.max(0,milliseconds)/1000);
+    return Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');
+}
+function tuneGuideChannel(channel){
+    play(channel.stream_url,{kind:'live',channel,title:programAt(channel)?.title||channel.name});
+}
+function guideTiles(programs,start,stop){
+    const tiles=[], target=(stop-start)*.044;
+    for(const program of programs||[]){
+        const begin=Math.max(start,Date.parse(program.start)), end=Math.min(stop,Date.parse(program.stop));
+        if(!(end>begin))continue;
+        const previous=tiles.at(-1);
+        if(previous&&previous.end===begin&&previous.end-previous.begin<target&&end-begin<target){
+            previous.end=end;
+            previous.programs.push(program);
+        }else{
+            tiles.push({begin,end,programs:[program]});
+        }
+    }
+    return tiles;
+}
+function showGuideTile(channel,tile){
+    if(tile.programs.length===1)return showProgramInfo(channel,tile.programs[0]);
+    const dialog=$('#program-dialog'), body=$('#program-dialog-body');
+    body.innerHTML='<span class="eyebrow">CH '+esc(channel.number||'—')+'</span><h2>'+esc(channel.name)+'</h2><div class="short-programs"></div>';
+    const list=body.querySelector('.short-programs');
+    for(const program of tile.programs){
+        const button=document.createElement('button');
+        button.textContent=guideTime.format(Date.parse(program.start))+' · '+program.title;
+        button.onclick=()=>showProgramInfo(channel,program);
+        list.append(button);
+    }
+    if(!dialog.open)dialog.showModal();
+}
+function renderNowPlaying(channel,now,tuned){
+    const preview=$('#live');
+    if(!channel){
+        preview.innerHTML='<article class="guide-preview"><span><small>LIVE GUIDE</small><b>No channels to show</b><em>Try another studio or scan for channels.</em></span></article>';
+        return;
+    }
+    const current=programAt(channel,now);
+    const poster=current?.poster_url||channel.logo_url||'';
+    const backdrop=current?.backdrop_url||poster;
+    const start=Date.parse(current?.start), stop=Date.parse(current?.stop);
+    const duration=stop-start, elapsed=now-start;
+    const progress=duration>0?Math.max(0,Math.min(100,100*elapsed/duration)):0;
+    const tags=[current?.genres?.[0],current?.content_rating].filter(Boolean);
+    preview.innerHTML='<article class="guide-preview"><span><small><i class="guide-signal"></i>'+(tuned?'YOU ARE WATCHING':'NOW PLAYING')+'<mark>///</mark></small>'
+        +'<b>'+esc(current?.title||channel.name)+'</b><em><span>'+esc(channel.creator_name||'ChannelForge Creator')+'</span><span>CH '+esc(channel.number||'—')+'</span>'
+        +tags.map(tag=>'<span class="guide-tag">'+esc(tag)+'</span>').join('')+'</em>'
+        +(duration>0?'<div class="guide-progress"><progress max="100" value="'+progress+'"></progress><div><time>'+formatDuration(elapsed)+'</time><time>'+formatDuration(duration)+'</time></div></div>':'')
+        +'</span></article>';
+    if(backdrop){
+        try{
+            const address=new URL(backdrop,location.href);
+            if(['http:','https:'].includes(address.protocol)){
+                const safeAddress=address.href.replaceAll(String.fromCharCode(34),'%22').replaceAll(String.fromCharCode(92),'%5C');
+                preview.firstElementChild.style.setProperty('--guide-backdrop','url("'+safeAddress+'")');
+            }
+        }catch(_error){}
+    }
+}
+function renderLiveGuide(){
+    const now=Date.now(), search=guideSearch.trim().toLowerCase(), filterBar=$('#studio-filters');
+    const studios=[...new Set(liveChannels.map(channel=>channel.creator_name||'ChannelForge Creator'))];
+    if(activeStudio!=='all'&&!studios.includes(activeStudio))activeStudio='all';
+    filterBar.innerHTML=['all',...studios].map(studio=>'<button type="button" class="'+(activeStudio===studio?'active':'')+'" data-studio="'+esc(studio)+'">'+esc(studio==='all'?'ALL STUDIOS':studio)+'</button>').join('');
+    filterBar.querySelectorAll('button').forEach(button=>button.onclick=()=>{
+        activeStudio=button.dataset.studio;
+        renderLiveGuide();
+        [...filterBar.children].find(item=>item.dataset.studio===activeStudio)?.focus();
+    });
+    const channels=liveChannels.filter(channel=>(activeStudio==='all'||channel.creator_name===activeStudio)
+        &&(!search||[channel.name,channel.creator_name,...(channel.programs||[]).map(program=>program.title)].join(' ').toLowerCase().includes(search)));
+    const tuned=liveMode&&(liveChannels.find(channel=>channel.stream_url===activeStreamUrl)||activeMedia?.channel);
+    const featured=tuned||channels.find(channel=>programAt(channel,now))||channels[0];
+    renderNowPlaying(featured,now,Boolean(tuned));
+    const steps=innerWidth<1100?4:8;
+    const start=(Math.floor(now/GUIDE_STEP)+guideWindowOffset)*GUIDE_STEP, stop=start+steps*GUIDE_STEP;
+    const board=$('#guide-board'), guide=$('#tv-guide');
+    board.style.setProperty('--guide-steps',steps);
+    $('#guide-window-label').textContent=guideWindowOffset?'GUIDE TIME':'ON NOW';
+    $('#guide-earlier').disabled=guideWindowOffset<=-1;
+    $('#guide-later').disabled=guideWindowOffset>=4;
+    $('#guide-times').innerHTML='<div class="guide-channel-head"><span>CH</span><span>CHANNEL</span></div><div class="guide-ticks">'
+        +Array.from({length:steps},(_,i)=>'<time>'+guideTime.format(start+i*GUIDE_STEP)+'</time>').join('')+'</div>';
+    const rows=document.createDocumentFragment();
+    for(const channel of channels){
+        const row=document.createElement('section'), tiles=guideTiles(channel.programs,start,stop);
+        row.className='guide-row'+(tuned&&channel.stream_url===tuned.stream_url?' tuned':'');
+        row.innerHTML='<div class="guide-station"><button type="button" class="station-tune" aria-label="Watch '+esc(channel.name)+'"><strong>'+esc(channel.number||'—')+'</strong>'
+            +(channel.logo_url?'<img src="'+esc(channel.logo_url)+'" alt="">':'<i class="station-icon" aria-hidden="true"></i>')
+            +'<span><b>'+esc(channel.name)+'</b><small>'+esc(channel.creator_name||'ChannelForge Creator')+'</small></span></button><button type="button" class="station-favorite" aria-label="Favorite '+esc(channel.name)+'" aria-pressed="'+favoriteChannels.has(channel.stream_url)+'">'+(favoriteChannels.has(channel.stream_url)?'★':'☆')+'</button></div>'
+            +'<div class="guide-programs">'+(tiles.length?tiles.map((tile,index)=>{
+                const program=tile.programs[0], last=tile.programs.at(-1);
+                const width=100*(tile.end-tile.begin)/(stop-start), left=100*(tile.begin-start)/(stop-start);
+                const onNow=tile.begin<=now&&now<tile.end;
+                const time=guideTime.format(Date.parse(program.start))+'–'+guideTime.format(Date.parse(last.stop));
+                const title=tile.programs.length>1?program.title+' +'+(tile.programs.length-1):program.title;
+                return '<button type="button" class="guide-program'+(onNow?' current':'')+'" data-program="'+index+'" title="'+esc(title+' · '+time)+'" style="left:'+left+'%;width:'+width+'%"><b>'+esc(title)+'</b><time>'+time+'</time></button>';
+            }).join(''):'<span class="guide-unavailable">Schedule unavailable</span>')+'</div>';
+        row.querySelector('.station-tune').onclick=()=>tuneGuideChannel(channel);
+        row.querySelector('.station-favorite').onclick=event=>{
+            const label=event.currentTarget.getAttribute('aria-label');
+            toggleFavorite('channel',channel.stream_url);
+            [...guide.querySelectorAll('.station-favorite')].find(button=>button.getAttribute('aria-label')===label)?.focus();
+        };
+        row.querySelectorAll('.guide-program').forEach((button,index)=>button.onclick=()=>showGuideTile(channel,tiles[index]));
+        rows.append(row);
+    }
+    guide.replaceChildren(rows);
+    if(!channels.length)guide.innerHTML='<p class="guide-unavailable">No online channels match this view.</p>';
+    renderFavorites();
+}
 function readFavorites(key){
     try {
         const favorites=JSON.parse(window.localStorage?.getItem(key)||'[]');
@@ -255,29 +416,13 @@ function saveFavorites(){
 }
 function toggleFavorite(kind,key){let set=kind==='channel'?favoriteChannels:favoriteCreators;set.has(key)?set.delete(key):set.add(key);saveFavorites();renderLiveGuide()}
 function renderFavorites(){let screen=$('#favorites-list');if(!screen)return;let channels=liveChannels.filter(channel=>favoriteChannels.has(channel.stream_url)),creators=allCreators.filter(creator=>favoriteCreators.has(creator.name));screen.innerHTML=(channels.length?'<h3>Favorite channels</h3>'+channels.map(channel=>'<button class="favorite-card" data-favorite-stream="'+esc(channel.stream_url)+'"><b>CH '+esc(channel.number||'—')+' · '+esc(channel.name)+'</b><small>'+esc(channel.creator_name||'ChannelForge Creator')+'</small></button>').join(''):'<p class="empty">No favorite channels yet.</p>')+(creators.length?'<h3>Favorite creators</h3>'+creators.map(creator=>'<button class="favorite-card" data-favorite-creator="'+esc(creator.name)+'"><b>★ '+esc(creator.name)+'</b><small>'+esc(creator.description||'Creator studio')+'</small></button>').join(''):'')}
-function showProgramInfo(channel,program){let dialog=$('#program-dialog'),start=new Date(program.start),stop=new Date(program.stop),onNow=start<=new Date()&&new Date()<stop;$('#program-dialog-body').innerHTML='<span class="eyebrow">'+(onNow?'● ON NOW':'UPCOMING')+' · CH '+esc(channel.number||'—')+'</span><h2>'+esc(program.title)+'</h2><p class="program-meta">'+start.toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'})+' – '+stop.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+' · '+esc(channel.name)+'</p><p>'+esc(program.summary||program.description||'Program information supplied by the creator guide.')+'</p><div class="program-actions"><button id="program-watch" class="primary">'+(onNow?'WATCH NOW':'WATCH CHANNEL')+'</button><button id="favorite-channel">'+(favoriteChannels.has(channel.stream_url)?'★ FAVORITED':'☆ FAVORITE CHANNEL')+'</button><button id="favorite-creator">'+(favoriteCreators.has(channel.creator_name)?'★ CREATOR FAVORITED':'☆ FAVORITE CREATOR')+'</button></div>';$('#program-watch').onclick=()=>{dialog.close();play(channel.stream_url,{kind:'live',channel,title:programAt(channel)?.title||channel.name})};$('#favorite-channel').onclick=()=>{toggleFavorite('channel',channel.stream_url);showProgramInfo(channel,program)};$('#favorite-creator').onclick=()=>{toggleFavorite('creator',channel.creator_name);showProgramInfo(channel,program)};dialog.showModal()}
-renderLiveGuide=function(){let hero=$('#live'),guide=$('#tv-guide'),filters=$('#studio-filters'),times=$('#guide-times'),now=Date.now(),studios=[...new Set(liveChannels.map(channel=>channel.creator_name||'ChannelForge Creator'))],term=guideSearch.trim().toLowerCase();filters.innerHTML=['all',...studios].map(studio=>'<button class="'+(activeStudio===studio?'active':'')+'" data-studio="'+esc(studio)+'">'+esc(studio==='all'?'ALL STUDIOS':studio)+'</button>').join('');filters.querySelectorAll('button').forEach(button=>button.onclick=()=>{activeStudio=button.dataset.studio;renderLiveGuide()});let channels=liveChannels.filter(channel=>(activeStudio==='all'||channel.creator_name===activeStudio)&&(!term||(channel.name+' '+channel.creator_name+' '+(channel.programs||[]).map(p=>p.title).join(' ')).toLowerCase().includes(term)));if(!channels.length){hero.innerHTML='<span class="empty">No online channels match this guide view. Keep Creator open, then scan again.</span>';guide.innerHTML='';times.innerHTML='';return}let tuned=channels.find(channel=>channel.stream_url===activeStreamUrl),featured=tuned||channels.find(channel=>programAt(channel,now))||channels[0],current=programAt(featured,now),progress=current?Math.max(0,Math.min(100,(now-Date.parse(current.start))/(Date.parse(current.stop)-Date.parse(current.start))*100)):0;hero.innerHTML='<button class="guide-preview '+(tuned?'tuned':'')+'">'+(featured.logo_url?'<img src="'+esc(featured.logo_url)+'" alt="">':'<strong>CF</strong>')+'<span><small>'+(tuned?'● YOU ARE WATCHING':'NOW PLAYING')+'</small><b>'+esc(current?.title||featured.name)+'</b><em>'+esc(featured.creator_name||'ChannelForge Creator')+' • CH '+esc(featured.number||'—')+'</em><i><u style="width:'+progress+'%"></u></i></span></button>';hero.firstElementChild.onclick=()=>play(featured.stream_url,{kind:'live',channel:featured,title:current?.title||featured.name});let halfHour=Math.floor((now+guideWindowOffset*1800000)/1800000)*1800000,windowEnd=halfHour+2*3600000;times.innerHTML='<span></span>'+[0,1,2,3].map(index=>'<time>'+new Date(halfHour+index*1800000).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+'</time>').join('');let label=$('#guide-window-label');if(label)label.textContent=guideWindowOffset?'UPCOMING · '+new Date(halfHour).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}):'ON NOW';guide.innerHTML='';for(const channel of channels){let row=document.createElement('section'),isTuned=channel.stream_url===activeStreamUrl;row.className='guide-row'+(isTuned?' tuned':'');let programs=(channel.programs||[]).filter(p=>Date.parse(p.stop)>halfHour&&Date.parse(p.start)<windowEnd).slice(0,10);row.innerHTML='<div class="guide-station"><button class="station-tune">'+(channel.logo_url?'<img src="'+esc(channel.logo_url)+'" alt="">':'<strong>'+esc(channel.number||'•')+'</strong>')+'<span><b>'+esc(channel.name)+'</b><small>'+(isTuned?'● WATCHING NOW':esc(channel.creator_name||'ChannelForge Creator'))+'</small></span></button><button class="station-favorite" title="Favorite channel">'+(favoriteChannels.has(channel.stream_url)?'★':'☆')+'</button></div><div class="guide-programs">'+(programs.length?programs.map((p,index)=>{let start=Date.parse(p.start),stop=Date.parse(p.stop),onNow=start<=now&&now<stop,visibleStart=Math.max(start,halfHour),visibleStop=Math.min(stop,windowEnd),width=Math.max(5,(visibleStop-visibleStart)/(windowEnd-halfHour)*100);return '<button class="guide-program '+(onNow?'current':'')+'" data-program="'+index+'" style="flex-basis:'+width+'%"><b>'+esc(p.title)+'</b><time>'+new Date(start).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+'–'+new Date(stop).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+'</time><small>MORE INFO</small></button>'}).join(''):'<span class="guide-unavailable">Schedule unavailable</span>')+'</div>';row.querySelector('.station-tune').onclick=()=>play(channel.stream_url,{kind:'live',channel,title:programAt(channel)?.title||channel.name});row.querySelector('.station-favorite').onclick=()=>toggleFavorite('channel',channel.stream_url);row.querySelectorAll('.guide-program').forEach((button,index)=>button.onclick=()=>showProgramInfo(channel,programs[index]));guide.append(row)}renderFavorites()}
-const renderLiveGuideCore=renderLiveGuide;
-renderLiveGuide=function(){
-    renderLiveGuideCore();
-    let hero=$('#live'),preview=hero?.querySelector('.guide-preview');
-    if(!preview)return;
-    let now=Date.now(),term=guideSearch.trim().toLowerCase();
-    let channels=liveChannels.filter(channel=>(activeStudio==='all'||channel.creator_name===activeStudio)&&(!term||(channel.name+' '+channel.creator_name+' '+(channel.programs||[]).map(p=>p.title).join(' ')).toLowerCase().includes(term)));
-    let tuned=channels.find(channel=>channel.stream_url===activeStreamUrl),featured=tuned||channels.find(channel=>programAt(channel,now))||channels[0];
-    if(!featured)return;
-    let current=programAt(featured,now),poster=current?.poster_url||featured.logo_url||'',backdrop=current?.backdrop_url||poster,progress=current?Math.max(0,Math.min(100,(now-Date.parse(current.start))/(Date.parse(current.stop)-Date.parse(current.start))*100)):0;
-    preview.innerHTML=(poster?'<img class="guide-program-art" src="'+esc(poster)+'" alt="'+esc(current?.title||featured.name)+' artwork">':'<strong>CF</strong>')+'<span><small>'+(tuned?'● YOU ARE WATCHING':'NOW PLAYING')+' <mark>///</mark></small><b>'+esc(current?.title||featured.name)+'</b><em>◉ &nbsp;'+esc(featured.creator_name||'ChannelForge Creator')+' &nbsp; | &nbsp; ▣ &nbsp;CH '+esc(featured.number||'—')+'</em><i><u style="width:'+progress+'%"></u></i></span>';
-    if(backdrop)preview.style.setProperty('--guide-backdrop','url("'+encodeURI(backdrop).replace(/"/g,'%22')+'")');else preview.style.removeProperty('--guide-backdrop');
-    preview.onclick=()=>play(featured.stream_url,{kind:'live',channel:featured,title:current?.title||featured.name});
-}
-showProgramInfo=function(channel,program){
+function showProgramInfo(channel,program){
     let dialog=$('#program-dialog'),start=new Date(program.start),stop=new Date(program.stop),onNow=start<=new Date()&&new Date()<stop,art=program.poster_url||program.backdrop_url||channel.logo_url||'';
     $('#program-dialog-body').innerHTML='<div class="program-dialog-layout">'+(art?'<img class="program-poster" src="'+esc(art)+'" alt="'+esc(program.title)+' artwork">':'')+'<div><span class="eyebrow">'+(onNow?'● ON NOW':'UPCOMING')+' · CH '+esc(channel.number||'—')+'</span><h2>'+esc(program.title)+'</h2><p class="program-meta">'+start.toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'})+' – '+stop.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+' · '+esc(channel.name)+'</p><p>'+esc(program.summary||program.description||'Program information supplied by the creator guide.')+'</p><div class="program-actions"><button id="program-watch" class="primary">'+(onNow?'WATCH NOW':'WATCH CHANNEL')+'</button><button id="favorite-channel">'+(favoriteChannels.has(channel.stream_url)?'★ FAVORITED':'☆ FAVORITE CHANNEL')+'</button><button id="favorite-creator">'+(favoriteCreators.has(channel.creator_name)?'★ CREATOR FAVORITED':'☆ FAVORITE CREATOR')+'</button></div></div></div>';
     $('#program-watch').onclick=()=>{dialog.close();play(channel.stream_url,{kind:'live',channel,title:programAt(channel)?.title||channel.name})};
     $('#favorite-channel').onclick=()=>{toggleFavorite('channel',channel.stream_url);showProgramInfo(channel,program)};
     $('#favorite-creator').onclick=()=>{toggleFavorite('creator',channel.creator_name);showProgramInfo(channel,program)};
-    dialog.showModal();
+    if(!dialog.open)dialog.showModal();
 }
 let directoryScan=null, pendingGuideRender=0;
 const channelsByStudio=new Map();
@@ -362,7 +507,9 @@ async function scanStudio(creator){
     const deadline=setTimeout(()=>controller.abort(),6500);
     try {
         if(creator.status_url){
-            const value=await json(creator.status_url,true,controller.signal);
+            const address=new URL(creator.status_url);
+            address.searchParams.set('guide','extended');
+            const value=await json(address.href,true,controller.signal);
             channels=(value.channels||[]).filter(channel=>channel.online)
                 .map(channel=>({...channel,creator_name:creator.name,
                     stream_url:creatorMedia(channel.stream_url,creator),
@@ -548,12 +695,21 @@ function hideFailedPoster(image,fallback=''){
 }
 function selectTape(x){if(selectedTape===x)return;selectedTape=x;$('#selection').innerHTML='<div class="vhs-box">'+(x.poster_url?'<img decoding="async" src="'+esc(x.poster_url)+'" alt="'+esc(x.title)+' poster">':'<img alt="" style="visibility:hidden">')+'<span>CHANNELFORGE HOME VIDEO</span></div><div><span class="eyebrow">SELECTED CASSETTE</span><h2>'+esc(x.title)+'</h2><b class="pink">'+esc(x.year)+'</b> • '+esc(x.type)+'<p>'+esc(x.summary||'No description supplied.')+'</p><button id="selected-play">▷ INSERT MOVIE</button><small>Insert this movie to begin playback. Poster and details come from the connected creator library.</small></div>';$('#selection img')?.addEventListener('error',event=>hideFailedPoster(event.currentTarget));$('#selected-play').onclick=()=>play(x.stream_url,{kind:'movie',title:x.title,movie:x})}
 function liveEdge(v){if(!liveMode)return;if(hls?.liveSyncPosition&&Math.abs(v.currentTime-hls.liveSyncPosition)>6)v.currentTime=hls.liveSyncPosition;else if(v.buffered.length&&v.currentTime<v.buffered.end(v.buffered.length-1)-8)v.currentTime=v.buffered.end(v.buffered.length-1)-2}
+function setBuffering(active,message='Buffering video…',loading=true){
+    const overlay=$('#player-buffer');
+    overlay.hidden=!active;
+    if(!active)return;
+    overlay.querySelector('.buffer-spinner').hidden=!loading;
+    overlay.querySelector('b').textContent=message;
+    overlay.querySelector('small').textContent=activeMedia?.channel?.name||activeMedia?.title||'ChannelForge TV';
+}
 function setPlayerState(message,error=false,canRetry=error){
     const state=$('#player-state');
     if(!state)return;
     state.textContent=message;
     state.classList.toggle('error',error);
     if(!error)return;
+    setBuffering(true,message,false);
     clearTimeout(playerControlsTimer);
     document.body.classList.remove('player-controls-hidden');
     if(canRetry&&activeStreamUrl){
@@ -574,6 +730,7 @@ function advanceLive(failed=false, failureMessage='COULD NOT PLAY THIS CHANNEL')
     const current=programAt(channel,Date.now());
     const earlyEnd=!failed&&current&&current.start===activeMedia.programStart ? Date.parse(current.stop)-Date.now() : 0;
     setPlayerState(failed?'RECONNECTING…':'TUNING NEXT PROGRAM…');
+    setBuffering(true,failed?'Reconnecting to the studio…':'Loading the next program…');
     liveRetryTimer=setTimeout(()=>{
         liveRetryTimer=null;
         if(generation!==playbackGeneration||!liveMode)return;
@@ -597,7 +754,7 @@ function play(url,media=null,continuing=false){
         activeMedia.title=current?.title||activeMedia.title;
     }
     $('#close').textContent=playerMini?'✕ CLOSE PLAYER':liveMode?'⌄ MINIMIZE TO GUIDE':'✕ CLOSE MOVIE';
-    v.controls=!liveMode;updateTunedIndicator(activeMedia,'TUNING…');renderLiveGuide();
+    v.controls=!liveMode;updateTunedIndicator(activeMedia,'CONNECTING…');setBuffering(true,'Connecting to the studio…');showPlayerControls();renderLiveGuide();
     if(hls){hls.destroy();hls=null}
     v.removeAttribute('src');v.load();
     const start=()=>{if(generation===playbackGeneration)v.play().catch(error=>{
@@ -625,19 +782,19 @@ function play(url,media=null,continuing=false){
     v.classList.add('playing');$('#close').classList.add('show');
 }
 function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}
-function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeMedia=null;let v=$('#player');v.classList.remove('playing','mini');v.pause();if(hls){hls.destroy();hls=null}v.removeAttribute('src');v.load();document.body.classList.remove('has-mini-player');$('#close').classList.remove('show');$('#close').textContent='⌄ MINIMIZE TO GUIDE';updateTunedIndicator(null);renderLiveGuide()}
+function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeMedia=null;let v=$('#player');v.classList.remove('playing','mini');v.pause();if(hls){hls.destroy();hls=null}v.removeAttribute('src');v.load();setBuffering(false);document.body.classList.remove('has-mini-player');$('#close').classList.remove('show');$('#close').textContent='⌄ MINIMIZE TO GUIDE';updateTunedIndicator(null);renderLiveGuide()}
 $('#player').addEventListener('seeking',event=>liveEdge(event.currentTarget));
 $('#player').addEventListener('timeupdate',event=>liveEdge(event.currentTarget));
-$('#player').addEventListener('playing',()=>{liveRetries=0;setPlayerState(liveMode?'● LIVE · NO PAUSE OR REWIND':'PLAYING')});
+$('#player').addEventListener('playing',()=>{setBuffering(false);showPlayerControls();liveRetries=0;setPlayerState(liveMode?'● LIVE · NO PAUSE OR REWIND':'PLAYING')});
 $('#player').addEventListener('ended',()=>advanceLive());
-$('#player').addEventListener('error',()=>{if(!hls)advanceLive(true)});
-$('#player').addEventListener('waiting',()=>setPlayerState('BUFFERING…'));
+$('#player').addEventListener('error',()=>{if(!hls&&activeStreamUrl){if(liveMode)advanceLive(true);else setPlayerState('COULD NOT PLAY THIS MOVIE',true)}});
+$('#player').addEventListener('waiting',()=>{if(activeStreamUrl){setPlayerState('BUFFERING…');setBuffering(true)}});
 $('#player').addEventListener('pause',event=>{const video=event.currentTarget;if(liveMode&&!video.ended&&video.readyState>=2&&video.classList.contains('playing'))video.play().catch(()=>{})});
 $('#scan-channels').onclick=()=>scanChannels();
 $('#guide-search').oninput=event=>{guideSearch=event.target.value;renderLiveGuide()};
-$('#guide-earlier').onclick=()=>{guideWindowOffset=Math.max(0,guideWindowOffset-2);renderLiveGuide()};
+$('#guide-earlier').onclick=()=>{guideWindowOffset=Math.max(-1,guideWindowOffset-1);renderLiveGuide()};
 $('#guide-now').onclick=()=>{guideWindowOffset=0;renderLiveGuide()};
-$('#guide-later').onclick=()=>{guideWindowOffset=Math.min(10,guideWindowOffset+2);renderLiveGuide()};
+$('#guide-later').onclick=()=>{guideWindowOffset=Math.min(4,guideWindowOffset+1);renderLiveGuide()};
 $('#movie-search').oninput=event=>{vaultSearch=event.target.value;clearTimeout(vaultSearchTimer);vaultSearchTimer=setTimeout(applyVaultFilters,90)};
 $('#movie-genre').onchange=event=>{vaultGenre=event.target.value;applyVaultFilters(true)};
 $('#movie-rating').onchange=event=>{vaultRating=event.target.value;applyVaultFilters(true)};
@@ -675,15 +832,116 @@ CINEMA_FIX_CSS = r'''[data-section-block="cinema"].vault-layout{grid-template-co
 PLAYER_DOCK_CSS = r'''.live-stage{display:grid;grid-template-columns:minmax(300px,38%) minmax(0,1fr);gap:14px;align-items:stretch;margin:0 0 12px}.mini-player-slot{position:relative;isolation:isolate;min-height:210px;overflow:hidden;border:1px solid #20e8ff;border-radius:14px;background:#070b1c;box-shadow:0 18px 42px #0007}.mini-player-poster{position:absolute;inset:0;display:grid;place-content:center;gap:8px;background:radial-gradient(circle at 50% 35%,#ff39b744,transparent 42%),linear-gradient(145deg,#19164a,#080a1d);color:#55edff;text-align:center}.mini-player-poster img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;filter:saturate(.92) brightness(.72)}.mini-player-poster::after{content:"";position:absolute;inset:0;background:linear-gradient(0deg,#050717cc,transparent 60%)}.mini-player-poster strong,.mini-player-poster span{position:relative;z-index:1}.mini-player-poster strong{font-size:54px;color:#fff}.mini-player-poster span{font:bold 11px Consolas,monospace;letter-spacing:2px}.live-stage .live{min-width:0;padding:0}.live-stage .guide-preview{height:100%;min-height:210px;margin:0;grid-template-columns:1fr}.live-stage .guide-preview>img,.live-stage .guide-preview>strong{display:none}.mini-player-shell{display:contents}.mini-player-shell.guide-dock,.mini-player-shell.section-dock{position:absolute;z-index:3;inset:0;display:block;overflow:hidden;border-radius:13px;background:#000}.mini-player-shell.section-dock{position:relative;inset:auto;width:min(620px,52vw);aspect-ratio:16/9;margin:0 0 18px auto;border:1px solid #20e8ff;box-shadow:0 18px 48px #0009}.mini-player-shell video.mini{position:absolute!important;display:block;inset:0!important;width:100%!important;height:100%!important;aspect-ratio:16/9;object-fit:contain;border:0!important;border-radius:0!important;box-shadow:none!important}.mini-player-shell.guide-dock .player-hud,.mini-player-shell.section-dock .player-hud{position:absolute;z-index:4;left:12px!important;right:12px!important;top:12px!important;bottom:auto!important;display:grid;width:auto;max-width:calc(100% - 24px);padding:9px 11px;pointer-events:none;transform:none}.mini-player-shell.guide-dock .player-hud-actions,.mini-player-shell.section-dock .player-hud-actions{display:none}.mini-player-shell.guide-dock .close,.mini-player-shell.section-dock .close{position:absolute;z-index:5;right:12px!important;top:auto!important;bottom:12px!important;transform:none!important;padding:8px 11px;background:#080b1ddd;backdrop-filter:blur(8px)}.mini-player-shell:not(.guide-dock):not(.section-dock) .player-hud{position:fixed;z-index:12;left:50%;right:auto;top:auto;bottom:32px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:24px;width:min(1040px,calc(100vw - 80px));max-width:none;padding:18px 20px;border:1px solid #27eaff;border-radius:16px;background:linear-gradient(110deg,#080c22ed,#18103bed);box-shadow:0 22px 70px #000c,0 0 30px #18dfff1a;backdrop-filter:blur(18px);transform:translateX(-50%);transition:opacity .22s,transform .22s}.player-hud-copy{display:grid;gap:5px;min-width:0}.player-hud-copy span{color:#62ffad;font:bold 11px Consolas,monospace;letter-spacing:1.5px}.player-hud-copy b{color:#52eaff;font-size:14px}.player-hud-copy strong{overflow:hidden;color:#fff52d;font-size:clamp(19px,2vw,29px);text-overflow:ellipsis;white-space:nowrap}.player-hud-copy i{display:block;width:100%;height:5px;overflow:hidden;border-radius:5px;background:#3b425b}.player-hud-copy i u{display:block;height:100%;background:linear-gradient(90deg,#5cffae,#45ddff);text-decoration:none}.player-hud-copy small{color:#a9b6d2}.player-hud-copy em{color:#d2d8e8;font:normal 11px Consolas,monospace}.player-hud-actions{display:flex;align-items:center;gap:8px}.player-hud-actions button{min-width:76px;padding:12px 10px;border:1px solid #30e5ff;border-radius:10px;background:#111938;color:#fff;font-weight:900}.player-hud-actions button small{color:#8cefff;font-size:9px}.player-hud[hidden]{display:none!important}.player-controls-hidden .mini-player-shell:not(.guide-dock):not(.section-dock) .player-hud,.player-controls-hidden .mini-player-shell:not(.guide-dock):not(.section-dock) .close{opacity:0;pointer-events:none;transform:translate(-50%,18px)}.has-mini-player .wrap{padding-top:18px!important}.guide-preview,.guide-program,.tape{transition:transform .16s cubic-bezier(.2,.8,.2,1),border-color .16s,box-shadow .16s,filter .16s}.guide-program:focus-visible,.tape:focus-visible{outline:0;z-index:4;transform:translateY(-2px) scale(1.018);border-color:#efff1c!important;box-shadow:0 0 0 2px #ff3eb8,0 10px 28px #000a;filter:brightness(1.08)}@media(max-width:900px){.live-stage{grid-template-columns:1fr}.mini-player-slot{min-height:0;aspect-ratio:16/9}.mini-player-shell.section-dock{width:100%}.mini-player-shell:not(.guide-dock):not(.section-dock) .player-hud{width:calc(100vw - 28px);grid-template-columns:1fr}.player-hud-actions{justify-content:center}}@media(prefers-reduced-motion:reduce){.guide-preview,.guide-program,.tape{transition:none!important}}'''
 SIDEBAR_HTML = r'''<aside class="app-sidebar"><nav><small class="nav-group">WATCH</small><a class="active" href="?screen=home" data-screen="home"><i>⌂</i><span class="menu-label">Home</span></a><a href="?screen=live" data-screen="live"><i>●</i><span class="menu-label">Live TV Guide</span></a><small class="nav-group">LIBRARY</small><a href="?screen=cinema" data-screen="cinema"><i>▣</i><span class="menu-label">Rewind Cinema</span></a><a href="?screen=continue" data-screen="continue"><i>▶</i><span class="menu-label">Continue Watching</span></a><a href="?screen=favorites" data-screen="favorites"><i>★</i><span class="menu-label">Favorites</span></a><small class="nav-group">SYSTEM</small><a href="?screen=updates" data-screen="updates"><i>↻</i><span class="menu-label">Updates</span></a></nav><section id="tuned-channel" class="tuned-channel"><small>NOW WATCHING</small><b>Nothing tuned</b><span>Choose a live channel or movie</span></section><div class="sidebar-footer">ChannelForge TV • v__VERSION__<br>Keyboard and remote friendly.</div></aside>'''
 EXTRA_SCREENS = r'''<section data-section-block="continue" hidden><div class="screen-title"><span class="eyebrow">PICK UP WHERE YOU LEFT OFF</span><h2>Continue Watching</h2></div><div class="section-placeholder"><b>No unfinished movies yet</b><span>Playback history will appear here as you watch Rewind Cinema.</span></div></section><section data-section-block="favorites" hidden><div class="screen-title"><span class="eyebrow">YOUR COLLECTION</span><h2>Favorite channels &amp; creators</h2></div><div id="favorites-list" class="favorites-list"></div></section><section data-section-block="updates" hidden><div class="screen-title"><span class="eyebrow">APPLICATION</span><h2>Updates</h2><p>Downloads come only from the official GitHub release and are SHA-256 verified.</p></div><div class="section-placeholder"><b id="screen-update-status">Checking for updates…</b><span>Select Check Now to refresh release status.</span><button id="screen-check-update" class="update">CHECK NOW</button></div></section>'''
+GUIDE_LAYOUT_CSS = r'''
+.guide-mode main.wrap{padding:16px clamp(14px,1.6vw,30px) 26px}
+.live-stage{grid-template-columns:minmax(220px,29%) minmax(0,1fr);gap:16px;min-height:174px;margin:0 0 12px}
+.live-stage .mini-player-slot{min-height:174px;border-color:#21d8f6;border-radius:9px;background:#020407;box-shadow:inset 0 0 0 3px #091829,0 0 16px #00cce520}
+.mini-player-poster{background:#020407;color:#8faec9;padding:14px}
+.mini-player-poster span{color:#8faec9;font:600 11px/1.45 "Segoe UI",sans-serif;letter-spacing:.14em;text-align:center}
+.live-stage #live{display:block;padding:0;min-width:0}
+.live-stage .guide-preview{display:flex;min-height:174px;height:100%;align-items:center;padding:13px 24px 12px;border-radius:10px;text-align:left;cursor:default;
+    background:radial-gradient(ellipse at 100% 0%,#7a18ab55,transparent 56%),linear-gradient(90deg,#080d23 20%,#131143e6 70%,#130b2f80),var(--guide-backdrop,none),linear-gradient(105deg,#0b122b,#201044);
+    background-position:center,right,center 35%,center;background-size:cover}
+.live-stage .guide-preview::after{background:linear-gradient(129deg,transparent 84%,#da54ff56 84.2% 85.2%,transparent 85.4% 90%,#38ddff45 90.2% 91.1%,transparent 91.3%)}
+.live-stage .guide-preview>span{width:100%;min-width:0}
+.guide-preview small{display:flex;align-items:center;gap:8px;letter-spacing:.1em}
+.guide-preview .guide-signal{display:inline-block;margin:0;width:9px;height:9px;border-radius:50%;background:#32effc;box-shadow:0 0 11px #25d8ec}
+.live-stage .guide-preview b{font-size:clamp(20px,2.05vw,34px);line-height:1.08;margin:7px 0 9px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.guide-preview em{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;font:500 13px "Segoe UI",sans-serif}
+.guide-preview em>span+span:not(.guide-tag){border-left:1px solid #5282a9;padding-left:14px}
+.guide-tag{border:1px solid #20e0fa;border-radius:5px;padding:3px 7px;color:#e6faff;font-size:10px;font-weight:700;text-transform:uppercase}
+.guide-tag:last-child{border-color:#dcb84b}
+.guide-progress{margin-top:11px;width:min(86%,980px)}
+.guide-progress progress{display:block;width:100%;height:6px;border:0;border-radius:5px;overflow:hidden;background:#313b59;accent-color:#39f7bd}
+.guide-progress progress::-webkit-progress-bar{background:#313b59}
+.guide-progress progress::-webkit-progress-value{background:linear-gradient(90deg,#16e4ad,#68ffde)}
+.guide-progress>div{display:flex;justify-content:space-between;margin-top:4px;color:#d9f5ff;font-size:11px;font-variant-numeric:tabular-nums}
+.guide-mode .guide-toolbar{margin-bottom:10px;border-color:#1f6c9a;border-radius:9px;padding:7px 8px;gap:8px;min-height:44px}
+.guide-mode .guide-toolbar button,.guide-mode .guide-toolbar input{min-height:31px;padding:5px 9px;font-size:12px}
+.guide-mode .guide-toolbar input{width:clamp(120px,13vw,245px)}
+.guide-toolbar #guide-now{box-shadow:0 0 12px #37dbff50,inset 0 0 9px #0cc7f838}
+.guide-toolbar button:disabled{opacity:.45}
+.guide-mode .studio-filters{position:relative;gap:8px;margin:0 0 12px;padding:0 0 8px;border-bottom:1px solid #734398;background:linear-gradient(130deg,transparent 94%,#952cff38 94% 96%,transparent 96% 97%,#e545ff44 97% 98.5%,transparent 98.5%)}
+.guide-mode .studio-filters button{min-height:31px;padding:6px 12px;border-radius:6px}
+.guide-mode .studio-filters .active{box-shadow:0 0 11px #ffe8354a,inset 0 0 6px #f5dc2232}
+#guide-board{--station-width:clamp(156px,14.7vw,222px);--guide-steps:8;overflow:hidden;border:1px solid #28daef;border-radius:9px;background:#060c1c;box-shadow:0 14px 44px #0009,0 0 22px #0ddcff13}
+#guide-board .guide-times,#guide-board .guide-row{display:grid;grid-template-columns:var(--station-width) minmax(0,1fr);gap:0;width:100%;min-width:0;padding:0}
+#guide-board .guide-times{height:31px;border-bottom:1px solid #1ac9e7;margin:0;background:#070c1d;font:700 12px "Segoe UI",sans-serif;color:#4affff}
+.guide-channel-head{display:grid;grid-template-columns:32px 1fr;align-items:center;padding:0 9px;text-align:left;border-right:1px solid #235575}
+.guide-ticks{display:grid;grid-template-columns:repeat(var(--guide-steps),minmax(0,1fr));align-items:end;text-align:center}
+.guide-ticks time{position:relative;padding-bottom:7px;white-space:nowrap}
+.guide-ticks time::after{content:"";position:absolute;left:0;bottom:0;width:1px;height:5px;background:#159cb2}
+#guide-board .tv-guide{height:auto;max-height:calc(100vh - 388px);min-height:54px;display:block;overflow:auto;padding:0;scrollbar-width:thin;scrollbar-color:#23788c #080e22;scroll-snap-type:none}
+#guide-board .guide-row{height:51px;border:0;border-bottom:1px solid #235272;border-radius:0;box-shadow:none}
+#guide-board .guide-row:last-child{border-bottom:0}
+#guide-board .guide-row.tuned{background:#102024;box-shadow:inset 3px 0 #53f4b4}
+#guide-board .guide-station{min-width:0;display:grid;grid-template-columns:minmax(0,1fr) 30px;align-items:center;background:#080f23;border:0;border-right:1px solid #295878;padding:0}
+#guide-board .station-tune{display:grid;grid-template-columns:29px 24px minmax(0,1fr);gap:6px;align-items:center;height:100%;min-width:0;border:0;padding:3px 7px;border-radius:0;background:transparent;text-align:left}
+#guide-board .station-tune strong{color:#55fcff;font-size:14px;text-align:center}
+#guide-board .station-tune b,#guide-board .station-tune small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25}
+#guide-board .station-tune b{font-size:12px;color:#fff}
+#guide-board .station-tune small{color:#9bc7e7;font-size:10px}
+#guide-board .station-tune img{width:24px;height:24px;object-fit:contain}
+.station-icon{width:20px;height:14px;border:1.3px solid #d8f3ff;border-radius:4px;position:relative}
+.station-icon::before{content:"";position:absolute;left:5px;top:-6px;width:6px;height:6px;border-left:1px solid #d8f3ff;border-top:1px solid #d8f3ff;transform:rotate(45deg)}
+#guide-board .station-favorite{align-self:center;position:static;min-width:0;width:27px;height:27px;padding:0;border:0;background:none;color:#ffe844;font-size:15px}
+#guide-board .guide-programs{position:relative;display:block;min-width:0;background:repeating-linear-gradient(to right,#121d33 0 calc(100% / var(--guide-steps) - 1px),#245174 calc(100% / var(--guide-steps) - 1px) calc(100% / var(--guide-steps)))}
+#guide-board .guide-program{position:absolute;top:1px;bottom:1px;display:grid;align-content:center;gap:3px;min-width:0;max-width:none;min-height:0;padding:3px 7px;border:1px solid #2c506f;border-radius:4px;background:linear-gradient(139deg,#16213c,#0b1125);overflow:hidden;text-align:left}
+#guide-board .guide-program b,#guide-board .guide-program time{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.16}
+#guide-board .guide-program b{font-weight:650;font-size:12px}
+#guide-board .guide-program time{font-size:10px;color:#b6d8f2}
+#guide-board .guide-program.current{z-index:1;border-color:#fff34b;background:linear-gradient(120deg,#494014,#151a23);box-shadow:inset 0 0 9px #dfc41344;color:#fff4ab}
+#guide-board .guide-program:focus-visible,#guide-board button:focus-visible{z-index:2;outline:2px solid #fff556;outline-offset:-2px}
+.short-programs{display:grid;gap:6px;max-height:320px;overflow:auto}
+.short-programs button{text-align:left}
+.player-buffer{position:fixed;inset:0;z-index:11;display:grid;place-content:center;justify-items:center;gap:9px;padding:30px;background:radial-gradient(ellipse at 50% 44%,#1a284bcf,#060817ee 70%);color:#edfaff;text-align:center;pointer-events:none}
+.player-buffer b{font-size:clamp(15px,2vw,24px);font-weight:650}
+.player-buffer small{color:#9fc4dc;font-size:13px}
+.buffer-spinner{width:34px;height:34px;border:3px solid #315878;border-top-color:#30f8fb;border-right-color:#bf5bff;border-radius:50%;animation:buffer-spin .8s linear infinite}
+@keyframes buffer-spin{to{transform:rotate(360deg)}}
+.player-bug{position:fixed;z-index:11;top:18px;left:19px;display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid #3bebfb;border-radius:7px;background:#0b1225cc;color:#c8f7fc;font-size:12px;font-weight:700;pointer-events:none}
+.player-bug img{width:43px;height:34px;object-fit:contain}
+.guide-dock .player-buffer,.section-dock .player-buffer{position:absolute}
+.guide-dock .player-bug,.section-dock .player-bug{display:none}
+.guide-dock .player-hud{display:none!important}
+.guide-dock .close{padding:5px 7px;font-size:10px}
+@media(prefers-reduced-motion:reduce){.buffer-spinner{animation:none}}
+@media(max-width:1100px){.guide-toolbar .guide-window-controls{order:3}.live-stage{grid-template-columns:minmax(205px,34%) minmax(0,1fr)}}
+@media(max-width:760px){.live-stage{grid-template-columns:1fr}.live-stage .mini-player-slot{min-height:110px;max-height:210px}.guide-preview b{white-space:normal!important}#guide-board{--station-width:135px}#guide-board .station-tune{grid-template-columns:22px minmax(0,1fr)}#guide-board .station-icon,#guide-board .station-tune img{display:none}#guide-board .guide-program{padding:3px}#guide-board .guide-program time{font-size:9px}}
+'''
 PLAYER_DOCK_JS = r'''
 let playerShell=null,playerControlsTimer=0;
-function updateTunedIndicator(media,status='PLAYING'){let box=$('#tuned-channel'),hud=$('#player-hud');if(!box||!hud)return;if(!media){box.classList.remove('active');box.innerHTML='<small>NOW WATCHING</small><b>Nothing tuned</b><span>Choose a live channel or movie</span>';hud.hidden=true;return}let channel=media.channel||{},program=programAt(channel),programs=channel.programs||[],index=programs.indexOf(program),next=index>=0?programs[index+1]:null,title=media.title||program?.title||channel.name||'ChannelForge',start=program?Date.parse(program.start):0,stop=program?Date.parse(program.stop):0,progress=start&&stop?Math.max(0,Math.min(100,(Date.now()-start)/(stop-start)*100)):0;box.classList.add('active');box.innerHTML='<small>'+esc(media.kind==='live'?'LIVE CHANNEL':'REWIND CINEMA')+'</small><b>'+(media.kind==='live'?'CH '+esc(channel.number||'—')+' · ':'')+esc(channel.name||media.title||'Now playing')+'</b><span>'+esc(title)+'</span>';hud.innerHTML='<div class="player-hud-copy"><span>'+(media.kind==='live'?'● LIVE NOW · CH '+esc(channel.number||'—'):'▣ REWIND CINEMA')+'</span><b>'+esc(channel.name||media.title||'ChannelForge')+'</b><strong>'+esc(title)+'</strong><i><u style="width:'+progress+'%"></u></i><small id="player-state">'+esc(status)+'</small>'+(next?'<em>UP NEXT · '+esc(next.title)+'</em>':'')+'</div>'+(media.kind==='live'?'<div class="player-hud-actions"><button data-player-surf="-1" aria-label="Previous channel">▲<br><small>CHANNEL</small></button><button data-player-surf="1" aria-label="Next channel">▼<br><small>CHANNEL</small></button><button onclick="minimizePlayer()">☰<br><small>GUIDE</small></button></div>':'');hud.hidden=false;showPlayerControls()}
-function ensurePlayerShell(){if(playerShell)return playerShell;playerShell=document.createElement('section');playerShell.id='mini-player-shell';playerShell.className='mini-player-shell';let player=$('#player');player.parentNode.insertBefore(playerShell,player);playerShell.append(player,$('#player-hud'),$('#close'));return playerShell}
-function syncMiniPlayerPoster(){let poster=$('#mini-player-poster'),preview=$('#live .guide-preview');if(!poster||!preview)return;let image=preview.querySelector('img'),title=preview.querySelector('b')?.textContent||'LIVE CHANNEL';poster.innerHTML=(image?'<img src="'+esc(image.src)+'" alt="">':'<strong>CF</strong>')+'<span>'+esc(title)+'</span>'}
+function updateTunedIndicator(media,status='PLAYING'){
+    const box=$('#tuned-channel'),hud=$('#player-hud'),bug=$('#player-bug');
+    if(!media){
+        box.classList.remove('active');
+        box.innerHTML='<small>NOW WATCHING</small><b>Nothing tuned</b><span>Choose a live channel or movie</span>';
+        hud.hidden=bug.hidden=true;
+        return;
+    }
+    const channel=media.channel||{},program=programAt(channel),programs=channel.programs||[];
+    const index=programs.indexOf(program),next=index>=0?programs[index+1]:null;
+    const title=media.title||program?.title||channel.name||'ChannelForge';
+    const stop=Date.parse(program?.stop),start=Date.parse(program?.start),duration=stop-start;
+    const progress=duration>0?Math.max(0,Math.min(100,100*(Date.now()-start)/duration)):0;
+    const live=media.kind==='live';
+    const label=live?'CH '+(channel.number||'—'):'REWIND CINEMA';
+    box.classList.add('active');
+    box.innerHTML='<small>'+esc(label)+'</small><b>'+esc(channel.name||title)+'</b><span>'+esc(title)+'</span>';
+    bug.hidden=!live;
+    bug.innerHTML=(live&&channel.logo_url?'<img src="'+esc(channel.logo_url)+'" alt="">':'')+'<span>'+esc(label)+'</span>';
+    bug.querySelector('img')?.addEventListener('error',event=>event.currentTarget.remove());
+    hud.innerHTML='<div class="player-hud-copy"><span>'+esc(live?'● LIVE NOW · '+label:'▣ REWIND CINEMA')+'</span><b>'
+        +esc(channel.name||title)+'</b><strong>'+esc(title)+'</strong><i><u style="width:'+progress+'%"></u></i><small id="player-state">'
+        +esc(status)+'</small>'+(next?'<em>COMING UP NEXT · '+esc(next.title)+'</em>':'')+'</div>'
+        +(live?'<div class="player-hud-actions"><button data-player-surf="-1" aria-label="Previous channel">▲<br><small>CHANNEL</small></button><button data-player-surf="1" aria-label="Next channel">▼<br><small>CHANNEL</small></button><button data-player-guide aria-label="Open live guide">☰<br><small>GUIDE</small></button></div>':'');
+    hud.hidden=false;
+}
+function ensurePlayerShell(){if(playerShell)return playerShell;playerShell=document.createElement('section');playerShell.id='mini-player-shell';playerShell.className='mini-player-shell';let player=$('#player');player.parentNode.insertBefore(playerShell,player);playerShell.append(player,$('#player-buffer'),$('#player-bug'),$('#player-hud'),$('#close'));return playerShell}
 function dockMiniPlayer(screen='live'){let shell=ensurePlayerShell(),slot=$('#mini-player-slot');document.body.classList.remove('player-controls-hidden');if(screen==='live'&&slot){slot.append(shell);shell.className='mini-player-shell guide-dock'}else{document.querySelector('main.wrap')?.prepend(shell);shell.className='mini-player-shell section-dock'}}
-function showPlayerControls(){document.body.classList.remove('player-controls-hidden');clearTimeout(playerControlsTimer);if(!playerMini&&!$('#player-state.error'))playerControlsTimer=setTimeout(()=>document.body.classList.add('player-controls-hidden'),3200)}
+function showPlayerControls(){document.body.classList.remove('player-controls-hidden');clearTimeout(playerControlsTimer);if(!playerMini&&!$('#player-state.error')&&$('#player-buffer')?.hidden)playerControlsTimer=setTimeout(()=>document.body.classList.add('player-controls-hidden'),3200)}
 function surfChannel(direction){if(!liveChannels.length)return;let index=liveChannels.findIndex(channel=>channel.stream_url===activeStreamUrl);index=index<0?0:(index+direction+liveChannels.length)%liveChannels.length;let channel=liveChannels[index],program=programAt(channel);play(channel.stream_url,{kind:'live',channel,title:program?.title||channel.name})}
-document.addEventListener('mousemove',showPlayerControls,{passive:true});document.addEventListener('keydown',showPlayerControls);document.addEventListener('click',event=>{let surf=event.target.closest('[data-player-surf]');if(surf)surfChannel(Number(surf.dataset.playerSurf)||1)});
+document.addEventListener('mousemove',showPlayerControls,{passive:true});document.addEventListener('keydown',showPlayerControls);document.addEventListener('click',event=>{let surf=event.target.closest('[data-player-surf]');if(surf)surfChannel(Number(surf.dataset.playerSurf)||1);if(event.target.closest('[data-player-guide]'))minimizePlayer()});
 '''
 CONTROLLER_JS = r'''
 function tvFocusTargets(){let dialog=document.querySelector('dialog[open]'),scope=dialog||document;return[...scope.querySelectorAll('button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(element=>!element.hidden&&element.offsetParent!==null&&getComputedStyle(element).visibility!=='hidden')}
@@ -705,23 +963,24 @@ HTML = HTML.replace('</section><div class="section-heading"><h2>CREATOR STUDIOS'
 HTML = HTML.replace('<div class="section-heading"><h2>CREATOR STUDIOS', '<div class="section-heading" data-section-block="cinema" hidden><h2>CREATOR STUDIOS', 1)
 HTML = HTML.replace('<div id="creators" class="creators">', '<div id="creators" class="creators" data-section-block="cinema" hidden>', 1)
 HTML = HTML.replace('<div class="section-heading"><h2 class="cyan">LIVE CHANNELS', '<div class="section-heading" data-section-block="live" hidden><h2 class="cyan">LIVE CHANNELS', 1)
-HTML = HTML.replace('<div id="live" class="live"></div>', '<section id="live-stage" class="live-stage" data-section-block="live" hidden><div id="mini-player-slot" class="mini-player-slot"><div id="mini-player-poster" class="mini-player-poster"><strong>CF</strong><span>SELECT A CHANNEL</span></div></div><div id="live" class="live"></div></section><div class="guide-toolbar" data-section-block="live" hidden><button id="scan-channels">↻ SCAN CHANNELS</button><span id="scan-status">Channels scan automatically.</span><div class="guide-window-controls"><button id="guide-earlier">‹ EARLIER</button><button id="guide-now">NOW</button><button id="guide-later">LATER ›</button><b id="guide-window-label">ON NOW</b></div><label>⌕ <input id="guide-search" type="search" placeholder="Search guide"></label></div><div id="studio-filters" class="studio-filters" data-section-block="live" hidden></div><div id="guide-times" class="guide-times" data-section-block="live" hidden></div><div id="tv-guide" class="tv-guide" data-section-block="live" hidden></div>', 1)
+HTML = HTML.replace('<div id="live" class="live"></div>', '<section id="live-stage" class="live-stage" data-section-block="live" hidden><div id="mini-player-slot" class="mini-player-slot"><div id="mini-player-poster" class="mini-player-poster"><span>SELECT A CHANNEL FROM THE GUIDE</span></div></div><div id="live" class="live"></div></section><div class="guide-toolbar" data-section-block="live" hidden><button id="scan-channels">↻ SCAN CHANNELS</button><span id="scan-status">Channels scan automatically.</span><div class="guide-window-controls"><button id="guide-earlier">‹ EARLIER</button><button id="guide-now">NOW</button><button id="guide-later">LATER ›</button><b id="guide-window-label">ON NOW</b></div><label>⌕ <input id="guide-search" type="search" placeholder="Search guide"></label></div><div id="studio-filters" class="studio-filters" data-section-block="live" hidden></div><div id="guide-board" data-section-block="live" hidden><div id="guide-times" class="guide-times"></div><div id="tv-guide" class="tv-guide"></div></div>', 1)
 HTML = HTML.replace('<div class="section-heading"><h2 class="pink">REWIND CINEMA', '<div class="section-heading" data-section-block="cinema" hidden><h2 class="pink">REWIND CINEMA', 1)
 HTML = HTML.replace('<nav class="categories">', '<nav class="categories" data-section-block="cinema" hidden>', 1)
 HTML = HTML.replace('<div class="vault-layout">', '<div class="vault-layout" data-section-block="cinema" hidden>', 1)
 HTML = HTML.replace('<nav class="categories" data-section-block="cinema" hidden><span>CONTINUE WATCHING</span><span>80S BLOCKBUSTERS</span><span>90S ESSENTIALS</span><span>CREATOR PICKS</span></nav>', '<nav class="movie-tools" data-section-block="cinema" hidden><div class="movie-decades"><button class="active" data-movie-filter="all">ALL</button><button data-movie-filter="80s">80S</button><button data-movie-filter="90s">90S</button><button data-movie-filter="2000s">2000S</button><button data-movie-filter="recent">2010+</button></div><label class="movie-search-wrap">⌕<input id="movie-search" class="movie-search" type="search" placeholder="Search title, genre, description…"></label><select id="movie-genre" aria-label="Filter by genre"><option value="all">ALL GENRES</option></select><select id="movie-rating" aria-label="Filter by rating"><option value="all">ALL RATINGS</option></select><select id="movie-sort" aria-label="Sort movies"><option value="title">A–Z</option><option value="newest">NEWEST</option><option value="oldest">OLDEST</option></select><span id="movie-count"></span></nav>', 1)
-HTML = HTML.replace('</main><video id="player"', f'{EXTRA_SCREENS}</main><aside id="player-hud" class="player-hud" hidden></aside><dialog id="program-dialog" class="program-dialog"><button class="program-close" onclick="this.closest(\'dialog\').close()">×</button><div id="program-dialog-body" class="program-dialog-body"></div></dialog><video id="player"', 1)
+HTML = HTML.replace('</main><video id="player"', f'{EXTRA_SCREENS}</main><aside id="player-hud" class="player-hud" hidden></aside><aside id="player-bug" class="player-bug" hidden></aside><div id="player-buffer" class="player-buffer" role="status" aria-live="polite" hidden><span class="buffer-spinner" aria-hidden="true"></span><b></b><small></small></div><dialog id="program-dialog" class="program-dialog"><button class="program-close" onclick="this.closest(\'dialog\').close()">×</button><div id="program-dialog-body" class="program-dialog-body"></div></dialog><video id="player"', 1)
 HTML = HTML.replace("let playbackGeneration=0", PLAYER_DOCK_JS + "\nlet playbackGeneration=0", 1)
 HTML = HTML.replace("function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}", "function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');dockMiniPlayer('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}", 1)
 HTML = HTML.replace("function stopPlayer(){liveMode=false;", "function stopPlayer(){++playbackGeneration;clearTimeout(liveRetryTimer);liveRetryTimer=null;let shell=ensurePlayerShell();document.body.append(shell);shell.className='mini-player-shell';document.body.classList.remove('player-controls-hidden');liveMode=false;", 1)
 HTML = HTML.replace("async function checkUpdate(onLaunch=false)", "function showScreen(name){document.querySelectorAll('[data-section-block]').forEach(block=>block.hidden=block.dataset.sectionBlock!==name);document.querySelectorAll('[data-screen]').forEach(button=>button.classList.toggle('active',button.dataset.screen===name));document.body.classList.toggle('guide-mode',name==='live');if(name==='live'&&innerWidth>900)document.body.classList.add('menu-collapsed');if(name==='live')renderLiveGuide();if(name==='cinema'&&selectedCreator)studio(selectedCreator);if(innerWidth<=900)document.body.classList.remove('menu-open');window.scrollTo(0,0)}\nasync function checkUpdate(onLaunch=false)", 1)
 HTML = HTML.replace("b.onclick=()=>studio(c)", "b.onclick=()=>{studio(c);showScreen('cinema')}", 1)
-HTML = HTML.replace("$('#close').onclick", "ensurePlayerShell();new MutationObserver(syncMiniPlayerPoster).observe($('#live'),{childList:true,subtree:true});$('#vault').addEventListener('scroll',event=>{let box=event.currentTarget;if(box.scrollTop+box.clientHeight>box.scrollHeight-500&&vaultRenderCount<vaultVisible.length)appendVaultBatch()},{passive:true});$('#menu-toggle').onclick=()=>{if(innerWidth<=900)document.body.classList.toggle('menu-open');else document.body.classList.toggle('menu-collapsed')};document.querySelectorAll('[data-screen]').forEach(button=>button.onclick=event=>{event.preventDefault();const screen=button.dataset.screen;showScreen(screen);if(playerMini)dockMiniPlayer(screen);if(screen==='updates')checkUpdate(false)});$('#screen-check-update').onclick=()=>checkUpdate(false);$('#close').onclick", 1)
+HTML = HTML.replace("$('#close').onclick", "ensurePlayerShell();$('#vault').addEventListener('scroll',event=>{let box=event.currentTarget;if(box.scrollTop+box.clientHeight>box.scrollHeight-500&&vaultRenderCount<vaultVisible.length)appendVaultBatch()},{passive:true});$('#menu-toggle').onclick=()=>{if(innerWidth<=900)document.body.classList.toggle('menu-open');else document.body.classList.toggle('menu-collapsed')};document.querySelectorAll('[data-screen]').forEach(button=>button.onclick=event=>{event.preventDefault();const screen=button.dataset.screen;showScreen(screen);if(playerMini)dockMiniPlayer(screen);if(screen==='updates')checkUpdate(false)});$('#screen-check-update').onclick=()=>checkUpdate(false);$('#close').onclick", 1)
 HTML = HTML.replace("$('#update').onclick=()=>checkUpdate(false)", "$('#update').onclick=()=>{showScreen('updates');checkUpdate(false)}", 1)
 HTML = HTML.replace("if(location.search.includes('demo=1'))demo();else load();checkUpdate(true);", "if(location.search.includes('demo=1'))demo();else load();showScreen(new URLSearchParams(location.search).get('screen')||'home');checkUpdate(true);", 1)
 HTML = HTML.replace("if(location.search.includes('demo=1'))", CONTROLLER_JS + "\nif(location.search.includes('demo=1'))", 1)
 HTML = HTML.replace('</head>', '<style>.retry-stream{margin-left:7px;padding:4px 9px;color:#fff;background:#131838;border:1px solid #26dffa;border-radius:5px;cursor:pointer}</style></head>', 1)
 HTML = HTML.replace("OPEN VERIFIED UPDATE", "RESTART & INSTALL UPDATE").replace("Opening the verified update…", "Restarting to install the verified update in place…")
+HTML = HTML.replace("</head>", f"<style>{GUIDE_LAYOUT_CSS}</style></head>", 1)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -767,10 +1026,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 headers = {"Accept": "*/*", "User-Agent": f"ChannelForge-TV/{VERSION}"}
                 if self.headers.get("Range"):
                     headers["Range"] = self.headers["Range"]
-                request = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(request, timeout=45) as response:
-                    content_type = response.headers.get_content_type()
-                    final_url = response.geturl()
+                with open_creator_stream(url, headers) as (response, final_url):
+                    if response.status >= 400:
+                        return self.send(response.status, json.dumps({"error": f"Creator returned HTTP {response.status}."}).encode(), "application/json")
+                    content_type = response.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip().lower()
                     if "mpegurl" in content_type or urlsplit(final_url).path.lower().endswith(".m3u8"):
                         manifest = response.read(2 * 1024 * 1024 + 1)
                         if len(manifest) > 2 * 1024 * 1024 or not manifest.decode("utf-8-sig").lstrip().startswith("#EXTM3U"):
@@ -836,7 +1095,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
-        except (OSError, http.client.HTTPException):
+        except STREAM_ERRORS:
             self.close_connection = True
 
     def log_message(self, *_args):

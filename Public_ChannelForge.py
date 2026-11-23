@@ -36,7 +36,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.12"
+VERSION = "3.5.13"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -1470,8 +1470,9 @@ def schedule_position(channel: dict, moment: datetime | None = None, *, items: l
     raise RuntimeError("Could not resolve channel schedule.")
 
 
-def schedule_window(channel: dict, start: datetime, end: datetime) -> list[dict]:
-    items = scheduled_items(channel)
+def schedule_window(channel: dict, start: datetime, end: datetime, *, items: list[dict] | None = None) -> list[dict]:
+    if items is None:
+        items = scheduled_items(channel)
     position = schedule_position(channel, start, items=items)
     cursor = position["start"]
     index = position["index"]
@@ -2100,11 +2101,12 @@ def vault_items(base: str | None = None) -> list[dict]:
     return result
 
 
-def public_channel_catalog(base: str | None = None) -> dict:
+def public_channel_catalog(base: str | None = None, *, extended: bool = False) -> dict:
     """Return lightweight guide/status data without starting a media session."""
     base = base or server_base()
     moment = datetime.now(timezone.utc)
-    end = moment + timedelta(hours=3)
+    start = moment - timedelta(hours=1) if extended else moment
+    end = moment + timedelta(hours=6 if extended else 3)
     assets = {item.get("id"): item for item in asset_manifest()}
     result = []
     settings = config()
@@ -2118,13 +2120,15 @@ def public_channel_catalog(base: str | None = None) -> dict:
         return f"{base}/api/plex/image?path={urllib.parse.quote(image_path, safe='')}&server={urllib.parse.quote(str(item.get('plex_server_id', '')), safe='')}"
     for channel in channels():
         try:
-            slots = schedule_window(channel, moment, end)
-            current = slots[0]["item"]
+            items = scheduled_items(channel)
+            current = schedule_position(channel, moment, items=items)["item"]
+            slots = schedule_window(channel, start, end, items=items)
             if current.get("source") == "local":
                 online = Path(str(current.get("file_path", ""))).is_file()
             else:
                 server_id = str(current.get("plex_server_id", ""))
-                online = bool(plex_credentials(server_id).get("token") and plex_credentials(server_id).get("url")) if server_id else bool(settings.get("plex_token") and settings.get("plex_url"))
+                credentials = plex_credentials(server_id) if server_id else {"token": settings["plex_token"], "url": settings["plex_url"]}
+                online = bool(credentials.get("token") and credentials.get("url"))
             if playback_error(str(channel.get("id", ""))):
                 online = False
         except (OSError, ValueError, TypeError):
@@ -2138,10 +2142,14 @@ def public_channel_catalog(base: str | None = None) -> dict:
             "programs": [{
                 "title": str(slot["item"].get("title", "Untitled")),
                 "year": str(slot["item"].get("year", "")), "type": str(slot["item"].get("type", "video")),
+                "genres": (slot["item"].get("genres") or [])[:2],
+                "content_rating": str(slot["item"].get("content_rating", "")),
                 "summary": str(slot["item"].get("summary", ""))[:600],
                 "poster_url": image_url(slot["item"], str(channel.get("section", ""))),
                 "backdrop_url": image_url(slot["item"], str(channel.get("section", "")), "art"),
                 "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat(),
+                "start_epoch_ms": int(slot["start"].timestamp() * 1000),
+                "stop_epoch_ms": int(slot["stop"].timestamp() * 1000),
             } for slot in slots],
         })
     return {"version": 1, "generated_at": moment.isoformat(), "channels": result}
@@ -2206,6 +2214,11 @@ def run_plugin(tool_id: str, payload: dict) -> object:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
+    protocol_version = "HTTP/1.1"
+
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(25)
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -2220,6 +2233,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         headers = extra_headers or {}
         self.send_header("Cache-Control", headers.get("Cache-Control", "no-store"))
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -2247,6 +2262,9 @@ class Handler(BaseHTTPRequestHandler):
     def redirect(self, location: str) -> None:
         self.send_response(302)
         self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
@@ -2316,7 +2334,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"version": 1, "generated_at": datetime.now(timezone.utc).isoformat(),
                                      "items": vault_items(self.catalog_base())})
             elif parsed.path == "/api/public/channels":
-                self.send_json(200, public_channel_catalog(self.catalog_base()))
+                extended = urllib.parse.parse_qs(parsed.query).get("guide") == ["extended"]
+                self.send_json(200, public_channel_catalog(self.catalog_base(), extended=extended))
             elif parsed.path == "/api/update":
                 release = latest_release()
                 release.pop("assets", None)
