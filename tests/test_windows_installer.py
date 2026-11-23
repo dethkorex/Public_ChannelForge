@@ -13,7 +13,7 @@ class WindowsInstallerTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         environment = mock.patch.dict(os.environ, {
             "USERPROFILE": str(self.root),
             "LOCALAPPDATA": str(self.root / "Local"),
@@ -66,7 +66,7 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertIsNone(windows_installer.silent_update_target([]))
 
     def test_silent_update_replaces_existing_executable_without_wizard(self):
-        folder = Path(tempfile.mkdtemp(prefix="channel-forge-update-test-"))
+        folder = Path(tempfile.mkdtemp(prefix="channel-forge-update-test-")).resolve()
         target = folder / "ChannelForge_Creator.exe"
         payload = folder / "new-creator.exe"
         target.write_bytes(b"old-version")
