@@ -11,6 +11,7 @@ import gzip
 import io
 import html
 import importlib.util
+import itertools
 import json
 import mimetypes
 import os
@@ -18,6 +19,8 @@ import queue
 import re
 import secrets
 import shutil
+import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -36,7 +39,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.20"
+VERSION = "3.5.21"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -93,6 +96,9 @@ TUNNEL_URL = ""
 TUNNEL_URLS: queue.Queue[str] = queue.Queue()
 PUBLISH_LOCK = threading.RLock()
 PUBLISH_CHANGED = threading.Event()
+SHARING_STATUS = "idle"
+REGISTERED_ORIGIN = ""
+MOVIE_SCAN_STATUS = {"state": "idle"}
 MOVIE_SCAN_LOCK = threading.RLock()
 PUBLIC_MEDIA_SERVER: ThreadingHTTPServer | None = None
 PUBLIC_MEDIA_PORT = DEFAULT_PUBLIC_MEDIA_PORT
@@ -336,6 +342,8 @@ def config(public: bool = False) -> dict:
         result["creator_published"] = bool(result["creator_id"] and result["creator_key"])
         result["creator_key"] = ""
         result["tunnel_active"] = bool(TUNNEL_PROCESS and TUNNEL_PROCESS.poll() is None and TUNNEL_URL)
+        result["sharing_status"] = SHARING_STATUS
+        result["movie_scan"] = MOVIE_SCAN_STATUS
         result.pop("client_identifier", None)
     return result
 
@@ -456,17 +464,20 @@ def publish_creator(payload: dict) -> dict:
 
 
 def unpublish_creator() -> None:
-    settings = config()
-    if settings["creator_id"] and settings["creator_key"]:
-        directory_request("DELETE", f'/v1/creators/{settings["creator_id"]}', None, settings["creator_key"])
-    raw = load_json(CONFIG_FILE, {})
-    if isinstance(raw, dict):
-        raw.update({"creator_id": "", "creator_key": "", "creator_profile": {},
-                    "pending_creator_profile": {}, "auto_publish_channels": False})
-        atomic_json(CONFIG_FILE, raw)
+    with PUBLISH_LOCK, LOCK:
+        settings = config()
+        if settings["creator_id"] and settings["creator_key"]:
+            directory_request("DELETE", f'/v1/creators/{settings["creator_id"]}', None, settings["creator_key"])
+        raw = load_json(CONFIG_FILE, {})
+        if isinstance(raw, dict):
+            raw.update({"creator_id": "", "creator_key": "", "creator_profile": {},
+                        "pending_creator_profile": {}, "auto_publish_channels": False})
+            atomic_json(CONFIG_FILE, raw)
+    PUBLISH_CHANGED.set()
 
 
 def publish_studio(payload: dict) -> dict:
+    global REGISTERED_ORIGIN, SHARING_STATUS
     if not str(payload.get("name", "")).strip():
         raise ValueError("Enter a creator or studio name.")
     with PUBLISH_LOCK:
@@ -485,7 +496,7 @@ def publish_studio(payload: dict) -> dict:
         start_public_media_server(automatic=not manual_origin)
         try:
             origin = manual_origin or start_public_tunnel()
-            raw.update({"public_url": origin, "public_tunnel": not manual_origin})
+            raw.update({"public_url": origin, "public_tunnel": not manual_origin, "auto_publish_channels": True})
             atomic_json(CONFIG_FILE, raw)
             generate_exports()
             creator = publish_creator(payload)
@@ -499,15 +510,21 @@ def publish_studio(payload: dict) -> dict:
             raise
         if manual_origin:
             stop_public_tunnel()
+        REGISTERED_ORIGIN = origin
+        SHARING_STATUS = "live"
         return creator
 
 
-def queue_channel_publication(channel: dict, enabled: bool) -> bool:
+def queue_channel_publication(channel: dict, enabled: bool | None) -> bool:
     """Remember a requested publication so the background service can retry it."""
     with LOCK:
         raw = load_json(CONFIG_FILE, {})
         if not isinstance(raw, dict):
             raw = {}
+        if enabled is None:
+            enabled = raw.get("auto_publish_channels", True)
+            if not enabled or raw.get("creator_id") or raw.get("pending_creator_profile"):
+                return False
         raw["auto_publish_channels"] = enabled
         queued = bool(enabled and not raw.get("creator_id"))
         if queued and not raw.get("pending_creator_profile"):
@@ -522,6 +539,17 @@ def queue_channel_publication(channel: dict, enabled: bool) -> bool:
     if queued:
         PUBLISH_CHANGED.set()
     return queued
+
+
+def queue_existing_publication(has_movies: bool = False) -> None:
+    settings = config()
+    if not settings["auto_publish_channels"] or settings["creator_profile"] or settings["pending_creator_profile"]:
+        return
+    channel = next((channel for channel in channels() if channel.get("items")), None)
+    if channel:
+        queue_channel_publication(channel, None)
+    elif has_movies or VAULT_CATALOG_FILE.is_file() and cached_plex_movies():
+        queue_channel_publication({"name": "Rewind Cinema"}, None)
 
 
 def channels() -> list[dict]:
@@ -1127,7 +1155,7 @@ def scan_plex_movies() -> dict:
     servers, and its credentials are never exposed in the public vault feed.
     """
     libraries = [library for library in all_libraries() if library.get("source") != "local" and library.get("type") == "movie"]
-    movies, failed = [], []
+    movies, failed, failed_sections = [], [], set()
 
     def load_library(library: dict) -> tuple[dict, list[dict]]:
         return library, plex_items(str(library["key"]))
@@ -1146,6 +1174,9 @@ def scan_plex_movies() -> dict:
                     } for item in items if item.get("type") == "movie")
                 except (OSError, ValueError) as exc:
                     failed.append({"library": library.get("title", "Movies"), "error": str(exc)})
+                    failed_sections.add(str(library["key"]))
+    if failed_sections:
+        movies.extend(item for item in cached_plex_movies() if str(item.get("section")) in failed_sections)
     movies.sort(key=lambda item: (str(item.get("title", "")).casefold(), str(item.get("year", ""))))
     payload = {"updated_at": datetime.now(timezone.utc).isoformat(), "items": movies}
     atomic_json(VAULT_CATALOG_FILE, payload)
@@ -1162,18 +1193,21 @@ def cached_plex_movies() -> list[dict]:
     return items if isinstance(items, list) else []
 
 
-def sync_plex_movies_async(*, skip_recent: bool = False) -> None:
+def sync_plex_movies_async() -> None:
     if not config().get("plex_token"):
         return
-    if skip_recent and VAULT_CATALOG_FILE.is_file() and time.time() - VAULT_CATALOG_FILE.stat().st_mtime < 1200:
-        return
     def worker() -> None:
+        global MOVIE_SCAN_STATUS
         if not MOVIE_SCAN_LOCK.acquire(blocking=False):
             return
         try:
+            MOVIE_SCAN_STATUS = {"state": "scanning"}
             result = refresh_plex_movie_catalog()
+            MOVIE_SCAN_STATUS = {"state": "ready", "movies": result["movies"]}
+            queue_existing_publication(has_movies=bool(result["movies"]))
             print(f'Rewind Cinema indexed {result["movies"]} Plex movies.')
         except Exception as exc:
+            MOVIE_SCAN_STATUS = {"state": "retry"}
             print(f"Rewind Cinema sync failed: {exc}")
         finally:
             MOVIE_SCAN_LOCK.release()
@@ -1357,7 +1391,8 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "year": str(item.get("year", ""))[:10], "type": str(item.get("type", "video"))[:30],
             "duration_ms": max(1000, min(86400000, int(item.get("duration_ms", 1800000)))),
             "key": str(item.get("key", f"/library/metadata/{item['id']}"))[:500],
-            "thumb": str(item.get("thumb", ""))[:500], "art": str(item.get("art", ""))[:500], "summary": str(item.get("summary", ""))[:600],
+            "thumb": str(item.get("thumb", ""))[:500], "series_thumb": str(item.get("series_thumb", ""))[:500],
+            "art": str(item.get("art", ""))[:500], "summary": str(item.get("summary", ""))[:600],
             "content_rating": str(item.get("content_rating", ""))[:40], "rating": str(item.get("rating", ""))[:20],
             "genres": [str(value)[:80] for value in item.get("genres", []) if str(value).strip()][:20],
             "series": str(item.get("series", ""))[:200],
@@ -1908,11 +1943,11 @@ def start_or_reuse_encoder(channel: dict) -> str:
     remaining = max(0.1, (position["stop"] - position["start"]).total_seconds() - position["offset_ms"] / 1000)
     input_timing = ["-re"] if on_demand else ["-re", "-ss", f'{position["offset_ms"] / 1000:.3f}']
     output_timing = [] if on_demand else ["-t", f"{remaining:.3f}"]
-    # Keep a short playback window and retain evicted files for the server's timed cleanup.
-    hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments"] if on_demand else
-                   ["-hls_list_size", "5", "-hls_flags", "independent_segments+temp_file"])
-    audio_index, has_audio = playback_audio_track(item, media_input)
     relay = config()["public_tunnel"]
+    # Remote players need several extra segments to absorb relay jitter.
+    hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments"] if on_demand else
+                   ["-hls_list_size", "12" if relay else "5", "-hls_flags", "independent_segments+temp_file"])
+    audio_index, has_audio = playback_audio_track(item, media_input)
     if relay and has_audio is not None:
         encoding, output = adaptive_relay_options(directory, audio_index, has_audio)
     else:
@@ -2130,36 +2165,77 @@ def vault_movies():
                 yield str(channel.get("section", "")), item
 
 
-def vault_items(base: str | None = None, *, offset: int = 0, limit: int | None = None) -> list[dict]:
-    result, seen = [], set()
-    base = base or server_base()
+def unique_vault_movies():
+    seen = set()
     for section, item in vault_movies():
         item_id = vault_item_id(item)
         if item_id in seen:
             continue
         seen.add(item_id)
-        if len(seen) <= offset:
+        yield item_id, section, item
+
+
+def public_movie(base: str, item_id: str, section: str, item: dict) -> dict:
+    thumb = str(item.get("thumb", ""))
+    if item.get("source") == "local" and thumb:
+        params = urllib.parse.urlencode({"section": item.get("section") or section, "id": item.get("id", "")})
+        poster_url = f"{base}/api/local/image?{params}"
+    elif thumb:
+        params = urllib.parse.urlencode({"path": thumb, "server": item.get("plex_server_id", ""), "size": "poster"})
+        poster_url = f"{base}/api/plex/image?{params}"
+    else:
+        poster_url = ""
+    return {
+        "id": item_id, "title": item.get("title", "Untitled"), "year": item.get("year", ""),
+        "type": "movie", "summary": item.get("summary", ""),
+        "genres": list(item.get("genres", [])), "content_rating": item.get("content_rating", "") or "Unrated",
+        "library": item.get("library", ""),
+        "poster_url": poster_url, "stream_url": f"{base}/vault/{item_id}.m3u8",
+        "thumbnail_url": poster_url.replace("&size=poster", "&size=mini"),
+        "duration_ms": item.get("duration_ms", 1800000),
+    }
+
+
+def vault_items(base: str | None = None, *, offset: int = 0, limit: int | None = None) -> list[dict]:
+    base = base or server_base()
+    records = itertools.islice(unique_vault_movies(), offset, None if limit is None else offset + limit)
+    return [public_movie(base, *record) for record in records]
+
+
+def search_public_vault(base: str, query: dict, offset: int, limit: int) -> dict:
+    def value(name: str, fallback: str = "") -> str:
+        return query.get(name, [fallback])[0]
+
+    bounds = {"80s": (1980, 1990), "90s": (1990, 2000), "2000s": (2000, 2010), "recent": (2010, 10000)}
+    first, last = bounds.get(value("decade"), (0, 10000))
+    terms = value("q")[:240].casefold().split()
+    genre, rating = value("genre").casefold(), value("rating")
+    order = value("sort", "title")
+    genres, ratings, matches = set(), set(), []
+    for record in unique_vault_movies():
+        item = record[2]
+        item_genres = [str(name) for name in item.get("genres", []) if name]
+        item_rating = str(item.get("content_rating") or "Unrated")
+        if offset == 0:
+            genres.update(item_genres)
+            ratings.add(item_rating)
+        item_year = str(item.get("year") or "")
+        year = int(item_year) if re.fullmatch(r"[0-9]{4}", item_year) else 0
+        if not first <= year < last or (genre and genre not in {name.casefold() for name in item_genres}) or (rating and rating != item_rating):
             continue
-        if limit is not None and len(result) >= limit:
-            break
-        thumb = str(item.get("thumb", ""))
-        if item.get("source") == "local" and thumb:
-            media_section = str(item.get("section") or section)
-            poster_url = f"{base}/api/local/image?section={urllib.parse.quote(media_section)}&id={urllib.parse.quote(str(item.get('id', '')))}"
-        elif thumb:
-            server_id = urllib.parse.quote(str(item.get("plex_server_id", "")), safe="")
-            poster_url = f"{base}/api/plex/image?path={urllib.parse.quote(thumb, safe='')}&server={server_id}&size=poster"
-        else:
-            poster_url = ""
-        result.append({
-            "id": item_id, "title": item.get("title", "Untitled"), "year": item.get("year", ""),
-            "type": "movie", "summary": item.get("summary", ""),
-            "genres": list(item.get("genres", [])), "content_rating": item.get("content_rating", "") or "Unrated",
-            "library": item.get("library", ""),
-            "poster_url": poster_url, "stream_url": f"{base}/vault/{item_id}.m3u8",
-            "thumbnail_url": poster_url.replace("&size=poster", "&size=mini"),
-            "duration_ms": item.get("duration_ms", 1800000),
-        })
+        title = str(item.get("title", "Untitled")).casefold()
+        if terms:
+            text = " ".join([title, item_year, *item_genres, str(item.get("summary") or ""), str(item.get("library") or "")]).casefold()
+            if not all(term in text for term in terms):
+                continue
+        priority = -year if order == "newest" else (year or 10000) if order == "oldest" else 0
+        matches.append(((priority, title, record[0]), record))
+    matches.sort(key=lambda match: match[0])
+    end = offset + limit
+    result = {"items": [public_movie(base, *record) for _, record in matches[offset:end]],
+              "total": len(matches), "next_offset": end if end < len(matches) else None}
+    if offset == 0:
+        result.update(genres=sorted(genres, key=str.casefold), ratings=sorted(ratings, key=str.casefold))
     return result
 
 
@@ -2172,14 +2248,14 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
     assets = {item.get("id"): item for item in asset_manifest()}
     result = []
     settings = config()
-    def image_url(item: dict, section: str, field: str = "thumb") -> str:
-        image_path = str(item.get(field, "") or item.get("thumb", ""))
+    def image_url(item: dict, section: str, *fields: str) -> str:
+        image_path = next((str(item[field]) for field in fields if item.get(field)), "")
         if not image_path:
             return ""
         if item.get("source") == "local":
             media_section = str(item.get("section") or section)
             return f"{base}/api/local/image?section={urllib.parse.quote(media_section, safe='')}&id={urllib.parse.quote(str(item.get('id', '')), safe='')}"
-        return f"{base}/api/plex/image?path={urllib.parse.quote(image_path, safe='')}&server={urllib.parse.quote(str(item.get('plex_server_id', '')), safe='')}"
+        return f"{base}/api/plex/image?path={urllib.parse.quote(image_path, safe='')}&server={urllib.parse.quote(str(item.get('plex_server_id', '')), safe='')}&size=poster"
     for channel in channels():
         try:
             items = scheduled_items(channel)
@@ -2216,8 +2292,9 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
                 "genres": (slot["item"].get("genres") or [])[:2],
                 "content_rating": str(slot["item"].get("content_rating", "")),
                 "summary": str(slot["item"].get("summary", ""))[:600],
-                "poster_url": image_url(slot["item"], str(channel.get("section", ""))),
-                "backdrop_url": image_url(slot["item"], str(channel.get("section", "")), "art"),
+                "poster_url": image_url(slot["item"], str(channel.get("section", "")), "thumb", "series_thumb", "art"),
+                "series_poster_url": image_url(slot["item"], str(channel.get("section", "")), "series_thumb"),
+                "backdrop_url": image_url(slot["item"], str(channel.get("section", "")), "art", "series_thumb", "thumb"),
                 "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat(),
                 "start_epoch_ms": int(slot["start"].timestamp() * 1000),
                 "stop_epoch_ms": int(slot["stop"].timestamp() * 1000),
@@ -2357,6 +2434,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"app": APP_NAME, "name": name, "channel_count": len(channels()),
                                      "creator_id": settings["creator_id"], "public_url": settings["public_url"]})
             elif parsed.path == "/api/status":
+                if urllib.parse.parse_qs(parsed.query).get("brief") == ["1"]:
+                    return self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True)})
                 values = channels()
                 now_playing = {}
                 for channel in values:
@@ -2407,8 +2486,11 @@ class Handler(BaseHTTPRequestHandler):
                 if "limit" in query:
                     limit = max(1, min(100, int(query["limit"][0])))
                     offset = max(0, int(query.get("offset", ["0"])[0]))
-                    items = vault_items(self.catalog_base(), offset=offset, limit=limit + 1)
-                    payload.update(items=items[:limit], next_offset=offset + limit if len(items) > limit else None)
+                    if "sort" in query:
+                        payload.update(search_public_vault(self.catalog_base(), query, offset, limit))
+                    else:
+                        items = vault_items(self.catalog_base(), offset=offset, limit=limit + 1)
+                        payload.update(items=items[:limit], next_offset=offset + limit if len(items) > limit else None)
                 else:
                     payload["items"] = vault_items(self.catalog_base())
                 self.send_json(200, payload)
@@ -2543,6 +2625,14 @@ class Handler(BaseHTTPRequestHandler):
                 generate_exports()
                 sync_plex_movies_async()
                 self.send_json(200, {"ok": True, "config": config(True)})
+            elif parsed.path == "/api/directory/resume":
+                with PUBLISH_LOCK, LOCK:
+                    raw = load_json(CONFIG_FILE, {})
+                    raw["auto_publish_channels"] = True
+                    atomic_json(CONFIG_FILE, raw)
+                queue_existing_publication()
+                PUBLISH_CHANGED.set()
+                self.send_json(200, {"ok": True})
             elif parsed.path == "/api/plex/test":
                 old = config()
                 plex_url, pasted_token = normalize_plex_connection(str(payload.get("plex_url", old["plex_url"])), str(payload.get("plex_token", "")))
@@ -2558,7 +2648,9 @@ class Handler(BaseHTTPRequestHandler):
                 if APP_WINDOW is not None:
                     threading.Timer(0.7, APP_WINDOW.destroy).start()
             elif parsed.path == "/api/rewind/refresh":
-                self.send_json(200, refresh_plex_movie_catalog())
+                result = refresh_plex_movie_catalog()
+                queue_existing_publication(has_movies=bool(result["movies"]))
+                self.send_json(200, result)
             elif parsed.path == "/api/local/libraries":
                 self.send_json(200, {"library": save_local_library(str(payload.get("name", "")), str(payload.get("path", "")))})
             elif parsed.path == "/api/directory/publish":
@@ -2566,7 +2658,7 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/channels":
                 channel = save_channel(payload)
                 preference = payload.get("publish_worldwide")
-                pending = queue_channel_publication(channel, preference) if isinstance(preference, bool) else False
+                pending = queue_channel_publication(channel, preference if isinstance(preference, bool) else None)
                 self.send_json(200, {"channel": channel, "publishing_pending": pending})
             elif parsed.path == "/api/channels/order":
                 ids = payload.get("ids", [])
@@ -2730,38 +2822,112 @@ def open_data_folder() -> None:
         subprocess.Popen(["xdg-open", str(DATA_DIR)])
 
 
+def activate_desktop_window() -> None:
+    if APP_WINDOW is not None:
+        APP_WINDOW.show()
+        APP_WINDOW.restore()
+
+
+def claim_creator_desktop() -> bool:
+    """Reuse the same Creator window, including when the Linux service owns the backend."""
+    lock = (DATA_DIR / "desktop.lock").open("a+b")
+    lock.seek(0)
+    activation_file = DATA_DIR / "desktop-activation.json"
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            info = load_json(activation_file, {})
+            try:
+                with socket.create_connection((HOST, int(info["port"])), timeout=0.4) as client:
+                    client.sendall(info["token"].encode("ascii"))
+                    if client.recv(1) == b"1":
+                        return False
+            except (OSError, KeyError, TypeError, ValueError):
+                pass
+            time.sleep(0.1)
+        return False
+
+    token = secrets.token_hex(32).encode("ascii")
+    pending = threading.Event()
+
+    class ActivationRequest(socketserver.StreamRequestHandler):
+        def handle(self):
+            self.connection.settimeout(0.5)
+            try:
+                if secrets.compare_digest(token, self.rfile.read(len(token))):
+                    pending.set()
+                    self.wfile.write(b"1")
+            except OSError:
+                pass
+
+    server = socketserver.TCPServer((HOST, 0), ActivationRequest)
+    atomic_json(activation_file, {"port": server.server_address[1], "token": token.decode("ascii")})
+    threading.Thread(target=server.serve_forever, daemon=True, name="creator-desktop-activation").start()
+
+    def run_activation():
+        while True:
+            pending.wait()
+            if APP_WINDOW is None:
+                time.sleep(0.1)
+                continue
+            pending.clear()
+            activate_desktop_window()
+
+    threading.Thread(target=run_activation, daemon=True, name="creator-window-activation").start()
+
+    def cleanup_activation():
+        server.shutdown()
+        server.server_close()
+        activation_file.unlink(missing_ok=True)
+        lock.close()
+
+    atexit.register(cleanup_activation)
+    return True
+
+
 def restore_public_sharing() -> None:
-    time.sleep(1)
-    registered_origin = ""
+    global REGISTERED_ORIGIN, SHARING_STATUS
+    failures = 0
     while True:
         PUBLISH_CHANGED.clear()
         with PUBLISH_LOCK:
             settings = config()
             profile = settings["creator_profile"]
             pending = settings["pending_creator_profile"]
-            if pending and not profile:
-                try:
-                    published = publish_studio(pending)
-                    if published:
-                        registered_origin = config()["public_url"]
-                except Exception as exc:
-                    print(f"ChannelForge public sharing will retry: {sanitized_playback_error(exc)}")
-            elif not profile:
-                registered_origin = ""
-            else:
-                try:
+            try:
+                if pending and not profile and settings["auto_publish_channels"]:
+                    SHARING_STATUS = "connecting"
+                    publish_studio(pending)
+                elif profile:
                     start_public_media_server(automatic=settings["public_tunnel"])
                     origin = start_public_tunnel() if settings["public_tunnel"] else settings["public_url"]
-                    if origin != registered_origin:
+                    if origin != REGISTERED_ORIGIN:
+                        SHARING_STATUS = "connecting"
                         raw = load_json(CONFIG_FILE, {})
                         raw["public_url"] = origin
                         atomic_json(CONFIG_FILE, raw)
                         generate_exports()
                         publish_creator(profile)
-                        registered_origin = origin
-                except Exception as exc:
+                        REGISTERED_ORIGIN = origin
+                    SHARING_STATUS = "live"
+                else:
+                    REGISTERED_ORIGIN = ""
+                    SHARING_STATUS = "idle" if settings["auto_publish_channels"] else "private"
+                failures = 0
+            except Exception as exc:
+                failures += 1
+                if failures == 1:
                     print(f"ChannelForge public sharing could not connect: {sanitized_playback_error(exc)}")
-        PUBLISH_CHANGED.wait(20)
+                SHARING_STATUS = "retrying"
+        PUBLISH_CHANGED.wait(min(120, 5 * 2 ** min(max(0, failures - 1), 5)) if failures else 20)
 
 
 def main() -> None:
@@ -2778,6 +2944,8 @@ def main() -> None:
         threading.Thread(target=clean_windows_update_cache, args=(VERSION,), daemon=True).start()
     if args.data_dir:
         open_data_folder()
+        return
+    if not args.no_browser and not claim_creator_desktop():
         return
     port = args.port or config()["port"]
     bind_host = config()["bind_host"]
@@ -2812,8 +2980,9 @@ def main() -> None:
         start_public_media_server()
         print(f"Read-only media origin is listening on http://{HOST}:{PUBLIC_MEDIA_PORT}")
     threading.Thread(target=reap_idle_sessions, daemon=True, name="channel-forge-idle-reaper").start()
+    queue_existing_publication()
     threading.Thread(target=restore_public_sharing, daemon=True, name="channel-forge-public-sharing").start()
-    sync_plex_movies_async(skip_recent=True)
+    sync_plex_movies_async()
     if not args.no_browser and sys.platform == "win32":
         import webview
         import ctypes
@@ -2827,7 +2996,7 @@ def main() -> None:
         tray: pystray.Icon | None = None
 
         def open_window(_icon=None, _item=None) -> None:
-            window.show()
+            activate_desktop_window()
 
         def exit_application(_icon=None, _item=None) -> None:
             state["quitting"] = True

@@ -23,3 +23,9 @@ button:focus-visible,a:focus-visible,[tabindex]:focus-visible{outline:0;z-index:
 .media-item{transition:transform .17s cubic-bezier(.2,.8,.2,1),border-color .17s,box-shadow .17s,background-color .17s}
 .media-item:focus-visible{outline:0;z-index:2;transform:translateY(-3px) scale(1.012);border-color:#59f3ff!important;box-shadow:0 0 0 2px #ff42c8,0 14px 30px #0009;background:#17233f}
 @media(prefers-reduced-motion:reduce){button,a,[tabindex],.media-item{transition:none!important;scroll-behavior:auto!important}}
+.source-dashboard{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:16px;margin-bottom:16px}
+.source-dashboard .panel{margin:0;padding:20px;min-width:0}
+.source-dashboard h3{margin:0 0 12px}
+.source-dashboard p{min-height:2.5em}
+#setup details summary{cursor:pointer;font-weight:700}
+#setup details > form{margin-top:15px}

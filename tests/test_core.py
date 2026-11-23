@@ -94,6 +94,31 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(app.queue_channel_publication({"name": "Local channel"}, False))
             self.assertFalse(app.config(True)["publishing_pending"])
             self.assertFalse(app.config()["auto_publish_channels"])
+            app.queue_existing_publication(has_movies=True)
+            self.assertFalse(app.config(True)["publishing_pending"])
+
+    def test_cached_movies_queue_a_studio_once(self):
+        app.atomic_json(app.CONFIG_FILE, {"plex_profile": {"server_name": "Plex Studio"}})
+        app.atomic_json(app.VAULT_CATALOG_FILE, {"items": [{"id": "1", "type": "movie"}]})
+        app.queue_existing_publication()
+        profile = app.config()["pending_creator_profile"]
+        self.assertEqual(profile["name"], "Plex Studio")
+        app.queue_existing_publication(has_movies=True)
+        self.assertEqual(app.config()["pending_creator_profile"], profile)
+
+    def test_remote_movie_filters_apply_across_pages(self):
+        app.atomic_json(app.VAULT_CATALOG_FILE, {"items": [
+            {"id": "1", "type": "movie", "title": "Alpine", "year": 1996, "genres": ["Drama"]},
+            {"id": "2", "type": "movie", "title": "Forest", "year": 2005, "genres": ["Adventure"], "summary": "A mountain trek"},
+            {"id": "3", "type": "movie", "title": "Valley", "year": 2002, "genres": ["Adventure"], "summary": "A mountain race"},
+        ]})
+        filters = {"q": ["mountain"], "genre": ["Adventure"], "decade": ["2000s"], "sort": ["newest"]}
+        first = app.search_public_vault("https://studio.example", filters, 0, 1)
+        second = app.search_public_vault("https://studio.example", filters, first["next_offset"], 1)
+        self.assertEqual(first["total"], 2)
+        self.assertEqual(first["genres"], ["Adventure", "Drama"])
+        self.assertEqual([item["title"] for item in first["items"] + second["items"]], ["Forest", "Valley"])
+        self.assertIsNone(second["next_offset"])
 
     def test_local_movie_catalog_uses_loopback_even_when_studio_is_public(self):
         app.atomic_json(app.CONFIG_FILE, {"public_url": "https://public-studio.example"})
@@ -167,7 +192,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("web/index.html", playlist)
 
     def test_public_channel_catalog_supplies_online_guide_without_starting_playback(self):
-        channel = app.save_channel({"name": "Public Guide", "number": "12", "section": "1", "items": [{"id": "9", "title": "Example", "type": "movie", "duration_ms": 3600000, "key": "/library/metadata/9", "thumb": "/library/metadata/9/thumb/1", "art": "/library/metadata/9/art/1"}]})
+        channel = app.save_channel({"name": "Public Guide", "number": "12", "section": "1", "items": [{"id": "9", "title": "Example", "type": "movie", "duration_ms": 3600000, "key": "/library/metadata/9", "series_thumb": "/library/metadata/8/thumb/3", "art": "/library/metadata/9/art/1"}]})
         with mock.patch.object(app, "start_playback_route") as playback:
             catalog = app.public_channel_catalog()
         playback.assert_not_called()
@@ -176,6 +201,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(public["stream_url"].endswith(f"/live/{channel['id']}.m3u8"))
         self.assertGreater(len(public["programs"]), 0)
         self.assertIn("/api/plex/image?path=", public["programs"][0]["poster_url"])
+        self.assertEqual(public["programs"][0]["poster_url"], public["programs"][0]["series_poster_url"])
         self.assertIn("%2Fart%2F", public["programs"][0]["backdrop_url"])
         self.assertNotIn("X-Plex-Token", json.dumps(public))
         brief = app.public_channel_catalog(brief=True)["channels"][0]

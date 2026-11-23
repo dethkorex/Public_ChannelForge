@@ -106,6 +106,9 @@ public class MainActivity extends Activity {
     };
     private LinearLayout liveRail;
     private LinearLayout movieRail;
+    private TextView screenSwitcher;
+    private boolean cinemaScreen;
+    private Creator currentStudio;
     private int studioRequest = 0;
     private int movieRequest = 0;
     private boolean moviePageLoading, movieShelfLoaded;
@@ -171,12 +174,19 @@ public class MainActivity extends Activity {
         LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(10));
         ImageView logo=new ImageView(this);logo.setImageResource(R.mipmap.channel_forge_tv_icon);logo.setScaleType(ImageView.ScaleType.FIT_CENTER);header.addView(logo,new LinearLayout.LayoutParams(dp(68),dp(68)));
         LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);TextView brand=text("CHANNELFORGE TV",25,true);brand.setTextColor(color("#FFF229"));brand.setLetterSpacing(.16f);brandBox.addView(brand);TextView subtitle=text("THE COMMUNITY DIAL",11,true);subtitle.setTextColor(color("#55EFFF"));subtitle.setLetterSpacing(.28f);brandBox.addView(subtitle);header.addView(brandBox,new LinearLayout.LayoutParams(0,-2,1));
-        TextView pair=focusButton("OPTIONAL DIRECT PAIR");pair.setOnClickListener(v->showPairingDialog());header.addView(pair);
+        screenSwitcher=focusButton("REWIND CINEMA");
+        screenSwitcher.setOnClickListener(v -> {
+            cinemaScreen = !cinemaScreen;
+            syncStudioScreen();
+            if (cinemaScreen && currentStudio != null && !movieShelfLoaded && !moviePageLoading)
+                loadMoviePage(currentStudio, 0);
+        });
+        header.addView(screenSwitcher);
         updateButton=focusButton("UPDATES  •  v"+BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->selectUpdate());LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
-        pair.setId(View.generateViewId());
+        screenSwitcher.setId(View.generateViewId());
         updateButton.setId(View.generateViewId());
-        pair.setNextFocusRightId(updateButton.getId());
-        updateButton.setNextFocusLeftId(pair.getId());
+        screenSwitcher.setNextFocusRightId(updateButton.getId());
+        updateButton.setNextFocusLeftId(screenSwitcher.getId());
         View line=new View(this);line.setBackgroundColor(color("#16DFF5"));guide.addView(line,new LinearLayout.LayoutParams(-1,dp(2)));
         status = text("●  CONNECTING TO THE PUBLIC CHANNEL DIRECTORY…", 12, true); status.setTextColor(color("#77F6A3"));status.setBackground(surface(new int[]{color("#111A3B"),color("#0A0B20")},color("#225E8B"),1,11));LinearLayout.LayoutParams statusLayout=new LinearLayout.LayoutParams(-1,-2);statusLayout.setMargins(0,dp(12),0,dp(12));guide.addView(status,statusLayout);
         LinearLayout columns = new LinearLayout(this); columns.setOrientation(LinearLayout.HORIZONTAL); guide.addView(columns, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -205,7 +215,7 @@ public class MainActivity extends Activity {
         bp.setMargins(dp(35), 0, dp(35), dp(35));
         root.addView(bannerPanel, bp);
         setContentView(root);
-        pair.requestFocus();
+        screenSwitcher.requestFocus();
         video.setOnPreparedListener(player -> {
             status.setText("●  STREAM READY  •  ENGLISH AUDIO PREFERRED");
             player.start();
@@ -361,6 +371,7 @@ public class MainActivity extends Activity {
         creatorRail.removeAllViews();channelRail.removeAllViews();
         liveRail = null;
         movieRail = null;
+        currentStudio = null;
         ++studioRequest;
         ++movieRequest;
         status.setText(error == null ? "NO PUBLIC STUDIOS ONLINE" : "PUBLIC DIRECTORY UNAVAILABLE  •  SELECT SCAN TO RETRY");
@@ -401,6 +412,7 @@ public class MainActivity extends Activity {
     }
 
     private void loadCreator(Creator creator) {
+        currentStudio = creator;
         boolean changed = !creator.playlist.equals(selectedPlaylist) || liveRail == null || movieRail == null;
         selectedPlaylist = creator.playlist;
         if (changed) {
@@ -422,6 +434,7 @@ public class MainActivity extends Activity {
             liveRail.addView(text("Finding live channels…", 14, false));
             movieRail.addView(text("Loading Rewind Cinema…", 14, false));
         }
+        syncStudioScreen();
         int request = ++studioRequest;
         studioLoader.execute(() -> {
             List<Channel> loaded = null;
@@ -458,7 +471,13 @@ public class MainActivity extends Activity {
                 renderChannels(creator.name);
             });
         });
-        if (!movieShelfLoaded && !moviePageLoading) loadMoviePage(creator, 0);
+        if (cinemaScreen && !movieShelfLoaded && !moviePageLoading) loadMoviePage(creator, 0);
+    }
+
+    private void syncStudioScreen() {
+        screenSwitcher.setText(cinemaScreen ? "LIVE TV GUIDE" : "REWIND CINEMA");
+        if (liveRail != null) liveRail.setVisibility(cinemaScreen ? View.GONE : View.VISIBLE);
+        if (movieRail != null) movieRail.setVisibility(cinemaScreen ? View.VISIBLE : View.GONE);
     }
 
     private void loadMoviePage(Creator creator, int offset) {
@@ -570,7 +589,16 @@ public class MainActivity extends Activity {
     private void renderMovies(Creator creator) {
         movieRail.removeAllViews();
         updateStudioStatus(creator.name);
-        movieRail.addView(sectionTitle("REWIND CINEMA", "#FF48C8"));
+        FrameLayout hero = new FrameLayout(this);
+        ImageView artwork = new ImageView(this);
+        artwork.setImageResource(R.drawable.cinema_hero);
+        artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        hero.addView(artwork, new FrameLayout.LayoutParams(-1, -1));
+        TextView title = sectionTitle("REWIND CINEMA", "#FF48C8");
+        title.setTextSize(24);
+        title.setGravity(Gravity.CENTER);
+        hero.addView(title, new FrameLayout.LayoutParams(-1, -1));
+        movieRail.addView(hero, new LinearLayout.LayoutParams(-1, dp(102)));
         if (vaultItems.isEmpty()) {
             movieRail.addView(text("No movies available from this studio.", 14, false));
             return;
@@ -608,7 +636,40 @@ public class MainActivity extends Activity {
         if (moveFocus && start < movieShelf.getChildCount()) movieShelf.getChildAt(start).requestFocus();
     }
 
-    private View vaultBox(VaultItem item){LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(8,8,8,8);box.setFocusable(true);GradientDrawable normal=new GradientDrawable();normal.setColor(Color.rgb(14,12,35));normal.setStroke(2,Color.rgb(0,220,245));normal.setCornerRadius(8);box.setBackground(normal);ImageView poster=new ImageView(this);poster.setScaleType(ImageView.ScaleType.CENTER_CROP);poster.setBackgroundColor(Color.rgb(30,15,55));box.addView(poster,new LinearLayout.LayoutParams(185,255));TextView title=text(item.title+(item.year.isEmpty()?"":" ("+item.year+")"),13,true);title.setMaxLines(2);box.addView(title,new LinearLayout.LayoutParams(185,70));LinearLayout.LayoutParams layout=new LinearLayout.LayoutParams(205,350);layout.setMargins(7,0,7,0);box.setLayoutParams(layout);box.setOnFocusChangeListener((view,focused)->{view.setScaleX(focused?1.08f:1f);view.setScaleY(focused?1.08f:1f);GradientDrawable frame=new GradientDrawable();frame.setColor(Color.rgb(14,12,35));frame.setStroke(focused?5:2,focused?Color.rgb(232,255,24):Color.rgb(0,220,245));frame.setCornerRadius(8);view.setBackground(frame);view.setTranslationZ(focused?18:0);});box.setOnClickListener(view->playUrl(item.title,item.url));if(!item.poster.isEmpty())posterLoader.execute(()->loadPoster(item.poster,poster));return box;}
+    private View vaultBox(VaultItem item) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(9), dp(5), dp(5), dp(6));
+        box.setFocusable(true);
+        int[] sleeve = {color("#534250"), color("#191320"), color("#47312B")};
+        box.setBackground(surface(sleeve, color("#B08B64"), 1, 6));
+        ImageView poster = new ImageView(this);
+        poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        poster.setBackgroundColor(color("#201528"));
+        box.addView(poster, new LinearLayout.LayoutParams(-1, dp(138)));
+        TextView label = text("CF HOME VIDEO  •  VHS", 8, true);
+        label.setTextColor(color("#FFE0A7"));
+        box.addView(label);
+        TextView title = text(item.title + (item.year.isEmpty() ? "" : " (" + item.year + ")"), 12, true);
+        title.setMaxLines(2);
+        box.addView(title, new LinearLayout.LayoutParams(-1, dp(42)));
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(dp(112), -2);
+        layout.setMargins(dp(5), dp(6), dp(5), dp(5));
+        box.setLayoutParams(layout);
+        box.setOnFocusChangeListener((view, focused) -> {
+            boolean reduceMotion = Settings.Global.getFloat(getContentResolver(),
+                    Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f;
+            float scale = focused && !reduceMotion ? 1.055f : 1f;
+            view.animate().scaleX(scale).scaleY(scale).translationY(focused && !reduceMotion ? -dp(3) : 0)
+                    .setDuration(reduceMotion ? 0 : 170).start();
+            view.setBackground(surface(sleeve, color(focused ? "#FF68D7" : "#B08B64"), focused ? 3 : 1, 6));
+        });
+        box.setOnClickListener(view -> new AlertDialog.Builder(this).setTitle(item.title)
+                .setPositiveButton("Insert movie", (dialog, which) -> playUrl(item.title, item.url))
+                .setNegativeButton("Back", null).show());
+        if (!item.poster.isEmpty()) posterLoader.execute(() -> loadPoster(item.poster, poster));
+        return box;
+    }
 
     private void loadPoster(String address, ImageView poster) {
         HttpURLConnection connection = null;

@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css"><link rel="stylesheet" href="/plex.css"><link rel="stylesheet" href="/overlays.css"><link rel="stylesheet" href="/onboarding.css"><link rel="stylesheet" href="/ux.css"><link rel="stylesheet" href="/update.css"><link rel="stylesheet" href="/tasks.css"><link rel="stylesheet" href="/studio.css"><link rel="stylesheet" href="/desk.css"><link rel="stylesheet" href="/guide.css"><link rel="stylesheet" href="/wizard.css"><link rel="stylesheet" href="/tv-theme.css">
 </head>
 <body>
-  <header class="studio-sidebar"><div class="studio-brand"><div class="mark">CF</div><div><h1>ChannelForge</h1><p>YOUR PERSONAL TV STUDIO</p></div></div><nav><span>WORKSPACE</span><button data-view="start" class="active">◫ Overview</button><button data-view="watch">▶ Watch TV</button><button data-view="channels">▤ Channels</button><button data-view="library">▦ Library</button><span>MAKE IT YOURS</span><button data-view="assets">◈ Branding</button><button data-view="exports">▧ Guide artwork</button><button data-view="system">⚙ System</button></nav><div class="sidebar-note"><i></i><b>Standalone and on air</b><small>Local folders, Plex &amp; FFmpeg</small></div></header>
+  <header class="studio-sidebar"><div class="studio-brand"><div class="mark">CF</div><div><h1>ChannelForge</h1><p>YOUR PERSONAL TV STUDIO</p></div></div><nav><span>WORKSPACE</span><button data-view="start" class="active">◫ Overview</button><button data-view="watch">▶ Watch TV</button><button data-view="channels">▤ Channels</button><button data-view="library">▦ Library</button><button data-view="setup">⚙ Sources &amp; sharing</button><span>MAKE IT YOURS</span><button data-view="assets">◈ Branding</button><button data-view="exports">▧ Guide artwork</button><button data-view="system">⚙ System</button></nav><div class="sidebar-note"><i></i><b>Creator is running</b><small>Local folders and Plex</small></div></header>
   <div class="workspace-topbar"><div><span>YOUR STUDIO</span><strong id="workspace-title">Overview</strong></div><div class="topbar-actions"><span id="topbar-status" class="status-dot">Connecting</span><button id="topbar-scan">Scan libraries</button><span id="version"></span></div></div>
   <main>
     <section id="start" class="view active">
@@ -18,7 +18,6 @@
         <article><span>1</span><div><h3>Add your media</h3><p id="step-connect-status">Connect Plex or add a local media folder.</p><button id="start-connect" class="primary">Add media source</button></div></article>
         <article><span>2</span><div><h3>Create a channel</h3><p>Pick a library, select movies or episodes, then choose how they play.</p><button id="start-channel">Create my channel</button></div></article>
         <article><span>3</span><div><h3>Watch and verify</h3><p>Tune the channel inside ChannelForge and check the guide.</p><button data-view="watch">Open Watch TV</button></div></article>
-        <article><span>4</span><div><h3>Use it elsewhere</h3><p>Copy the XMLTV and M3U addresses into an IPTV client or DVR.</p><button data-view="exports">View stream URLs</button></div></article>
       </div>
       <div class="panel help-box"><h3>How channel schedules work</h3><p><b>Play in order</b> repeats your selected titles in their listed order. <b>Shuffle</b> creates a stable mixed lineup that remains consistent after restart. <b>Series marathon</b> keeps every show's episodes in season order. <b>Smart franchise timeline</b> mixes movies and complete TV series in story/release order.</p></div>
     </section>
@@ -56,33 +55,46 @@
       <h3>Your asset library</h3><div id="asset-list" class="asset-grid"></div>
     </section>
     <section id="setup" class="view">
-      <h2>Media sources</h2><p>Use local folders, Plex, or both. All paths and Plex credentials stay on this computer.</p>
+      <div class="page-heading"><div><h2>Sources &amp; sharing</h2><p>Connect your media and see where your studio is available.</p></div></div>
+      <section class="source-dashboard">
+        <article class="panel">
+          <h3>Plex</h3>
+          <div id="plex-profile" class="plex-profile"></div>
+          <p id="movie-scan-status" class="muted" role="status">Movies are scanned when Creator starts.</p>
+          <button type="button" id="setup-plex-signin" class="primary">Sign in with Plex</button>
+        </article>
+        <article class="panel">
+          <h3>Worldwide sharing</h3>
+          <p id="creator-publish-status" class="connection-result" role="status"></p>
+          <button id="unpublish-creator" type="button" class="danger" hidden>Take studio offline</button>
+          <button id="resume-publishing" type="button" class="primary" hidden>Resume worldwide sharing</button>
+        </article>
+      </section>
       <form id="local-library-form" class="panel form-grid"><h3 class="wide">Local media library</h3><label>Library name<input id="local-library-name" maxlength="100" placeholder="Movies"></label><label>Folder path<input id="local-library-path" required placeholder="D:\Media\Movies or /home/user/Videos"></label><p class="muted wide">ChannelForge scans this folder and its subfolders for common video formats. Add poster.jpg, folder.jpg, or an image matching a video filename for artwork.</p><button class="primary wide">Add local folder</button><div id="local-library-list" class="wide"></div></form>
       <form id="movie-upload-form" class="panel form-grid"><h3 class="wide">Upload a movie</h3><label>Destination library<select id="upload-library" required><option value="">Choose a local library</option></select></label><label>Movie file<input id="movie-upload-file" type="file" accept="video/*,.mkv,.m4v,.ts,.m2ts" required></label><p class="muted wide">Uploads stream directly into the selected local library and are available only from this computer. Maximum size: 20 GB.</p><div class="wide update-progress" id="movie-upload-progress" hidden><div><span id="movie-upload-stage">Uploading…</span><b id="movie-upload-percent">0%</b></div><progress id="movie-upload-bar" max="100" value="0"></progress></div><button class="primary wide">Upload movie</button></form>
-      <form id="creator-publish-form" class="panel form-grid">
-        <h3 class="wide">Publish worldwide</h3>
-        <p class="muted wide">Your channels and Rewind Cinema movies appear automatically in ChannelForge TV. Keep Creator running while sharing. Only publish media you have permission to share.</p>
+      <details class="panel"><summary>Studio profile &amp; advanced sharing</summary>
+      <form id="creator-publish-form" class="form-grid">
+        <p class="muted wide">ChannelForge TV lists your studio while Creator is running. Share media you have permission to publish.</p>
         <label>Studio name<input id="creator-name" maxlength="80" required placeholder="Retro Wave TV"></label>
         <label>Public name / slug<input id="creator-slug" maxlength="60" placeholder="retro-wave-tv"></label>
         <label class="wide">Description<input id="creator-description" maxlength="400" placeholder="Hand-built movie and animation channels"></label>
         <label>Studio logo from Asset Studio<select id="creator-logo-asset"><option value="">No studio asset</option></select></label>
         <label>Or public logo URL<input id="creator-logo-url" type="url" placeholder="https://example.com/logo.png"></label>
         <details class="wide"><summary>Advanced sharing settings</summary><label>Custom HTTPS media origin<input id="creator-pairing-url" type="url" placeholder="Leave blank to use the free relay"></label><label>Hosted directory URL<input id="directory-url" type="url" required></label></details>
-        <div class="wide setup-actions"><button id="publish-creator" class="primary">Go live worldwide</button><button id="unpublish-creator" type="button" class="danger" hidden>Remove from TV apps</button></div>
-        <div id="creator-publish-status" class="connection-result wide" role="status"></div>
+        <div class="wide setup-actions"><button id="publish-creator" class="primary">Save &amp; publish studio</button></div>
       </form>
-      <h3>Optional Plex connection</h3><p>Your Plex URL and token stay on this computer. They are never bundled into exports.</p>
-      <form id="setup-form" class="panel form-grid">
-        <div id="plex-profile" class="plex-profile wide"></div>
+      </details>
+      <details class="panel"><summary>Advanced Plex and local network settings</summary>
+      <form id="setup-form" class="form-grid">
         <label>Plex server URL<input id="plex-url" required placeholder="http://192.168.1.20:32400?X-Plex-Token=..."></label>
         <label>Plex token<input id="plex-token" type="password" placeholder="Leave blank to keep the saved token"></label>
         <label>Guide length (hours)<input id="guide-hours" type="number" min="1" max="168" value="24"></label>
         <label>Network access<select id="bind-host"><option value="127.0.0.1">This computer only</option><option value="0.0.0.0">Local network</option></select></label>
         <label class="wide">Public/base URL <input id="public-url" placeholder="Optional, e.g. http://192.168.1.50:8787"></label>
         <p class="muted wide">For TVs or DVRs on another device, choose Local network and enter this computer's LAN URL. Restart ChannelForge after changing network access.</p>
-        <div class="wide setup-actions"><button type="button" id="setup-plex-signin" class="primary">Sign in with Plex</button><button type="button" id="test-plex">Test connection</button><button type="submit">Save settings</button></div><div id="setup-result" class="connection-result wide" role="status"></div><span id="token-status" class="wide"></span>
+        <div class="wide setup-actions"><button type="button" id="test-plex">Test connection</button><button type="submit">Save settings</button></div><div id="setup-result" class="connection-result wide" role="status"></div><span id="token-status" class="wide"></span>
       </form>
-      <details class="panel"><summary>Automatic Plex token setup</summary><p>In Plex Web, open any media item, choose <b>Get Info</b> → <b>View XML</b>, then copy the complete browser URL and paste it into Plex server URL. ChannelForge automatically extracts <code>X-Plex-Token</code>, saves it locally, and removes it from the visible URL. You may also enter the token manually.</p></details>
+      </details>
     </section>
     <section id="exports" class="view">
       <div class="page-heading"><div><span class="channel-number">CHANNEL IDENTITY, EVERYWHERE</span><h2>Guide artwork & delivery</h2><p>Preview published channel identities and connect the hosted guide to Plex or another IPTV client.</p></div></div>

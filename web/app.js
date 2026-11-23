@@ -41,7 +41,7 @@ async function diagnosePlayback(channelId){for(let attempt=0;attempt<12;attempt+
 function setBuilderStep(step){builderStep=Math.max(1,Math.min(4,step));document.querySelectorAll("[data-builder-step]").forEach(section=>section.classList.toggle("active",Number(section.dataset.builderStep)===builderStep));document.querySelectorAll(".builder-steps span").forEach((dot,index)=>{dot.classList.toggle("active",index+1===builderStep);dot.classList.toggle("done",index+1<builderStep)});$("#builder-back").hidden=builderStep===1;$("#builder-next").hidden=builderStep===4;$("#builder-save").hidden=builderStep!==4;if(builderStep===4){const choices=[...selectedLineup.values()],episodes=choices.reduce((count,choice)=>count+choice.items.length,0);$("#builder-summary").innerHTML=`<b>CH ${escapeHtml($("#channel-number").value)} · ${escapeHtml($("#channel-name").value)}</b><p>${choices.length} selected shows/titles · ${episodes} playable videos · ${escapeHtml($("#playback-mode").selectedOptions[0]?.textContent||"")}</p><small class="muted">Selecting a show automatically adds every playable episode in season and episode order.</small>`}}
 function renderAssets(){const box=$("#asset-list");box.innerHTML=state.assets.length?state.assets.map(a=>`<article class="asset-card"><img class="asset-preview" src="/user-assets/${encodeURIComponent(a.filename)}" alt="${escapeHtml(a.name)}"><div class="asset-body"><h4>${escapeHtml(a.name)}</h4><span class="meta">${escapeHtml(a.kind.replaceAll("-"," "))}${a.built_in?" · starter pack":""}</span><div class="actions"><a class="button" href="/user-assets/${encodeURIComponent(a.filename)}" download>Download</a>${a.built_in?"":`<button class="danger" data-delete-asset="${a.id}">Delete</button>`}</div></div></article>`).join(""):`<div class="empty">No artwork yet. Generate a design or upload your own.</div>`}
 function renderTools(){const box=$("#tool-list");box.innerHTML=state.tools.length?state.tools.map(t=>`<article><h3>${escapeHtml(t.name)}</h3><p>${escapeHtml(t.description)}</p><button data-tool="${t.id}" ${t.disabled?"disabled":""}>Run tool</button></article>`).join(""):`<div class="empty">No tools installed. See PLUGIN_DEVELOPMENT.md to create one.</div>`}
-function renderPlexProfile(){const profile=state.config.plex_profile||{},box=$("#plex-profile");box.innerHTML=state.config.token_saved?`<span class="plex-dot"></span><div><b>${escapeHtml(profile.server_name||"Plex connected")}</b><small>${profile.username?`Signed in as ${escapeHtml(profile.username)} · `:""}${profile.version?`Server ${escapeHtml(profile.version)}`:"Connection verified"}</small></div>`:`<span class="plex-dot offline"></span><div><b>Plex not connected</b><small>Paste your Plex URL and token below.</small></div>`}
+function renderPlexProfile(){const profile=state.config.plex_profile||{},box=$("#plex-profile");box.innerHTML=state.config.token_saved?`<span class="plex-dot"></span><div><b>${escapeHtml(profile.server_name||"Plex connected")}</b><small>${profile.username?`Signed in as ${escapeHtml(profile.username)} · `:""}${profile.version?`Server ${escapeHtml(profile.version)}`:"Connection verified"}</small></div>`:`<span class="plex-dot offline"></span><div><b>Plex not connected</b><small>Sign in to index movies and build channels.</small></div>`}
 function renderLocalLibraries(){const box=$("#local-library-list"),values=state.config.local_libraries||[];box.innerHTML=values.length?values.map(item=>`<article class="local-library-row"><div><b>${escapeHtml(item.name)}</b><small>${escapeHtml(item.path)}</small></div><button type="button" class="danger" data-delete-local="${item.id}">Remove</button></article>`).join(""):'<p class="muted">No local folders added yet.</p>';const selected=$("#upload-library").value;$("#upload-library").innerHTML='<option value="">Choose a local library</option>'+values.map(item=>`<option value="local:${item.id}">${escapeHtml(item.name)}</option>`).join("");$("#upload-library").value=selected;renderCreatorPublish()}
 function renderCreatorPublish(){
   const profile=state.config.creator_profile||{};
@@ -55,12 +55,26 @@ function renderCreatorPublish(){
   logoSelect.value=selected;
   set("#directory-url",state.config.directory_url);
   set("#creator-pairing-url",state.config.public_tunnel?"":state.config.public_url);
-  $("#unpublish-creator").hidden=!state.config.creator_published;
-  const status=$("#creator-publish-status"),published=state.config.creator_published;
-  status.className="connection-result wide"+(published?" success":"");
-  status.textContent=published
-    ? state.config.public_tunnel&&!state.config.tunnel_active?"Reconnecting your studio to the public directory…":"Your studio is in the TV directory. Keep Creator open while sharing."
-    : "Go live when your lineup is ready to share.";
+  renderSharingStatus(state.config);
+}
+function renderSharingStatus(config){
+  const privateStudio=config.auto_publish_channels===false&&!config.creator_published;
+  $("#unpublish-creator").hidden=privateStudio;
+  $("#resume-publishing").hidden=!privateStudio;
+  const sharing=privateStudio?"private":config.sharing_status;
+  const status=$("#creator-publish-status");
+  status.className="connection-result"+(sharing==="live"?" success":"");
+  status.textContent=({
+    live:"Your studio is listed in ChannelForge TV. Keep Creator running while sharing.",
+    connecting:"Connecting your studio to ChannelForge TV…",
+    retrying:"The connection dropped. Creator will retry automatically.",
+    private:"Your studio is offline.",
+  })[sharing]||"Channels and scanned Plex movies appear in ChannelForge TV automatically.";
+  const scan=config.movie_scan;
+  $("#movie-scan-status").textContent=scan?.state==="scanning"?"Scanning Plex movies…":scan?.state==="ready"
+    ? `${scan.movies} movies indexed for Rewind Cinema.` : scan?.state==="retry"
+    ? "The scan could not finish. Check Plex, then use Scan libraries to try again."
+    : "Creator scans Plex movies on startup.";
 }
 async function startPlexSignin(){
   const button=$("#plex-signin"),status=$("#plex-signin-status");
@@ -199,6 +213,12 @@ $("#regenerate").onclick=()=>api("/api/exports",{method:"POST",body:"{}"}).then(
 $("#check-update").onclick=()=>checkForUpdate(false);$("#install-update").onclick=()=>installUpdate(false);$("#plex-signin").onclick=startPlexSignin;
 $("#start-connect").onclick=()=>$("#plex-onboarding").showModal();
 $("#setup-plex-signin").onclick=startPlexSignin;
+$("#resume-publishing").onclick=async()=>{
+  try{
+    await api("/api/directory/resume",{method:"POST",body:"{}"});
+    await refresh();
+  }catch(error){toast(error.message,true)}
+};
 $("#local-library-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/local/libraries",{method:"POST",body:JSON.stringify({name:$("#local-library-name").value,path:$("#local-library-path").value})});event.target.reset();await refresh();await loadWorkspaceLibraries();toast("Local media library added.")}catch(error){toast(error.message,true)}});
 $("#movie-upload-form").addEventListener("submit",event=>{event.preventDefault();const file=$("#movie-upload-file").files[0],section=$("#upload-library").value;if(!file||!section)return;const wrap=$("#movie-upload-progress"),bar=$("#movie-upload-bar"),percent=$("#movie-upload-percent"),button=event.target.querySelector("button[type=submit],button:not([type])");wrap.hidden=false;bar.value=0;button.disabled=true;const request=new XMLHttpRequest();request.open("POST",`/api/local/upload?section=${encodeURIComponent(section)}`);request.setRequestHeader("X-File-Name",encodeURIComponent(file.name));request.upload.onprogress=progress=>{if(!progress.lengthComputable)return;const value=Math.round(progress.loaded/progress.total*100);bar.value=value;percent.textContent=`${value}%`;$("#movie-upload-stage").textContent=`Uploading ${file.name}…`};request.onload=async()=>{button.disabled=false;if(request.status>=200&&request.status<300){event.target.reset();await refresh();toast("Movie uploaded and added to the library.")}else{try{toast(JSON.parse(request.responseText).error,true)}catch{toast("Movie upload failed.",true)}}};request.onerror=()=>{button.disabled=false;toast("Movie upload failed.",true)};request.send(file)});
 document.addEventListener("click",async event=>{const button=event.target.closest("[data-delete-local]");if(!button||!confirm("Remove this local library? Existing channels keep their lineup, but files cannot play until the folder is added again."))return;try{await api(`/api/local/libraries/${button.dataset.deleteLocal}`,{method:"DELETE"});await refresh();await loadWorkspaceLibraries();toast("Local library removed.")}catch(error){toast(error.message,true)}});
@@ -263,7 +283,7 @@ $("#add-local-onboarding").onclick=()=>{$("#plex-onboarding").close();showView("
 refresh().then(()=>{$("#installed-version").textContent=`v${state.version}`;checkForUpdate(true)}).catch(e=>toast(e.message,true));
 document.addEventListener("click",event=>{const target=event.target.closest("[data-watch],[data-view]");if(target?.dataset.watch)diagnosePlayback(target.dataset.watch);if(target?.dataset.view==="exports"){writeSetting("channelForgeExports","1");updateTaskChecks()}});
 setInterval(updateTaskChecks,1000);
-document.addEventListener("click",event=>{const target=event.target.closest("[data-view]");if(!target)return;const names={start:"Overview",watch:"Watch TV",channels:"Channels",library:"Library",assets:"Branding",exports:"Guide artwork",system:"System",setup:"Setup",updates:"Updates",tools:"Tools"};showView(target.dataset.view);$("#workspace-title").textContent=names[target.dataset.view]||"ChannelForge";if(target.dataset.view==="library"&&!libraries.length)loadWorkspaceLibraries().catch(error=>toast(error.message,true))});
+document.addEventListener("click",event=>{const target=event.target.closest("[data-view]");if(!target)return;const names={start:"Overview",watch:"Watch TV",channels:"Channels",library:"Library",assets:"Branding",exports:"Guide artwork",system:"System",setup:"Sources & sharing",updates:"Updates",tools:"Tools"};showView(target.dataset.view);$("#workspace-title").textContent=names[target.dataset.view]||"ChannelForge";if(target.dataset.view==="library"&&!libraries.length)loadWorkspaceLibraries().catch(error=>toast(error.message,true))});
 document.addEventListener("click",event=>{if(event.target.closest("#new-channel,#overview-create,#library-create-channel"))setTimeout(()=>setBuilderStep(1),0)});
 setInterval(renderStudioSummary,1000);
 setInterval(()=>{const localCount=state.config.local_libraries?.length||0;$("#topbar-status").textContent=state.config.token_saved&&localCount?`Plex + ${localCount} local`:state.config.token_saved?"Plex connected":localCount?`${localCount} local folder${localCount===1?"":"s"} ready`:"No media source"},1000);
@@ -272,7 +292,13 @@ $("#channel-list").addEventListener("dragstart",event=>{const card=event.target.
 $("#channel-list").addEventListener("dragend",event=>{event.target.closest("[data-channel-card]")?.classList.remove("dragging")});
 $("#channel-list").addEventListener("dragover",event=>{if(event.target.closest("[data-channel-card]"))event.preventDefault()});
 $("#channel-list").addEventListener("drop",async event=>{event.preventDefault();const target=event.target.closest("[data-channel-card]");if(!target||!draggedChannel||target.dataset.channelCard===draggedChannel)return;const ids=state.channels.map(channel=>channel.id),from=ids.indexOf(draggedChannel),to=ids.indexOf(target.dataset.channelCard);ids.splice(to,0,ids.splice(from,1)[0]);try{const data=await api("/api/channels/order",{method:"POST",body:JSON.stringify({ids})});state.channels=data.channels;await refresh();toast("Channel order saved.")}catch(error){toast(error.message,true)}});
-setInterval(async()=>{try{const current=await api("/api/status");if(state.version&&current.version!==state.version)location.reload()}catch{/* The updater may temporarily stop the server while installing. */}},2000);
+setInterval(async()=>{
+  try{
+    const current=await api("/api/status?brief=1");
+    if(state.version&&current.version!==state.version)location.reload();
+    else if(current.config)renderSharingStatus(current.config);
+  }catch{/* The updater may temporarily stop the server while installing. */}
+},3000);
 
 // One navigation model for keyboard, PC gamepads, and television-style D-pads.
 function controllerTargets(){const scope=document.querySelector("dialog[open]")||document.querySelector(".view.active")||document;return[...scope.querySelectorAll('button:not([disabled]),a[href],input:not([type="hidden"]):not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(element=>!element.hidden&&element.offsetParent!==null&&getComputedStyle(element).visibility!=="hidden")}
