@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import base64
+import concurrent.futures
 import hashlib
 import html
 import importlib.util
@@ -29,7 +30,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.4.5"
+VERSION = "3.4.6"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -65,6 +66,7 @@ UPDATE_JOBS: dict[str, dict] = {}
 PLAYBACK_ERRORS: dict[str, str] = {}
 FFMPEG_SESSIONS: dict[str, dict] = {}
 LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
+PLEX_RESOURCE_CACHE: dict[str, object] = {"expires": 0.0, "servers": {}}
 STREAM_DIR = DATA_DIR / "streams"
 TUNNEL_LOCK = threading.RLock()
 TUNNEL_PROCESS: subprocess.Popen | None = None
@@ -224,6 +226,14 @@ def download_verified_update(progress=None) -> dict:
     return {"version": release["latest_version"], "asset": asset_name, "path": str(destination), "sha256": actual, "command": command, "can_launch": sys.platform == "win32"}
 
 
+def launch_verified_windows_update(installer: str) -> None:
+    """Apply packaged Windows updates in place without reopening setup pages."""
+    command = [installer]
+    if getattr(sys, "frozen", False):
+        command.extend(["--silent-update", "--target-exe", str(Path(sys.executable).resolve()), "--wait-pid", str(os.getpid())])
+    subprocess.Popen(command, cwd=str(Path(installer).parent), creationflags=0x08000000 if sys.platform == "win32" else 0)
+
+
 def start_update_job(launch: bool, shutdown) -> str:
     job_id = secrets.token_urlsafe(18)
     with LOCK:
@@ -239,7 +249,7 @@ def start_update_job(launch: bool, shutdown) -> str:
             with LOCK:
                 UPDATE_JOBS[job_id].update({"status": "complete", "result": result, "stage": "complete", "percent": 100})
             if launch and result["can_launch"]:
-                threading.Timer(1.5, lambda: subprocess.Popen([result["path"]], cwd=str(Path(result["path"]).parent))).start()
+                threading.Timer(1.5, lambda: launch_verified_windows_update(result["path"])).start()
                 threading.Timer(4.0, shutdown).start()
         except Exception as exc:
             with LOCK:
@@ -367,6 +377,7 @@ def publish_creator(payload: dict) -> dict:
         "description": str(payload.get("description", "")).strip()[:400],
         "guide_url": public_url + "/exports/guide.xml",
         "playlist_url": public_url + "/exports/channels.m3u",
+        "status_url": public_url + "/api/public/channels",
         "vault_url": public_url + "/api/public/vault",
         "logo_url": logo_url,
         "logo_asset_id": logo_asset_id if selected_logo else "",
@@ -614,7 +625,7 @@ def plex_request(path: str, settings: dict | None = None) -> ET.Element:
     url += separator + urllib.parse.urlencode({"X-Plex-Token": settings["plex_token"]})
     request = urllib.request.Request(url, headers={"Accept": "application/xml", "X-Plex-Product": APP_NAME})
     try:
-        with urllib.request.urlopen(request, timeout=12) as response:
+        with urllib.request.urlopen(request, timeout=float(settings.get("plex_timeout", 12))) as response:
             return ET.fromstring(response.read())
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
@@ -626,19 +637,117 @@ def plex_request(path: str, settings: dict | None = None) -> ET.Element:
         raise ValueError("Plex returned an unexpected response.") from exc
 
 
-def plex_binary(path: str) -> tuple[bytes, str]:
+def plex_resource_servers(force: bool = False) -> dict[str, dict]:
+    """Discover Plex servers shared with the signed-in account.
+
+    Each resource carries its own access token. Those tokens stay in this
+    process and are never included in API responses, channels, or exports.
+    """
+    settings = config()
+    account_token = str(settings.get("plex_token", ""))
+    if not account_token:
+        return {}
+    with LOCK:
+        if not force and float(PLEX_RESOURCE_CACHE.get("expires", 0.0)) > time.time():
+            return dict(PLEX_RESOURCE_CACHE.get("servers", {}))
+    query = urllib.parse.urlencode({"includeHttps": "1", "includeRelay": "1", "includeIPv6": "1"})
+    request = urllib.request.Request(
+        "https://clients.plex.tv/api/v2/resources?" + query,
+        headers={
+            "Accept": "application/json", "X-Plex-Product": APP_NAME,
+            "X-Plex-Version": VERSION, "X-Plex-Client-Identifier": persistent_client_identifier(),
+            "X-Plex-Token": account_token,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValueError("Could not load Plex libraries shared with this account.") from exc
+    resources = payload if isinstance(payload, list) else payload.get("resources", []) if isinstance(payload, dict) else []
+    servers: dict[str, dict] = {}
+    for resource in resources:
+        if not isinstance(resource, dict) or "server" not in str(resource.get("provides", "")).split(","):
+            continue
+        owned = resource.get("owned") in {True, 1, "1", "true"}
+        token = str(resource.get("accessToken", "") or "")
+        machine_id = str(resource.get("clientIdentifier") or resource.get("machineIdentifier") or "").strip()
+        if owned or not token or not machine_id:
+            continue
+        connections = [entry for entry in resource.get("connections", []) if isinstance(entry, dict) and str(entry.get("uri", "")).startswith(("http://", "https://"))]
+        if not connections:
+            continue
+        # A shared server's own LAN address is usually not reachable from this
+        # household. Prefer its public direct address, then Plex relay, with
+        # the private/LAN address as the final fallback.
+        connections.sort(key=lambda entry: (
+            not bool(entry.get("local")), not bool(entry.get("relay")),
+            str(entry.get("uri", "")).startswith("https://"),
+            ":" not in str(entry.get("address", "")),
+        ), reverse=True)
+        urls = list(dict.fromkeys(str(entry["uri"]).rstrip("/") for entry in connections))
+        servers[machine_id] = {
+            "id": machine_id, "name": str(resource.get("name") or "Shared Plex Server")[:120],
+            "url": urls[0], "urls": urls, "token": token, "owned": False,
+        }
+    with LOCK:
+        PLEX_RESOURCE_CACHE.update({"expires": time.time() + 600, "servers": servers})
+    return dict(servers)
+
+
+def plex_credentials(server_id: str = "") -> dict:
+    if not server_id:
+        settings = config()
+        return {"url": settings["plex_url"], "token": settings["plex_token"], "name": settings.get("plex_profile", {}).get("server_name", "My Plex Server")}
+    server = plex_resource_servers().get(server_id)
+    if not server:
+        raise ValueError("That shared Plex server is no longer available to this account.")
+    return server
+
+
+def plex_server_request(path: str, server_id: str = "") -> ET.Element:
+    if not server_id:
+        return plex_request(path)
+    credentials = plex_credentials(server_id)
+    urls = credentials.get("urls", [credentials["url"]])
+
+    def request_url(url: str) -> tuple[str, ET.Element]:
+        return url, plex_request(path, {"plex_url": url, "plex_token": credentials["token"], "plex_timeout": 4})
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(urls)), thread_name_prefix="plex-shared-connection")
+    futures = [pool.submit(request_url, url) for url in urls]
+    error: ValueError | None = None
+    try:
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                url, root = future.result()
+                with LOCK:
+                    cached = PLEX_RESOURCE_CACHE.get("servers", {}).get(server_id)
+                    if cached:
+                        cached["url"] = url
+                return root
+            except ValueError as exc:
+                error = exc
+    finally:
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+    raise error or ValueError("That shared Plex server is offline.")
+
+
+def plex_binary(path: str, server_id: str = "") -> tuple[bytes, str]:
     if not path.startswith("/") or path.startswith("//"):
         raise ValueError("Invalid Plex image path.")
-    cache_key = hashlib.sha256(path.encode()).hexdigest()
+    cache_key = hashlib.sha256(f"{server_id}:{path}".encode()).hexdigest()
     cache_file, cache_meta = POSTER_CACHE_DIR / f"{cache_key}.img", POSTER_CACHE_DIR / f"{cache_key}.json"
     if cache_file.is_file() and cache_meta.is_file():
         metadata = load_json(cache_meta, {})
         return cache_file.read_bytes(), str(metadata.get("content_type", "image/jpeg"))
-    settings = config()
-    if not settings["plex_token"]:
+    credentials = plex_credentials(server_id)
+    if not credentials["token"]:
         raise ValueError("Enter a Plex token in Setup first.")
     separator = "&" if "?" in path else "?"
-    url = settings["plex_url"] + path + separator + urllib.parse.urlencode({"X-Plex-Token": settings["plex_token"]})
+    url = credentials["url"] + path + separator + urllib.parse.urlencode({"X-Plex-Token": credentials["token"]})
     request = urllib.request.Request(url, headers={"Accept": "image/*", "X-Plex-Product": APP_NAME})
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
@@ -760,23 +869,40 @@ def poll_plex_signin(pin_id: int) -> dict:
     return {"complete": True, "config": config(True)}
 
 
-def plex_libraries() -> list[dict]:
-    root = plex_request("/library/sections")
+def plex_section_parts(section: str) -> tuple[str, str]:
+    if section.startswith("plex:"):
+        _, server_id, section_id = section.split(":", 2)
+        if not server_id or not section_id.isdigit():
+            raise ValueError("Invalid shared Plex library section.")
+        return server_id, section_id
+    if not section.isdigit():
+        raise ValueError("Invalid Plex library section.")
+    return "", section
+
+
+def plex_libraries(server_id: str = "") -> list[dict]:
+    root = plex_server_request("/library/sections", server_id)
+    server_name = plex_credentials(server_id).get("name", "Shared Plex Server") if server_id else ""
     return [
-        {"key": node.get("key", ""), "title": node.get("title", "Untitled"), "type": node.get("type", "unknown"), "uuid": node.get("uuid", ""), "thumb": node.get("thumb", "")}
+        {
+            "key": f"plex:{server_id}:{node.get('key', '')}" if server_id else node.get("key", ""),
+            "title": f"{node.get('title', 'Untitled')} — shared by {server_name}" if server_id else node.get("title", "Untitled"),
+            "type": node.get("type", "unknown"), "uuid": node.get("uuid", ""), "thumb": node.get("thumb", ""),
+            "server_id": server_id, "server_name": server_name, "shared": bool(server_id),
+        }
         for node in root.findall("Directory") if node.get("key")
     ]
 
 
 def plex_items(section: str) -> list[dict]:
-    if not section.isdigit():
-        raise ValueError("Invalid Plex library section.")
-    library = next((item for item in plex_libraries() if item["key"] == section), None)
+    server_id, section_id = plex_section_parts(section)
+    libraries = plex_libraries(server_id) if server_id else plex_libraries()
+    library = next((item for item in libraries if item["key"] == section), None)
     if not library:
         raise ValueError("Plex library was not found.")
     # TV libraries must expose playable episodes, not non-playable show folders.
-    path = f"/library/sections/{section}/all?type=4" if library["type"] == "show" else f"/library/sections/{section}/all"
-    root = plex_request(path)
+    path = f"/library/sections/{section_id}/all?type=4" if library["type"] == "show" else f"/library/sections/{section_id}/all"
+    root = plex_server_request(path, server_id)
     result = []
     for node in list(root):
         rating_key = node.get("ratingKey")
@@ -803,6 +929,7 @@ def plex_items(section: str) -> list[dict]:
             "container": media_node.get("container", "") if media_node is not None else "",
             "video_codec": media_node.get("videoCodec", "") if media_node is not None else "",
             "audio_codec": media_node.get("audioCodec", "") if media_node is not None else "",
+            "plex_server_id": server_id,
         })
     return result
 
@@ -845,8 +972,21 @@ def all_libraries() -> list[dict]:
         try:
             result.extend({**item, "source": "plex"} for item in plex_libraries())
         except ValueError:
-            if not local:
-                raise
+            pass
+        try:
+            shared_servers = plex_resource_servers()
+        except ValueError:
+            shared_servers = {}
+        if shared_servers:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(shared_servers)), thread_name_prefix="plex-shared-library") as pool:
+                jobs = {pool.submit(plex_libraries, server_id): server_id for server_id in shared_servers}
+                for job in concurrent.futures.as_completed(jobs):
+                    try:
+                        result.extend({**item, "source": "plex-shared"} for item in job.result())
+                    except ValueError:
+                        continue
+        if not result and not local:
+            raise ValueError("No accessible Plex or local libraries were found.")
     return result + local
 
 
@@ -1006,12 +1146,13 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "video_codec": str(item.get("video_codec", ""))[:30], "audio_codec": str(item.get("audio_codec", ""))[:30],
             "source": "local" if item.get("source") == "local" else "plex",
             "file_path": str(item.get("file_path", ""))[:4000] if item.get("source") == "local" else "",
+            "plex_server_id": str(item.get("plex_server_id", ""))[:300] if item.get("source") != "local" else "",
         })
     if not normalized:
         raise ValueError("The selected titles were invalid.")
     return {
         "id": existing_id or secrets.token_hex(8), "name": name[:100], "number": number[:12],
-        "section": str(payload.get("section", ""))[:20], "items": normalized,
+        "section": str(payload.get("section", ""))[:700], "items": normalized,
         "logo_asset_id": str(payload.get("logo_asset_id", ""))[:80],
         "background_asset_id": str(payload.get("background_asset_id", ""))[:80],
         "corner_bug_asset_id": str(payload.get("corner_bug_asset_id", ""))[:80],
@@ -1039,9 +1180,9 @@ def save_channel(payload: dict, channel_id: str = "") -> dict:
             values.append(item)
         atomic_json(CHANNELS_FILE, values)
         generate_exports(values)
-        plex_posters = [str(media.get("thumb", "")) for media in item["items"] if media.get("source") != "local" and media.get("thumb")]
+        plex_posters = [(str(media.get("thumb", "")), str(media.get("plex_server_id", ""))) for media in item["items"] if media.get("source") != "local" and media.get("thumb")]
         if plex_posters:
-            threading.Thread(target=lambda: [plex_binary(path) for path in plex_posters], daemon=True, name="channel-forge-poster-cache").start()
+            threading.Thread(target=lambda: [plex_binary(path, server_id) for path, server_id in plex_posters], daemon=True, name="channel-forge-poster-cache").start()
         return item
 
 
@@ -1220,9 +1361,9 @@ def stop_public_tunnel() -> None:
 
 def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
     """Create a Plex universal-transcoder HLS session for the live schedule point."""
-    settings = config()
     position = schedule_position(channel, moment)
     item = position["item"]
+    credentials = plex_credentials(str(item.get("plex_server_id", "")))
     metadata_path = str(item.get("key") or f"/library/metadata/{item['id']}")
     if not metadata_path.startswith("/library/metadata/"):
         metadata_path = f"/library/metadata/{item['id']}"
@@ -1235,13 +1376,13 @@ def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
         "directPlay": "0", "directStream": "0", "videoCodec": "h264", "audioCodec": "aac",
         "videoQuality": "100", "videoResolution": "1920x1080", "maxVideoBitrate": "20000", "subtitleSize": "100",
         "audioBoost": "100", "location": "lan", "context": "streaming", "copyts": "1", "session": secrets.token_hex(12),
-        "X-Plex-Token": settings["plex_token"], "X-Plex-Product": APP_NAME,
+        "X-Plex-Token": credentials["token"], "X-Plex-Product": APP_NAME,
         "X-Plex-Version": VERSION, "X-Plex-Client-Identifier": persistent_client_identifier(),
         "X-Plex-Platform": "Chrome", "X-Plex-Platform-Version": "120.0", "X-Plex-Device": "Linux",
         "X-Plex-Device-Name": APP_NAME, "X-Plex-Model": "hosted",
         "X-Plex-Client-Profile-Extra": "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
     }
-    return settings["plex_url"] + "/video/:/transcode/universal/start.m3u8?" + urllib.parse.urlencode(parameters)
+    return credentials["url"] + "/video/:/transcode/universal/start.m3u8?" + urllib.parse.urlencode(parameters)
 
 
 def ffmpeg_path() -> str:
@@ -1275,6 +1416,9 @@ def sanitized_playback_error(error: object) -> str:
     token = str(config().get("plex_token", ""))
     if token:
         message = message.replace(token, "REDACTED")
+    for server in dict(PLEX_RESOURCE_CACHE.get("servers", {})).values():
+        if server.get("token"):
+            message = message.replace(str(server["token"]), "REDACTED")
     return message[:800]
 
 
@@ -1282,7 +1426,7 @@ def plex_part_key(item: dict) -> str:
     key = str(item.get("part_key", ""))
     if key.startswith("/library/parts/"):
         return key
-    root = plex_request(str(item.get("key") or f'/library/metadata/{item["id"]}'))
+    root = plex_server_request(str(item.get("key") or f'/library/metadata/{item["id"]}'), str(item.get("plex_server_id", "")))
     part = root.find(".//Part")
     key = part.get("key", "") if part is not None else ""
     if not key.startswith("/library/parts/"):
@@ -1320,12 +1464,12 @@ def start_ffmpeg_session(channel: dict) -> str:
     if item.get("source") == "local":
         media_input = str(local_media_path(item))
     else:
-        settings = config()
-        if not settings["plex_token"]:
+        credentials = plex_credentials(str(item.get("plex_server_id", "")))
+        if not credentials["token"]:
             raise ValueError("This channel uses Plex media, but Plex is not connected.")
-        media_input = settings["plex_url"] + plex_part_key(item)
+        media_input = credentials["url"] + plex_part_key(item)
         separator = "&" if "?" in media_input else "?"
-        media_input += separator + urllib.parse.urlencode({"X-Plex-Token": settings["plex_token"]})
+        media_input += separator + urllib.parse.urlencode({"X-Plex-Token": credentials["token"]})
     directory = STREAM_DIR / identity
     directory.mkdir(parents=True, exist_ok=True)
     for old in directory.glob("*"):
@@ -1498,7 +1642,7 @@ def generate_exports(values: list[dict] | None = None) -> dict:
 
 
 def vault_item_id(item: dict) -> str:
-    identity = f'{item.get("source", "plex")}:{item.get("id", "")}:{item.get("file_path", "")}'
+    identity = f'{item.get("source", "plex")}:{item.get("plex_server_id", "")}:{item.get("id", "")}:{item.get("file_path", "")}'
     return hashlib.sha256(identity.encode()).hexdigest()[:24]
 
 
@@ -1517,7 +1661,8 @@ def vault_items() -> list[dict]:
             if item.get("source") == "local" and thumb:
                 poster_url = f"{base}/api/local/image?section={urllib.parse.quote(section)}&id={urllib.parse.quote(str(item.get('id', '')))}"
             elif thumb:
-                poster_url = f"{base}/api/plex/image?path={urllib.parse.quote(thumb)}"
+                server_id = urllib.parse.quote(str(item.get("plex_server_id", "")))
+                poster_url = f"{base}/api/plex/image?path={urllib.parse.quote(thumb)}&server={server_id}"
             else:
                 poster_url = ""
             result.append({
@@ -1527,6 +1672,44 @@ def vault_items() -> list[dict]:
                 "duration_ms": item.get("duration_ms", 1800000),
             })
     return result
+
+
+def public_channel_catalog() -> dict:
+    """Return lightweight guide/status data without starting a media session."""
+    base = server_base()
+    moment = datetime.now(timezone.utc)
+    end = moment + timedelta(hours=3)
+    assets = {item.get("id"): item for item in asset_manifest()}
+    result = []
+    settings = config()
+    for channel in channels():
+        try:
+            position = schedule_position(channel, moment)
+            current = position["item"]
+            if current.get("source") == "local":
+                online = Path(str(current.get("file_path", ""))).is_file()
+            else:
+                server_id = str(current.get("plex_server_id", ""))
+                online = bool(plex_credentials(server_id).get("token") and plex_credentials(server_id).get("url")) if server_id else bool(settings.get("plex_token") and settings.get("plex_url"))
+            with LOCK:
+                if PLAYBACK_ERRORS.get(str(channel.get("id", ""))):
+                    online = False
+            slots = schedule_window(channel, moment, end)
+        except (OSError, ValueError, TypeError):
+            online, slots = False, []
+        logo = assets.get(channel.get("logo_asset_id"))
+        result.append({
+            "id": str(channel.get("id", "")), "name": str(channel.get("name", "Untitled")),
+            "number": str(channel.get("number", "")), "online": online,
+            "stream_url": f"{base}/live/{urllib.parse.quote(str(channel.get('id', '')))}.m3u8",
+            "logo_url": f"{base}/user-assets/{urllib.parse.quote(str(logo.get('filename', '')))}" if logo else "",
+            "programs": [{
+                "title": str(slot["item"].get("title", "Untitled")),
+                "year": str(slot["item"].get("year", "")), "type": str(slot["item"].get("type", "video")),
+                "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat(),
+            } for slot in slots],
+        })
+    return {"version": 1, "generated_at": moment.isoformat(), "channels": result}
 
 
 def vault_source(item_id: str) -> dict:
@@ -1648,8 +1831,9 @@ class Handler(BaseHTTPRequestHandler):
                 data, content_type = local_image(query.get("section", [""])[0], query.get("id", [""])[0])
                 self.send_bytes(200, data, content_type)
             elif parsed.path == "/api/plex/image":
-                image_path = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
-                data, content_type = plex_binary(image_path)
+                query = urllib.parse.parse_qs(parsed.query)
+                image_path = query.get("path", [""])[0]
+                data, content_type = plex_binary(image_path, query.get("server", [""])[0])
                 self.send_bytes(200, data, content_type)
             elif parsed.path == "/api/playback/status":
                 channel_id = urllib.parse.parse_qs(parsed.query).get("channel", [""])[0]
@@ -1666,6 +1850,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"generated_at": moment.isoformat(), "channels": guide})
             elif parsed.path == "/api/public/vault":
                 self.send_json(200, {"version": 1, "generated_at": datetime.now(timezone.utc).isoformat(), "items": vault_items()})
+            elif parsed.path == "/api/public/channels":
+                self.send_json(200, public_channel_catalog())
             elif parsed.path == "/api/update":
                 release = latest_release()
                 release.pop("assets", None)
@@ -1836,7 +2022,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, result)
                 if payload.get("launch") and result["can_launch"]:
                     installer = result["path"]
-                    threading.Timer(0.8, lambda: subprocess.Popen([installer], cwd=str(Path(installer).parent))).start()
+                    threading.Timer(0.8, lambda: launch_verified_windows_update(installer)).start()
                     threading.Timer(2.0, self.server.shutdown).start()
             elif parsed.path == "/api/update/start":
                 self.send_json(202, {"job_id": start_update_job(bool(payload.get("launch")), self.server.shutdown)})

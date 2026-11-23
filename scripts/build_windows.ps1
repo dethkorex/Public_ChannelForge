@@ -25,16 +25,17 @@ $payload = Join-Path $root "installer\payload"
 New-Item -ItemType Directory -Force -Path $payload | Out-Null
 Copy-Item -Force (Join-Path $root "dist\ChannelForge_Creator.exe") (Join-Path $payload "ChannelForge_Creator.exe")
 Copy-Item -Force (Join-Path $root "dist\ChannelForge_TV.exe") (Join-Path $payload "ChannelForge_TV.exe")
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Creator_Setup --icon "assets\channel-forge-creator.ico" --add-data "installer\payload\ChannelForge_Creator.exe;payload" --add-data "assets\channel-forge-creator-installer.png;assets" --add-data "assets\channel-forge-creator.ico;assets" installer\windows_installer.py
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_TV_Setup --icon "assets\channel-forge-tv.ico" --add-data "installer\payload\ChannelForge_TV.exe;payload" --add-data "assets\channel-forge-tv.png;assets" --add-data "assets\channel-forge-tv.ico;assets" installer\windows_installer.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name ChannelForge_Setup --icon "assets\channel-forge-creator.ico" --add-data "installer\payload\ChannelForge_Creator.exe;payload" --add-data "installer\payload\ChannelForge_TV.exe;payload" --add-data "assets\channel-forge-creator-installer.png;assets" --add-data "assets\channel-forge-tv.png;assets" --add-data "assets\channel-forge-creator.ico;assets" --add-data "assets\channel-forge-tv.ico;assets" installer\windows_installer.py
 
 $release = Join-Path $root "release"
 New-Item -ItemType Directory -Force -Path $release | Out-Null
-Copy-Item -Force (Join-Path $root "dist\ChannelForge_Creator_Setup.exe") $release
-Copy-Item -Force (Join-Path $root "dist\ChannelForge_TV_Setup.exe") $release
-# Legacy alias keeps the in-app updater working for releases installed before the rename.
-Copy-Item -Force (Join-Path $root "dist\ChannelForge_Creator_Setup.exe") (Join-Path $release "Public_ChannelForge_Setup.exe")
+$suiteSetup = Join-Path $root "dist\ChannelForge_Setup.exe"
+Copy-Item -Force $suiteSetup $release
+# Product aliases keep both in-app updaters and older public versions working.
+Copy-Item -Force $suiteSetup (Join-Path $release "ChannelForge_Creator_Setup.exe")
+Copy-Item -Force $suiteSetup (Join-Path $release "ChannelForge_TV_Setup.exe")
+Copy-Item -Force $suiteSetup (Join-Path $release "Public_ChannelForge_Setup.exe")
 # Keep the portable viewer for users who do not want an installed copy.
 Copy-Item -Force (Join-Path $root "dist\ChannelForge_TV.exe") $release
-Get-FileHash (Join-Path $release "ChannelForge_Creator_Setup.exe") -Algorithm SHA256 | Format-List
+Get-FileHash $suiteSetup -Algorithm SHA256 | Format-List
 

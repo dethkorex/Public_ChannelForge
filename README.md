@@ -28,21 +28,25 @@ Completed setup tasks show a visible check mark. Channels can be deleted either 
 
 After connection, ChannelForge displays the Plex username, server name, and server version supplied by that server. Library browsing includes Plex posters, summaries, ratings, years, and media types. Poster bytes are proxied through ChannelForge so the Plex token is never placed in browser image URLs.
 
+Channel creation also discovers Plex servers that other Plex users have explicitly shared with the signed-in account. Shared libraries are labeled with the server owner's name and can be selected exactly like the user's own libraries; selecting a show still adds the complete series. ChannelForge uses the per-server access granted by Plex only while browsing or playing a selected title. Shared-server tokens stay inside Creator, are excluded from channels and exports, and are never sent to ChannelForge TV or the public directory. Libraries that have not been shared through Plex are not visible.
+
 The built-in **Asset Studio** creates original channel logos, guide backgrounds, and corner bugs from a channel name and user-selected colors. Users can also upload artwork they own and assign a logo to an XMLTV channel. Artwork remains in the user's local application-data folder.
 
 Every installation includes 60 coordinated starter assets: a logo, guide/player background, and corner bug for each of 20 original themes. The collection covers Kids, Anime, Horror, Action, Sci-Fi, Comedy, Drama, Retro, Classic Television, Cinema, Sports, News, Mystery, Fantasy, Adventure, Crime, Music, Nature, Kitchen, and Holiday channels. Each family has its own illustrated symbol and color language rather than a text-only placeholder. Built-ins refresh during upgrades without replacing user-created or uploaded artwork.
 
 ![ChannelForge starter theme library](preview/channel-forge-default-themes-v3.4.3.png)
 
-All ChannelForge apps expose an update control backed by the official GitHub Releases feed. Creator and desktop TV check on launch, notify immediately, show download progress, and verify the published SHA-256 checksum before offering the installer or executable. Fire TV detects the release and opens the exact official APK download; Android still requires the user to approve its package-installer prompt. Roku reports release availability in-app; Roku Store installs update automatically when distributed through the Store, while developer/sideload builds must be replaced through Roku's developer installer. Windows Creator opens the verified setup wizard; Linux users receive the verified Debian, Arch/Omarchy, or portable package and a copyable install command. ChannelForge never silently installs or launches an update without confirmation.
+All ChannelForge apps expose an update control backed by the official GitHub Releases feed. Creator and desktop TV check on launch, notify immediately, show download progress, and verify the published SHA-256 checksum before offering the update. After the user confirms, an installed Windows app performs an in-place update and restarts without reopening the first-install setup wizard; the chosen install folder, shortcuts, configuration, channels, and artwork are preserved. Fire TV detects the release and opens the exact official APK download; Android still requires the user to approve its package-installer prompt. Roku reports release availability in-app; Roku Store installs update automatically when distributed through the Store, while developer/sideload builds must be replaced through Roku's developer installer. Linux users receive the verified Debian, Arch/Omarchy, or portable package and a copyable install command. ChannelForge never downloads or launches an update without confirmation.
 
-ChannelForge TV v3.4.5 uses a collapsible hamburger sidebar. Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and Updates are separate workspaces instead of one long scrolling page. The sidebar collapses to an icon rail on desktop and becomes an overlay on smaller screens.
+ChannelForge TV v3.4.6 uses a collapsible hamburger sidebar. Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and Updates are separate workspaces instead of one long scrolling page. The sidebar collapses to an icon rail on desktop and becomes an overlay on smaller screens.
 
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
-![ChannelForge TV home hub](preview/channel-forge-tv-v3.4.1-home.png)
+![ChannelForge TV home hub](preview/channel-forge-tv-v346-home.png)
 
-![ChannelForge TV Rewind Cinema](preview/channel-forge-tv-v3.4.1-cinema.png)
+![ChannelForge TV live guide](preview/channel-forge-tv-v346-live-guide.png)
+
+![ChannelForge TV Rewind Cinema](preview/channel-forge-tv-v346-rewind.png)
 
 This repository is the sanitized public edition. It contains **no private API credentials, Plex tokens, personal channel presets, media databases, logs, backups, or custom artwork** from the original ChannelForge installation.
 
@@ -50,17 +54,18 @@ The interface and asset workflow remain part of ChannelForge. Only the original 
 
 ## Windows installation
 
-1. Download `ChannelForge_Creator_Setup.exe` from the latest GitHub Release.
-2. Run it and choose the install folder, Desktop shortcut, and optional startup shortcut.
-3. `ChannelForge_Creator.exe` opens as a dedicated desktop application window and starts its TV server at `http://127.0.0.1:8787` inside the same process.
-4. On first launch, choose **Add a local media folder**, **Sign in with Plex**, or configure both.
-5. Open **Channels**, create a channel, choose any configured library, and select movies or entire TV shows. Selecting a show adds every playable episode in season/episode order.
-6. Open **Guide exports** to copy the hosted XMLTV and M3U URLs into your DVR, tuner client, or IPTV player.
-7. Open **Setup** and select **Go live worldwide** to make the studio appear in every ChannelForge TV app. Creator must remain open while viewers watch.
+1. Download `ChannelForge_Setup.exe` from the latest GitHub Release.
+2. Run it and choose one install folder, Desktop shortcuts, and the optional Creator startup shortcut.
+3. Setup installs `ChannelForge_Creator.exe` and `ChannelForge_TV.exe` side by side in that folder and creates separate branded Desktop and Start Menu shortcuts for both applications.
+4. `ChannelForge_Creator.exe` opens as a dedicated desktop application window and starts its TV server at `http://127.0.0.1:8787` inside the same process.
+5. On first launch, choose **Add a local media folder**, **Sign in with Plex**, or configure both.
+6. Open **Channels**, create a channel, choose any configured library, and select movies or entire TV shows. Selecting a show adds every playable episode in season/episode order.
+7. Open **Guide exports** to copy the hosted XMLTV and M3U URLs into your DVR, tuner client, or IPTV player.
+8. Open **Setup** and select **Go live worldwide** to make the studio appear in every ChannelForge TV app. Creator must remain open while viewers watch.
 
 Leave ChannelForge Creator running while viewers use its channels. It hosts the XMLTV guide, M3U playlist, artwork, and on-demand HLS streams. `ChannelForge_TV.exe` is a separate native-window viewer for watching published studios and does not open the default browser.
 
-To install the viewer, download `ChannelForge_TV_Setup.exe`, choose its install folder and Desktop-shortcut preference, and finish the wizard. `ChannelForge_TV.exe` remains available as a portable alternative. Both installed applications place their dedicated icon beside the executable and explicitly use it for Desktop, Start Menu, and Creator startup shortcuts, avoiding stale Windows icon-cache artwork.
+`ChannelForge_TV.exe` remains available as a portable viewer-only alternative. The Fire TV APK and Roku ZIP also remain standalone viewers and never install Creator. Both Windows applications place their dedicated icon beside the executable and explicitly use it for Desktop, Start Menu, and Creator startup shortcuts, avoiding stale Windows icon-cache artwork. Product-specific setup aliases remain in releases only so older in-app updaters continue to work; all interactive Windows setup packages install the same two-app suite.
 
 On Windows, closing the Creator window minimizes it to the notification area so hosting continues. The first close displays a reminder. Use the tray icon to reopen ChannelForge Creator or choose **Exit and stop channels** to shut down XMLTV, M3U, and playback hosting.
 

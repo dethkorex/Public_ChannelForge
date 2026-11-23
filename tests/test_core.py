@@ -19,6 +19,7 @@ class CoreTests(unittest.TestCase):
         app.atomic_json(app.CHANNELS_FILE, [])
         app.VAULT_CATALOG_FILE.unlink(missing_ok=True)
         app.LOCAL_LIBRARY_CACHE.clear()
+        app.PLEX_RESOURCE_CACHE.update({"expires": 0.0, "servers": {}})
 
     def test_public_config_hides_token(self):
         value = app.config(True)
@@ -43,6 +44,21 @@ class CoreTests(unittest.TestCase):
         self.assertIn("public-channelforge.", playlist)
         self.assertIn(f"http://127.0.0.1:8787/live/{channel['id']}.m3u8", playlist)
         self.assertNotIn("web/index.html", playlist)
+
+    def test_public_channel_catalog_supplies_online_guide_without_starting_playback(self):
+        channel = app.save_channel({"name": "Public Guide", "number": "12", "items": [{"id": "9", "title": "Example", "type": "movie", "duration_ms": 3600000, "key": "/library/metadata/9"}]})
+        with mock.patch.object(app, "start_playback_route") as playback:
+            catalog = app.public_channel_catalog()
+        playback.assert_not_called()
+        public = next(item for item in catalog["channels"] if item["id"] == channel["id"])
+        self.assertTrue(public["online"])
+        self.assertTrue(public["stream_url"].endswith(f"/live/{channel['id']}.m3u8"))
+        self.assertGreater(len(public["programs"]), 0)
+
+    def test_public_channel_catalog_hides_missing_local_source(self):
+        channel = app.save_channel({"name": "Missing Local", "number": "13", "items": [{"id": "local-9", "title": "Offline", "source": "local", "file_path": str(app.DATA_DIR / "missing-video.mkv"), "duration_ms": 3600000}]})
+        public = next(item for item in app.public_channel_catalog()["channels"] if item["id"] == channel["id"])
+        self.assertFalse(public["online"])
 
     def test_schedule_is_stable_across_restarts(self):
         channel = app.clean_channel({"name": "Clock", "number": "2", "schedule_anchor": "2026-01-01T00:00:00+00:00", "items": [
@@ -203,6 +219,39 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(profile["username"], "viewer")
         self.assertTrue(profile["signed_in"])
         self.assertNotIn("machine_id", profile)
+
+    def test_discovers_only_plex_servers_shared_with_signed_in_user(self):
+        payload = json.dumps([
+            {"name": "My Server", "provides": "server", "owned": True, "clientIdentifier": "mine", "accessToken": "owner-token", "connections": [{"uri": "https://mine.example", "local": False, "relay": False}]},
+            {"name": "Dad's Server", "provides": "server", "owned": False, "clientIdentifier": "dad-server", "accessToken": "shared-token", "connections": [{"uri": "https://relay.example", "local": False, "relay": True}, {"uri": "https://dad.example", "local": False, "relay": False}]},
+        ]).encode()
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self): return payload
+
+        with mock.patch.object(app.urllib.request, "urlopen", return_value=Response()):
+            servers = app.plex_resource_servers(True)
+        self.assertEqual(set(servers), {"dad-server"})
+        self.assertEqual(servers["dad-server"]["url"], "https://dad.example")
+        self.assertEqual(servers["dad-server"]["token"], "shared-token")
+
+    def test_shared_plex_libraries_and_items_keep_token_server_side(self):
+        server = {"id": "dad-server", "name": "Dad's Server", "url": "https://dad.example", "token": "shared-token", "owned": False}
+        libraries = app.ET.fromstring('<MediaContainer><Directory key="7" title="Classic TV" type="show" uuid="shared-lib"/></MediaContainer>')
+        episodes = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentTitle="Shared Show" parentIndex="1" index="1" duration="1200000" key="/library/metadata/99"><Media container="mkv" videoCodec="h264" audioCodec="aac"><Part key="/library/parts/99/file.mkv"/></Media></Video></MediaContainer>')
+        with mock.patch.object(app, "plex_resource_servers", return_value={"dad-server": server}), mock.patch.object(app, "plex_request", side_effect=[libraries, libraries, episodes]) as request:
+            shared = app.plex_libraries("dad-server")
+            items = app.plex_items("plex:dad-server:7")
+        self.assertEqual(shared[0]["key"], "plex:dad-server:7")
+        self.assertIn("shared by Dad's Server", shared[0]["title"])
+        self.assertEqual(items[0]["plex_server_id"], "dad-server")
+        self.assertEqual(items[0]["title"], "Shared Show · S01E01 · Pilot")
+        self.assertTrue(all(call.args[1]["plex_token"] == "shared-token" for call in request.call_args_list))
+        channel = app.clean_channel({"name": "Shared TV", "number": "77", "section": "plex:dad-server:7", "items": items})
+        self.assertEqual(channel["items"][0]["plex_server_id"], "dad-server")
+        self.assertNotIn("shared-token", json.dumps(channel))
 
     def test_plex_poster_proxy_keeps_token_server_side(self):
         class Headers:

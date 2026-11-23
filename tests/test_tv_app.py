@@ -36,8 +36,23 @@ class TvAppTests(unittest.TestCase):
         self.assertIn(hls_branch, tv.HTML)
         self.assertIn(native_fallback, tv.HTML)
         self.assertLess(tv.HTML.index(hls_branch), tv.HTML.index(native_fallback))
-        self.assertIn("function renderVaultBatch(count=80)", tv.HTML)
+        self.assertIn("function renderVaultBatch(count=40)", tv.HTML)
         self.assertIn("renderVaultBatch()", tv.HTML)
+        self.assertIn("INSERT MOVIE", tv.HTML)
+        self.assertIn("overflow-x:hidden", tv.VAULT_CSS)
+        self.assertIn("v.controls=!liveMode", tv.HTML)
+        self.assertIn("if(liveMode&&event.currentTarget.classList.contains('playing'))", tv.HTML)
+        self.assertIn("backBufferLength:120", tv.HTML)
+        self.assertIn(".tv-guide::-webkit-scrollbar{display:none}", tv.GUIDE_STAGE_CSS)
+
+    def test_tv_scans_online_channels_into_guide_and_keeps_home_focused(self):
+        self.assertIn('id="scan-channels"', tv.HTML)
+        self.assertIn('id="tv-guide"', tv.HTML)
+        self.assertIn("async function scanChannels", tv.HTML)
+        self.assertIn("filter(channel=>channel.online)", tv.HTML)
+        self.assertIn('id="home-changelog"', tv.HTML)
+        self.assertIn('data-section-block="cinema" hidden><h2>CREATOR STUDIOS', tv.HTML)
+        self.assertIn("if(name==='cinema'&&selectedCreator&&!vaultItems.length)studio(selectedCreator)", tv.HTML)
 
     def test_local_creator_is_discovered_on_default_port(self):
         payload = json.dumps({
@@ -49,6 +64,7 @@ class TvAppTests(unittest.TestCase):
         self.assertTrue(result["available"])
         self.assertEqual(result["creator"]["name"], "Anime Studio")
         self.assertEqual(result["creator"]["playlist_url"], "http://127.0.0.1:8787/exports/channels.m3u")
+        self.assertEqual(result["creator"]["status_url"], "http://127.0.0.1:8787/api/public/channels")
         self.assertIn("1 local channel", result["creator"]["description"])
 
     def test_content_proxy_allows_only_https_or_local_creator(self):
