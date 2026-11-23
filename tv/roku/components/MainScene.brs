@@ -21,6 +21,7 @@ sub init()
   m.tapeTimer = m.top.findNode("tapeTimer")
   m.tapeTimer.observeField("fire", "tapeMotionDone")
   m.ejectingMovie = false
+  m.activeMovie = invalid
   m.liveItem = invalid
   m.liveProgramStop = 0
   m.checkingOffline = false
@@ -186,6 +187,7 @@ end sub
 sub insertSelectedMovie()
   item = m.selectedMovie
   if item = invalid then return
+  m.activeMovie = item
   m.liveItem = invalid
   m.liveRetryTimer.control = "stop"
   m.upcomingTimer.control = "stop"
@@ -196,19 +198,20 @@ sub insertSelectedMovie()
   animateTape(true)
 end sub
 sub animateTape(inserting as boolean)
-  if m.selectedMovie = invalid then return
+  if m.activeMovie = invalid then return
   m.ejectingMovie = not inserting
-  m.top.findNode("tapeTitle").text = "VHS  •  " + m.selectedMovie.title
+  m.top.findNode("tapeTitle").text = m.activeMovie.title
+  m.top.findNode("tapeArtwork").uri = m.activeMovie.hdPosterUrl
   m.top.findNode("tapeMotion").visible = true
   m.top.findNode("insertTapeMotion").control = "stop"
   m.top.findNode("ejectTapeMotion").control = "stop"
   if inserting
     m.top.findNode("insertTapeMotion").control = "start"
-    m.tapeTimer.duration = 1.25
+    m.tapeTimer.duration = 1.45
   else
     m.video.control = "pause"
     m.top.findNode("ejectTapeMotion").control = "start"
-    m.tapeTimer.duration = 0.76
+    m.tapeTimer.duration = 0.89
   end if
   m.tapeTimer.control = "stop"
   m.tapeTimer.control = "start"
@@ -217,12 +220,13 @@ sub tapeMotionDone()
   m.top.findNode("tapeMotion").visible = false
   if m.ejectingMovie
     m.ejectingMovie = false
-    m.video.control = "stop"
+    m.activeMovie = invalid
     m.video.visible = false
     m.guide.visible = true
     m.bufferPanel.visible = false
+    m.video.control = "stop"
     m.insertMovie.SetFocus(true)
-  else if not m.guide.visible and m.liveItem = invalid
+  else if not m.guide.visible and m.activeMovie <> invalid
     m.video.control = "play"
   end if
 end sub
@@ -273,6 +277,8 @@ sub videoStateChanged()
     if m.video.content <> invalid then showBuffering("BUFFERING VIDEO", m.video.content.title)
   else if state = "finished" and m.liveItem <> invalid
     scheduleNextProgram()
+  else if state = "finished" and m.activeMovie <> invalid and not m.ejectingMovie
+    animateTape(false)
   else if state = "error"
     if m.liveItem <> invalid and m.liveRetries < 3
       showBuffering("RECONNECTING TO THE STUDIO", m.liveItem.title)
@@ -356,7 +362,7 @@ sub updateLiveProgramStop()
         m.programBoundaryTimer.control = "start"
         if index + 1 < m.liveItem.programs.Count()
           lead = (program.stop_epoch_ms - program.start_epoch_ms) / 3000#
-          if lead > 12 then lead = 12
+          if lead > 45 then lead = 45
           delay = m.liveProgramStop - now - lead
           if delay < 1 then delay = 1
           m.upcomingTimer.duration = delay
@@ -417,7 +423,7 @@ function onKeyEvent(key as string, press as boolean) as boolean
   if not press then return false
   if m.guide.visible = false
     if key = "back" or (key = "OK" and m.liveItem <> invalid)
-      if m.liveItem = invalid and m.selectedMovie <> invalid
+      if m.activeMovie <> invalid
         if not m.ejectingMovie then animateTape(false)
         return true
       end if

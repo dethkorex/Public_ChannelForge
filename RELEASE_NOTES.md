@@ -1,3 +1,9 @@
+- Fire TV opens a time-based Live TV Guide with all studios, search, Earlier and Later controls, and artwork for the highlighted channel.
+- The Fire TV guide opens with a collapsed sidebar and fits more channels and programs on screen.
+- Fire TV starts adaptive video at a lower bitrate and can fall back to another decoder when the device's preferred decoder fails.
+- Fire TV loads and caches movie posters, and tries the full cover when a thumbnail is unavailable.
+- Coming Up Next is generated from the schedule. On Fire TV, the announcement waits for playback to resume if the stream is buffering.
+- VHS insertion and ejection show the selected movie's cover on a box with visible depth. The deck clears after insertion, and ejecting closes fullscreen playback.
 - Rewind Cinema scrolls through VHS cases. Select a case and choose Insert Movie to open fullscreen playback.
 - Movies animate into the player and eject when you close them. The same movie appears once per studio.
 - Creator has a redesigned dashboard with quicker access to sources, channel editing, and worldwide sharing.

@@ -21,7 +21,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from release_metadata import read_latest_release
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.28"
+VERSION = "3.5.29"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -895,7 +895,7 @@ function selectTape(movie,tape){
         +'<div class="cinema-details"><span class="eyebrow">SELECTED CASSETTE</span><h2>'+esc(movie.title)
         +'</h2><div class="cinema-tags">'+tags+'</div><p>'+esc(movie.summary||'No description supplied.')
         +'</p></div><button id="selected-play">▶ INSERT MOVIE</button>';
-    $('#selection img')?.addEventListener('error',event=>hideFailedPoster(event.currentTarget));
+    $('#selection img')?.addEventListener('error',event=>hideFailedPoster(event.currentTarget,movie.thumbnail_url));
     $('#selected-play').onclick=()=>playCinemaMovie(movie);
 }
 function playCinemaMovie(movie){
@@ -905,32 +905,45 @@ function playCinemaMovie(movie){
     }
     const media={kind:'movie',title:movie.title,movie,cinema:true,transportPending:true};
     play(movie.stream_url,media);
-    animateCinemaTape(true,movie.title,()=>{
+    animateCinemaTape(true,movie,()=>{
         media.transportPending=false;
         if(activeMedia===media)media.startAfterTransport?.();
     });
 }
-let cinemaTapeTimer;
-function animateCinemaTape(inserting,title,done=()=>{}){
-    let stage=$('#cinema-tape-animation');
+let cinemaTapeTimer, cinemaTapeStage;
+function clearCinemaTape(){
     clearTimeout(cinemaTapeTimer);
-    if(!stage){
-        stage=document.createElement('div');
-        stage.id='cinema-tape-animation';
-        stage.setAttribute('aria-hidden','true');
-        stage.innerHTML='<div class="cinema-tape-deck"><span class="cinema-deck-brand">CHANNELFORGE HOME VIDEO</span>'
-            +'<div class="cinema-tape-slot"></div><span class="cinema-deck-light"></span></div>'
-            +'<div class="cinema-tape-prop"><div class="cinema-tape-face"><span></span><b></b></div>'
-            +'<div class="cinema-tape-front"></div><div class="cinema-tape-side"></div></div>';
-        document.body.append(stage);
-    }
-    if(matchMedia('(prefers-reduced-motion: reduce)').matches){stage.hidden=true;done();return}
-    stage.hidden=false;
-    stage.querySelector('b').textContent=title;
-    stage.className='';
-    void stage.offsetWidth;
+    cinemaTapeStage?.remove();
+    cinemaTapeStage=null;
+}
+function animateCinemaTape(inserting,movie,done){
+    clearCinemaTape();
+    if(matchMedia('(prefers-reduced-motion: reduce)').matches){done();return}
+    const stage=document.createElement('div'), title=esc(movie.title);
+    const cover=$('#selection img'), thumbnail=$('#vault [aria-current] img');
+    const poster=cover?.naturalWidth?cover.currentSrc:
+        thumbnail?.naturalWidth?thumbnail.currentSrc:movie.thumbnail_url||movie.poster_url;
+    stage.id='cinema-tape-animation';
     stage.className=inserting?'inserting':'ejecting';
-    cinemaTapeTimer=setTimeout(()=>{stage.hidden=true;done()},inserting?1250:760);
+    stage.setAttribute('aria-hidden','true');
+    stage.innerHTML='<div class="cinema-tape-deck"><span class="cinema-deck-brand">CHANNELFORGE HOME VIDEO</span>'
+        +'<div class="cinema-tape-slot"></div><span class="cinema-deck-light"></span></div>'
+        +'<div class="cinema-tape-prop"><div class="cinema-tape-face"><div class="cinema-tape-art">'
+        +(poster?'<img src="'+esc(poster)+'" alt="">':'')+'</div><span class="cinema-tape-print">'
+        +'<small>REWIND CINEMA</small><b>'+title+'</b><em>CF HOME VIDEO · VHS</em></span></div>'
+        +'<div class="cinema-tape-front"><b>'+title+'</b><span>VHS</span></div>'
+        +'<div class="cinema-tape-side"></div><div class="cinema-tape-side opposite"></div>'
+        +'<div class="cinema-tape-front opposite"></div><div class="cinema-tape-base"></div></div>';
+    stage.querySelector('img')?.addEventListener('error',event=>event.currentTarget.remove());
+    const complete=()=>{
+        if(cinemaTapeStage!==stage)return;
+        clearCinemaTape();
+        done();
+    };
+    stage.querySelector('.cinema-tape-prop').addEventListener('animationend',complete,{once:true});
+    cinemaTapeStage=stage;
+    document.body.append(stage);
+    cinemaTapeTimer=setTimeout(complete,inserting?1650:1100);
 }
 function restoreCinemaWindow(){
     if(!movieOwnsFullscreen)return;
@@ -1056,7 +1069,7 @@ function play(url,media=null,continuing=false){
     if(liveMode&&activeMedia.channel?.online===false){showChannelOffline();return}
     armPlaybackDeadline(generation,24000);
     const start=()=>{
-        if(generation!==playbackGeneration)return;
+        if(generation!==playbackGeneration||activeMedia.ejecting)return;
         if(activeMedia.transportPending){activeMedia.startAfterTransport=start;return}
         v.play().catch(error=>{
             if(generation===playbackGeneration)setPlayerState(error.message||'PRESS PLAY TO START',true);
@@ -1110,7 +1123,7 @@ function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeM
             const duration=Date.parse(program?.stop)-Date.parse(program?.start);
             const left=Date.parse(program?.stop)-Date.now();
             const next=channel?.programs?.[channel.programs.indexOf(program)+1];
-            if(program&&program.start===activeMedia.programStart&&next&&left<=Math.min(12000,duration/3)){
+            if(program&&program.start===activeMedia.programStart&&next&&left<=Math.min(45000,duration/3)){
                 activeMedia.nextAnnounced=true;
                 activeMedia.channel=channel;
                 updateTunedIndicator(activeMedia,'LIVE');
@@ -1123,7 +1136,11 @@ function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeM
             setPlayerState(liveMode?'● LIVE · NO PAUSE OR REWIND':'PLAYING');
         }
     });
-    video.addEventListener('ended',()=>{if(video===$('#player'))advanceLive()});
+    video.addEventListener('ended',()=>{
+        if(video!==$('#player'))return;
+        if(liveMode)advanceLive();
+        else if(activeMedia?.cinema)closeVideoView();
+    });
     video.addEventListener('error',()=>{
         if(video!==$('#player')||!activeStreamUrl)return;
         if(video.error?.code===3&&/Linux/i.test(navigator.platform)){
@@ -1328,12 +1345,17 @@ function ensurePlayerShell(){if(playerShell)return playerShell;playerShell=docum
 function dockMiniPlayer(screen='live'){let shell=ensurePlayerShell(),slot=$('#mini-player-slot');document.body.classList.remove('player-controls-hidden');if(screen==='live'&&slot){slot.append(shell);shell.className='mini-player-shell guide-dock'}else{document.querySelector('main.wrap')?.prepend(shell);shell.className='mini-player-shell section-dock'}}
 function closeVideoView(){
     if(playerMini||!liveMode){
-        const cinema=activeMedia?.cinema;
-        if(cinema){
-            if($('#cinema-tape-animation.ejecting:not([hidden])'))return;
-            animateCinemaTape(false,activeMedia.title,()=>{
-                if(activeMedia?.cinema)stopPlayer();
-                $('#selected-play')?.focus({preventScroll:true});
+        const media=activeMedia;
+        if(media?.cinema){
+            if(media.ejecting)return;
+            media.ejecting=true;
+            $('#player').pause();
+            animateCinemaTape(false,media.movie,async()=>{
+                if(activeMedia!==media)return;
+                stopPlayer();
+                if(!document.body.classList.contains('cinema-mode'))showScreen('cinema');
+                await fullscreenRequest.catch(()=>{});
+                if(!activeMedia)$('#selected-play')?.focus({preventScroll:true});
             });
         }else stopPlayer();
     }
@@ -1395,7 +1417,7 @@ HTML = HTML.replace('<button id="update" class="update">', '<button id="desktop-
 HTML = HTML.replace('</main><video id="player"', f'{EXTRA_SCREENS}</main><aside id="player-hud" class="player-hud" hidden></aside><aside id="player-bug" class="player-bug" hidden></aside><div id="player-buffer" class="player-buffer" role="status" aria-live="polite" hidden><span class="buffer-spinner" aria-hidden="true"></span><b></b><small></small></div><dialog id="program-dialog" class="program-dialog"><button class="program-close" onclick="this.closest(\'dialog\').close()">×</button><div id="program-dialog-body" class="program-dialog-body"></div></dialog><video id="player"', 1)
 HTML = HTML.replace("let playbackGeneration=0", PLAYER_DOCK_JS + "\nlet playbackGeneration=0", 1)
 HTML = HTML.replace("function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}", "function minimizePlayer(){if(!liveMode)return stopPlayer();playerMini=true;$('#player').classList.add('mini');document.body.classList.add('has-mini-player');$('#close').hidden=false;$('#close').textContent='✕ CLOSE PLAYER';showScreen('live');dockMiniPlayer('live');setPlayerState('MINI PLAYER · BROWSE THE GUIDE')}", 1)
-HTML = HTML.replace("function stopPlayer(){liveMode=false;", "function stopPlayer(){++playbackGeneration;clearTimeout(liveRetryTimer);liveRetryTimer=null;clearTimeout(liveBoundaryTimer);clearTimeout(playbackTimer);playbackTimer=null;clearTimeout(cinemaTapeTimer);const animation=$('#cinema-tape-animation');if(animation)animation.hidden=true;restoreCinemaWindow();let shell=ensurePlayerShell();document.body.append(shell);shell.className='mini-player-shell';document.body.classList.remove('player-controls-hidden');liveMode=false;", 1)
+HTML = HTML.replace("function stopPlayer(){liveMode=false;", "function stopPlayer(){++playbackGeneration;clearTimeout(liveRetryTimer);liveRetryTimer=null;clearTimeout(liveBoundaryTimer);clearTimeout(playbackTimer);playbackTimer=null;clearCinemaTape();restoreCinemaWindow();let shell=ensurePlayerShell();document.body.append(shell);shell.className='mini-player-shell';document.body.classList.remove('player-controls-hidden');liveMode=false;", 1)
 HTML = HTML.replace("async function checkUpdate(onLaunch=false)", SCREEN_NAV_JS + "\nasync function checkUpdate(onLaunch=false)", 1)
 HTML = HTML.replace("b.onclick=()=>studio(c)", "b.onclick=()=>{studio(c);showScreen('cinema')}", 1)
 HTML = HTML.replace("$('#close').onclick", "ensurePlayerShell();$('#menu-toggle').onclick=()=>{if(innerWidth<=900)document.body.classList.toggle('menu-open');else document.body.classList.toggle('menu-collapsed')};document.querySelectorAll('[data-screen]').forEach(button=>button.onclick=event=>{event.preventDefault();const screen=button.dataset.screen;showScreen(screen);if(playerMini)dockMiniPlayer(screen);if(screen==='updates')checkUpdate(false)});$('#screen-check-update').onclick=()=>checkUpdate(false);$('#close').onclick", 1)
@@ -1449,7 +1471,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         body = response.read(limit + 1)
                     if len(body) > limit:
                         raise ValueError("Creator response exceeded 64 MB.")
-                    return self.send(response.status, body, response.headers.get_content_type())
+                    content_type = response.headers.get_content_type()
+                    headers = {"Cache-Control": "private, max-age=300"} if response.status == 200 and content_type.startswith("image/") else None
+                    return self.send(response.status, body, content_type, headers)
             if parsed.path == "/stream":
                 url = approved_content_url(parse_qs(parsed.query).get("url", [""])[0])
                 headers = {"Accept": "*/*", "User-Agent": f"ChannelForge-TV/{VERSION}"}
@@ -1504,9 +1528,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         if length is not None:
             self.send_header("Content-Length", str(length))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", extra_headers.get("Cache-Control", "no-store"))
         for name, value in extra_headers.items():
-            if value:
+            if value and name != "Cache-Control":
                 self.send_header(name, value)
         self.end_headers()
 
