@@ -666,6 +666,32 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(app.all_libraries(include_shared=False), [{**personal, "source": "plex"}])
         discover.assert_not_called()
 
+    def test_worldwide_sharing_reconnects_a_broken_tunnel_even_while_ssh_is_alive(self):
+        old = "https://previous.example.com"
+        new = "https://reconnected.example.com"
+        profile = {"name": "Test studio"}
+        settings = {"creator_profile": profile, "pending_creator_profile": {}, "public_tunnel": True}
+        with (
+            mock.patch.object(app, "REGISTERED_ORIGIN", old),
+            mock.patch.object(app, "SHARING_STATUS", "live"),
+            mock.patch.object(app, "config", return_value=settings),
+            mock.patch.object(app, "start_public_media_server"),
+            mock.patch.object(app, "start_public_tunnel", side_effect=[old, old, old, new, new]),
+            mock.patch.object(app, "relay_reaches_this_creator", side_effect=[True, False, False]) as health,
+            mock.patch.object(app, "stop_public_tunnel") as stop,
+            mock.patch.object(app, "publish_creator") as publish,
+            mock.patch.object(app, "generate_exports"),
+            mock.patch.object(app.time, "monotonic", side_effect=[100, 160, 180, 185, 205]),
+            mock.patch.object(app.PUBLISH_CHANGED, "wait", side_effect=[None] * 4 + [InterruptedError]),
+        ):
+            with self.assertRaises(InterruptedError):
+                app.restore_public_sharing()
+            self.assertEqual(health.call_args_list, [mock.call(old)] * 3)
+            stop.assert_called_once()
+            publish.assert_called_once_with(profile)
+            self.assertEqual(app.REGISTERED_ORIGIN, new)
+            self.assertEqual(app.SHARING_STATUS, "live")
+
     def test_library_workspace_reads_the_current_movie_index_without_plex(self):
         section = "plex:shared-server:3"
         first = {"id": "1", "title": "First movie", "type": "movie", "section": section}

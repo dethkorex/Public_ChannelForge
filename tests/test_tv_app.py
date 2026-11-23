@@ -7,12 +7,14 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
 import ChannelForge_TV as tv
 import linux_runtime
+import release_metadata
 
 
 class FakeResponse:
@@ -61,6 +63,17 @@ class TvAppTests(unittest.TestCase):
 
     def test_version_comparison_handles_double_digit_minor(self):
         self.assertGreater(tv.version_tuple("v3.10.0"), tv.version_tuple("3.9.9"))
+
+    def test_update_check_uses_published_manifest_when_api_is_rate_limited(self):
+        release = {"tag_name": "v3.9.42", "body": "Playback and library improvements.",
+                   "assets": [{"name": "ChannelForge_Setup.exe"}]}
+        error = urllib.error.HTTPError(release_metadata.SOURCES[0], 429, "Too many requests", {}, None)
+        with mock.patch.object(release_metadata.urllib.request, "urlopen",
+                               side_effect=[error, FakeResponse(json.dumps(release).encode())]) as fetch:
+            result = tv.latest_tv_release()
+        self.assertTrue(result["update_available"])
+        self.assertEqual(result["notes"], release["body"])
+        self.assertEqual([call.args[0].full_url for call in fetch.call_args_list], list(release_metadata.SOURCES))
 
     def test_fire_tv_has_directory_recovery_pairing_and_branding(self):
         root = Path(__file__).resolve().parents[1]
@@ -167,13 +180,15 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("directoryScan=refreshDirectory()", tv.HTML)
 
     def test_closed_viewer_is_not_sent_a_second_response(self):
-        handler = object.__new__(tv.Handler)
-        handler.wfile = mock.Mock()
-        handler.wfile.write.side_effect = BrokenPipeError
-        handler.send_content_headers = mock.Mock()
-        handler.send(200, b"catalog", "application/json")
-        self.assertTrue(handler.close_connection)
-        handler.send_content_headers.assert_called_once()
+        for error in (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            with self.subTest(error=error):
+                handler = object.__new__(tv.Handler)
+                handler.wfile = mock.Mock()
+                handler.wfile.write.side_effect = error
+                handler.send_content_headers = mock.Mock()
+                handler.send(200, b"catalog", "application/json")
+                self.assertTrue(handler.close_connection)
+                handler.send_content_headers.assert_called_once()
 
     def test_stream_proxy_starts_forwarding_before_segment_finishes(self):
         release_segment = threading.Event()

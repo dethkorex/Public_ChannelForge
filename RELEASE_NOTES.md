@@ -8,3 +8,6 @@
 - Rewind Cinema switches cleanly between compatible studios. The 3D tape seats before the movie plays, and Back or B ejects it.
 - Creator shows connected libraries while shared Plex libraries load and previews channel logos, backgrounds, and corner overlays.
 - Previously indexed Plex movies open from the Creator library cache. Public adaptive streams start with one fewer network request.
+- Update checks have a fallback. The Windows and Linux badge says when the update check needs a retry.
+- Fire TV keeps the guide and navigation visible at 720p. Closing video cleanly cancels network requests that are still running.
+- Creator reconnects the public relay when it stops serving viewers, even if the connection still appears open.

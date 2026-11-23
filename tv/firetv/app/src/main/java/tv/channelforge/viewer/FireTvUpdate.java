@@ -31,6 +31,8 @@ final class FireTvUpdate {
     private static final String CHECKSUM = "SHA256SUMS-TV.txt";
     private static final String RELEASE_ASSETS =
             "https://github.com/dethkorex/Public_ChannelForge/releases/download/";
+    private static final String RELEASE_MANIFEST =
+            "https://github.com/dethkorex/Public_ChannelForge/releases/latest/download/ChannelForge-release.json";
     private static final Pattern VERSION = Pattern.compile("[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}");
     private static final Pattern SHA256 = Pattern.compile("[a-fA-F0-9]{64}");
     private static final int MAX_APK_BYTES = 100 * 1024 * 1024;
@@ -50,11 +52,13 @@ final class FireTvUpdate {
     }
 
     static FireTvUpdate latest(StringBuilder notes) throws Exception {
-        JSONObject release = new JSONObject(readText(new URL(BuildConfig.GITHUB_RELEASES_API), 1024 * 1024));
-        String tag = release.getString("tag_name");
-        if (!tag.startsWith("v") || !VERSION.matcher(tag.substring(1)).matches()) {
-            throw new IOException("GitHub returned an invalid release version.");
+        JSONObject release;
+        try {
+            release = readRelease(BuildConfig.GITHUB_RELEASES_API);
+        } catch (Exception unavailable) {
+            release = readRelease(RELEASE_MANIFEST);
         }
+        String tag = release.getString("tag_name");
         String version = tag.substring(1);
         for (String line : release.optString("body").split("\\r?\\n")) {
             String text = line.trim();
@@ -81,6 +85,16 @@ final class FireTvUpdate {
             expected[i] = (byte) Integer.parseInt(digest.substring(start, start + 2), 16);
         }
         return new FireTvUpdate(version, apkUrl, expected);
+    }
+
+    private static JSONObject readRelease(String address) throws Exception {
+        JSONObject release = new JSONObject(readText(new URL(address), 1024 * 1024));
+        String tag = release.optString("tag_name");
+        if (!tag.startsWith("v") || !VERSION.matcher(tag.substring(1)).matches()
+                || release.optJSONArray("assets") == null) {
+            throw new IOException("GitHub returned an invalid release.");
+        }
+        return release;
     }
 
     static boolean isNewer(String candidate, String installed) {

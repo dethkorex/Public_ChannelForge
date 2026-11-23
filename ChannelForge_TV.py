@@ -18,19 +18,20 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
+from release_metadata import read_latest_release
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.27"
+VERSION = "3.5.28"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
-GITHUB = "https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"
 UPDATE_DIR = (Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "public-channelforge" / "updates"
               if sys.platform.startswith("linux") else windows_update_cache())
 UPDATE_JOBS: dict[str, dict] = {}
 UPDATE_LOCK = threading.RLock()
 APP_WINDOW = None
 STREAM_ERRORS = (OSError, http.client.HTTPException)
+VIEWER_DISCONNECTED = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
 try:
     import urllib3
 except ImportError:
@@ -56,9 +57,7 @@ def version_tuple(value: str) -> tuple[int, ...]:
 
 
 def github_json() -> dict:
-    request = urllib.request.Request(GITHUB, headers={"Accept": "application/vnd.github+json", "User-Agent": f"ChannelForge-TV/{VERSION}"})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return json.load(response)
+    return read_latest_release(f"ChannelForge-TV/{VERSION}")
 
 
 def latest_tv_release() -> dict:
@@ -264,7 +263,26 @@ async function creatorResponse(url, scan=false, signal){
 }
 async function json(url, scan=false, signal){return (await creatorResponse(url,scan,signal)).json()}
 async function localJson(path,options={}){let r=await fetch(path,options),value=await r.json();if(!r.ok)throw Error(value.error||'Request failed');return value}
-async function checkUpdate(onLaunch=false){try{let r=await localJson('/api/update'),version=r.latest_version||r.current_version||'__VERSION__';if($('#home-release-version'))$('#home-release-version').textContent='v'+version;for(const notes of document.querySelectorAll('#home-changelog,#tv-release-notes'))notes.textContent=r.notes||'Playback, guide, discovery, and application reliability improvements.';if($('#home-update-state'))$('#home-update-state').textContent=r.update_available?'A verified update is available.':'You are running the newest public release.';if(!r.update_available){$('#update').textContent='UP TO DATE ✓ • v__VERSION__';return}$('#update').textContent='UPDATE v'+r.latest_version+' AVAILABLE';if(!onLaunch||confirm('ChannelForge TV v'+r.latest_version+' is available. Download and verify it now?'))downloadUpdate()}catch(e){$('#update').textContent='OFFLINE • v__VERSION__';if($('#home-update-state'))$('#home-update-state').textContent='Release check is offline. The installed application still works normally.';if($('#home-changelog'))$('#home-changelog').textContent='v__VERSION__\n• Restored Windows video playback\n• Added automatic channel scanning and offline filtering\n• Added a full live program guide\n• Rebuilt Rewind Cinema as a vertical VHS shelf'} }
+async function checkUpdate(onLaunch=false){
+    const button=$('#update'), status=$('#home-update-state');
+    button.textContent='CHECKING FOR UPDATES…';
+    try{
+        const release=await localJson('/api/update'), version=release.latest_version||release.current_version||'__VERSION__';
+        if($('#home-release-version'))$('#home-release-version').textContent='v'+version;
+        for(const notes of document.querySelectorAll('#home-changelog,#tv-release-notes')){
+            notes.textContent=release.notes||'Visit Updates for the newest release.';
+        }
+        if(status)status.textContent=release.update_available?'A new release is available.':'You are running the newest public release.';
+        button.textContent=release.update_available?'UPDATE v'+version+' AVAILABLE':'UP TO DATE ✓ • v__VERSION__';
+        if(release.update_available&&(!onLaunch||confirm('ChannelForge TV v'+version+' is available. Download and verify it now?')))downloadUpdate();
+    }catch(error){
+        button.textContent='RETRY UPDATE CHECK • v__VERSION__';
+        if(status)status.textContent='Could not check for a newer version. Select Updates to try again.';
+        for(const notes of document.querySelectorAll('#home-changelog,#tv-release-notes')){
+            if(notes.textContent.startsWith('Loading'))notes.textContent='';
+        }
+    }
+}
 async function downloadUpdate(){
     const panel=$('#update-panel'),message=$('#update-message'),bar=$('#update-progress'),bytes=$('#update-bytes');
     const action=$('#restart-update'),command=$('#update-command');
@@ -1185,7 +1203,7 @@ $('#restart-update').onclick=async()=>{
         message.textContent='Opening the verified update…';
     }catch(error){message.textContent=error.message}
 };
-function demo(){let titles=['Neon Nights','The Last Arcade','Galaxy Rangers','Video Dreams','Summer Quest'],colors=['#bd205c','#a9560c','#069e9a','#792091','#d64a16'];$('#creators').innerHTML='<button class="creator"><b>RETRO WAVE STUDIO</b><br><small>Custom creator branding • online</small></button>';$('#live').innerHTML='<button class="channel">LIVE • SATURDAY MORNING</button><button class="channel">LIVE • SCI-FI AFTER DARK</button>';$('#vault').innerHTML='';titles.forEach((title,i)=>{let svg='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><defs><linearGradient id="g" x2="1" y2="1"><stop stop-color="'+colors[i]+'"/><stop offset="1" stop-color="#09142d"/></linearGradient></defs><rect width="400" height="600" fill="url(#g)"/><circle cx="90" cy="120" r="55" fill="#ffe43b" opacity=".8"/><text x="200" y="310" fill="white" font-size="38" font-family="sans-serif" font-weight="bold" text-anchor="middle">'+title+'</text></svg>');let x={title,year:1984+i,type:'movie',summary:'A creator-curated retro favorite with poster art and movie details loaded automatically from the connected library.',poster_url:svg,stream_url:''},b=document.createElement('button');b.className='tape';b.innerHTML='<img src="'+svg+'"><b>'+title+'</b><small>'+x.year+' • movie</small><i>PLAY ▶</i>';b.onfocus=()=>selectTape(x);b.onmouseenter=()=>selectTape(x);$('#vault').append(b);if(i===0)selectTape(x)});$('#vault').firstElementChild.focus()}if(location.search.includes('demo=1'))demo();else load();checkUpdate(true);</script></body></html>'''.replace("__VERSION__", VERSION).replace("__DIRECTORY__", DIRECTORY).replace("__DIRECTORY_FALLBACK__", DIRECTORY_FALLBACK).replace("__GITHUB__", GITHUB)
+function demo(){let titles=['Neon Nights','The Last Arcade','Galaxy Rangers','Video Dreams','Summer Quest'],colors=['#bd205c','#a9560c','#069e9a','#792091','#d64a16'];$('#creators').innerHTML='<button class="creator"><b>RETRO WAVE STUDIO</b><br><small>Custom creator branding • online</small></button>';$('#live').innerHTML='<button class="channel">LIVE • SATURDAY MORNING</button><button class="channel">LIVE • SCI-FI AFTER DARK</button>';$('#vault').innerHTML='';titles.forEach((title,i)=>{let svg='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><defs><linearGradient id="g" x2="1" y2="1"><stop stop-color="'+colors[i]+'"/><stop offset="1" stop-color="#09142d"/></linearGradient></defs><rect width="400" height="600" fill="url(#g)"/><circle cx="90" cy="120" r="55" fill="#ffe43b" opacity=".8"/><text x="200" y="310" fill="white" font-size="38" font-family="sans-serif" font-weight="bold" text-anchor="middle">'+title+'</text></svg>');let x={title,year:1984+i,type:'movie',summary:'A creator-curated retro favorite with poster art and movie details loaded automatically from the connected library.',poster_url:svg,stream_url:''},b=document.createElement('button');b.className='tape';b.innerHTML='<img src="'+svg+'"><b>'+title+'</b><small>'+x.year+' • movie</small><i>PLAY ▶</i>';b.onfocus=()=>selectTape(x);b.onmouseenter=()=>selectTape(x);$('#vault').append(b);if(i===0)selectTape(x)});$('#vault').firstElementChild.focus()}if(location.search.includes('demo=1'))demo();else load();checkUpdate(true);</script></body></html>'''.replace("__VERSION__", VERSION).replace("__DIRECTORY__", DIRECTORY).replace("__DIRECTORY_FALLBACK__", DIRECTORY_FALLBACK)
 
 
 SIDEBAR_CSS = r'''.hamburger{margin:0;background:#11132f;border:1px solid #20e4ff;color:#fff;font-size:24px;line-height:1;padding:12px 14px;border-radius:10px}.app-sidebar{position:fixed;z-index:7;left:0;top:92px;bottom:0;width:235px;padding:24px 14px;background:#090a1def;border-right:1px solid #1eddfb55;backdrop-filter:blur(18px);transition:.2s width,.2s transform}.app-sidebar nav{display:grid;gap:8px}.app-sidebar nav>a{display:grid;grid-template-columns:32px 1fr;align-items:center;text-align:left;width:100%;padding:14px 12px;border:1px solid transparent;border-radius:10px;background:transparent;color:#c3cbe2;font-weight:800;text-decoration:none}.app-sidebar nav>a:hover,.app-sidebar nav>a:focus,.app-sidebar nav>a.active{background:#1a1741;border-color:#ff3eb8;color:#fff}.app-sidebar nav>a i{font-style:normal;font-size:20px;text-align:center}.app-sidebar .menu-label{white-space:nowrap;overflow:hidden}.sidebar-footer{position:absolute;left:18px;right:18px;bottom:22px;color:#7e89a8;font-size:11px}.wrap{margin-left:235px;transition:.2s margin-left}.menu-collapsed .app-sidebar{width:78px}.menu-collapsed .app-sidebar .menu-label,.menu-collapsed .sidebar-footer{display:none}.menu-collapsed .wrap{margin-left:78px}[data-section-block][hidden]{display:none!important}.section-placeholder{min-height:360px;display:grid;place-content:center;text-align:center;border:1px dashed #3c3a6d;border-radius:20px;background:#10112688;color:#9ca6c4;padding:35px}.section-placeholder b{font-size:25px;color:#fff}.section-placeholder span{max-width:480px;margin:9px auto}.screen-title h2{font-size:35px;margin-bottom:4px}.screen-title p{color:#929dbc}@media(max-width:900px){.app-sidebar{transform:translateX(-100%);width:235px}.menu-open .app-sidebar{transform:none}.wrap,.menu-collapsed .wrap{margin-left:0}.menu-collapsed .app-sidebar{width:235px}.menu-collapsed .app-sidebar .menu-label,.menu-collapsed .sidebar-footer{display:block}}'''
@@ -1451,7 +1469,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         extra["Content-Range"] = response.headers["Content-Range"]
                     return self.send_stream(response, content_type, extra)
             self.send_error(404)
-        except (BrokenPipeError, ConnectionResetError):
+        except VIEWER_DISCONNECTED:
             self.close_connection = True
         except urllib.error.HTTPError as exc:
             code = exc.code
@@ -1478,7 +1496,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             self.send_content_headers(status, content_type, len(body), extra_headers or {})
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except VIEWER_DISCONNECTED:
             self.close_connection = True
 
     def send_content_headers(self, status, content_type, length, extra_headers):

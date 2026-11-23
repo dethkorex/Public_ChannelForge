@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 LINUX_APP_FILES = (
-    "Public_ChannelForge.py", "ChannelForge_TV.py", "windows_distribution.py", "linux_runtime.py",
+    "Public_ChannelForge.py", "ChannelForge_TV.py", "windows_distribution.py", "linux_runtime.py", "release_metadata.py",
     "PLUGIN_DEVELOPMENT.md", "web", "plugins", "assets", "install.sh", "uninstall.sh",
 )
 

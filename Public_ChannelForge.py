@@ -38,10 +38,11 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
+from release_metadata import read_latest_release
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.27"
+VERSION = "3.5.28"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -129,8 +130,6 @@ DEFAULT_ASSET_THEMES = {
     "kitchen": ("Kitchen Club", "#ff9c52", "#e94562", "chef"),
     "holiday": ("Holiday Cheer", "#f5fbff", "#3ac7e5", "snowflake"),
 }
-GITHUB_REPOSITORY = "dethkorex/Public_ChannelForge"
-GITHUB_API_RELEASE = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 
 
 def atomic_json(path: Path, payload: object) -> None:
@@ -204,10 +203,7 @@ def github_file(url: str, destination: Path, limit: int, progress) -> None:
 
 
 def latest_release() -> dict:
-    try:
-        payload = json.loads(github_bytes(GITHUB_API_RELEASE, 2_000_000))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise ValueError("Could not check GitHub for updates.") from exc
+    payload = read_latest_release(f"{APP_NAME}/{VERSION}")
     tag = str(payload.get("tag_name", ""))
     assets = [{"name": str(item.get("name", "")), "url": str(item.get("browser_download_url", "")), "size": int(item.get("size", 0) or 0)} for item in payload.get("assets", [])]
     return {"current_version": VERSION, "latest_version": tag.lstrip("v"), "update_available": version_tuple(tag) > version_tuple(VERSION), "release_url": str(payload.get("html_url", "")), "published_at": str(payload.get("published_at", "")), "notes": str(payload.get("body", ""))[:4000], "assets": assets}
@@ -2419,7 +2415,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.end_headers()
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             self.close_connection = True
 
     def send_json(self, status: int, payload: object) -> None:
@@ -2947,6 +2943,8 @@ def claim_creator_desktop() -> bool:
 def restore_public_sharing() -> None:
     global REGISTERED_ORIGIN, SHARING_STATUS
     failures = 0
+    relay_misses = 0
+    next_relay_check = 0.0
     while True:
         PUBLISH_CHANGED.clear()
         with PUBLISH_LOCK:
@@ -2960,6 +2958,7 @@ def restore_public_sharing() -> None:
                 elif profile:
                     start_public_media_server(automatic=settings["public_tunnel"])
                     origin = start_public_tunnel() if settings["public_tunnel"] else settings["public_url"]
+                    now = time.monotonic()
                     if origin != REGISTERED_ORIGIN:
                         SHARING_STATUS = "connecting"
                         raw = load_json(CONFIG_FILE, {})
@@ -2968,9 +2967,23 @@ def restore_public_sharing() -> None:
                         generate_exports()
                         publish_creator(profile)
                         REGISTERED_ORIGIN = origin
-                    SHARING_STATUS = "live"
+                        relay_misses = 0
+                        next_relay_check = now + 60
+                    elif settings["public_tunnel"] and now >= next_relay_check:
+                        if relay_reaches_this_creator(origin):
+                            relay_misses = 0
+                            next_relay_check = now + 60
+                        else:
+                            relay_misses += 1
+                            next_relay_check = now + 15
+                            if relay_misses >= 2:
+                                stop_public_tunnel()
+                                REGISTERED_ORIGIN = ""
+                                raise ValueError("The public relay stopped responding. Reconnecting.")
+                    SHARING_STATUS = "retrying" if relay_misses else "live"
                 else:
                     REGISTERED_ORIGIN = ""
+                    relay_misses = 0
                     SHARING_STATUS = "idle" if settings["auto_publish_channels"] else "private"
                 failures = 0
             except Exception as exc:

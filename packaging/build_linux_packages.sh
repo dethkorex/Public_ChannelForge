@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$ROOT/release"
 WORK="${RUNNER_TEMP:-/tmp}/public-channelforge-packaging"
 APP_ROOT="$WORK/app"
-PYTHON_FILES=("$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/linux_runtime.py")
+PYTHON_FILES=("$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/linux_runtime.py" "$ROOT/release_metadata.py")
 
 rm -rf "$WORK" "$OUT"
 mkdir -p "$OUT" "$APP_ROOT/ChannelForge"

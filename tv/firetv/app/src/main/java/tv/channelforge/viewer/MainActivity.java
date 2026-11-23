@@ -218,19 +218,51 @@ public class MainActivity extends Activity {
         video.setKeepContentOnPlayerReset(true);
         video.setFocusable(false);
         root.addView(video, new FrameLayout.LayoutParams(-1, -1));
-        guide = new LinearLayout(this); guide.setOrientation(LinearLayout.VERTICAL); guide.setPadding(dp(26),dp(16),dp(26),dp(15)); guide.setBackgroundColor(Color.argb(238, 4, 5, 20));
+        int width = getResources().getConfiguration().screenWidthDp;
+        int height = getResources().getConfiguration().screenHeightDp;
+        boolean compact = width < 800 || height < 450;
+        guide = new LinearLayout(this); guide.setOrientation(LinearLayout.VERTICAL);
+        int inset = dp(compact ? 14 : 26);
+        guide.setPadding(inset,dp(compact ? 9 : 16),inset,dp(compact ? 9 : 15));
+        guide.setBackgroundColor(Color.argb(238, 4, 5, 20));
         LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(8));
         TextView menu = focusButton("☰");
         menu.setContentDescription("Toggle navigation menu");
         menu.setPadding(dp(12), 0, dp(12), 0);
         menu.setOnClickListener(v -> toggleMenu());
         header.addView(menu);
-        ImageView logo=new ImageView(this);logo.setImageResource(R.mipmap.channel_forge_tv_icon);logo.setScaleType(ImageView.ScaleType.FIT_CENTER);header.addView(logo,new LinearLayout.LayoutParams(dp(68),dp(68)));
-        LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);TextView brand=text("CHANNELFORGE TV",25,true);brand.setTextColor(color("#FFF229"));brand.setLetterSpacing(.16f);brandBox.addView(brand);TextView subtitle=text("THE COMMUNITY DIAL",11,true);subtitle.setTextColor(color("#55EFFF"));subtitle.setLetterSpacing(.28f);brandBox.addView(subtitle);header.addView(brandBox,new LinearLayout.LayoutParams(0,-2,1));
+        ImageView logo=new ImageView(this);logo.setImageResource(R.mipmap.channel_forge_tv_icon);logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        int logoSize = dp(compact ? 40 : 68);
+        header.addView(logo,new LinearLayout.LayoutParams(logoSize,logoSize));
+        LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);
+        TextView brand=text("CHANNELFORGE TV",compact ? 16 : 25,true);
+        brand.setTextColor(color("#FFF229"));brand.setLetterSpacing(compact ? .08f : .16f);
+        brand.setSingleLine(true);
+        brand.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        brand.setPadding(dp(compact ? 5 : 18), dp(3), dp(5), dp(3));
+        brandBox.addView(brand);
+        if (!compact) {
+            TextView subtitle=text("THE COMMUNITY DIAL",11,true);
+            subtitle.setTextColor(color("#55EFFF"));subtitle.setLetterSpacing(.28f);
+            subtitle.setSingleLine(true);
+            subtitle.setPadding(dp(18), 0, dp(5), dp(6));
+            brandBox.addView(subtitle);
+        }
+        header.addView(brandBox,new LinearLayout.LayoutParams(0,-2,1));
         screenSwitcher=focusButton("REWIND CINEMA");
         screenSwitcher.setOnClickListener(v -> openCinemaScreen(!cinemaScreen));
         header.addView(screenSwitcher);
         updateButton=focusButton("UPDATES  •  v"+BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->selectUpdate());LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
+        if (compact) {
+            for (TextView control : new TextView[]{menu, screenSwitcher, updateButton}) {
+                control.setTextSize(11);
+                control.setSingleLine(true);
+                control.setMinHeight(dp(38));
+                control.setPadding(dp(9), 0, dp(9), 0);
+            }
+            updateButton.setMaxWidth(dp(170));
+            updateButton.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        }
         screenSwitcher.setId(View.generateViewId());
         updateButton.setId(View.generateViewId());
         screenSwitcher.setNextFocusRightId(updateButton.getId());
@@ -241,7 +273,7 @@ public class MainActivity extends Activity {
         menuPanel = new LinearLayout(this);
         menuPanel.setOrientation(LinearLayout.VERTICAL);
         menuPanel.setBackground(surface(new int[]{color("#0A0B1C"), color("#150B2B")}, color("#2D365B"), 1, 10));
-        navigationWidth = dp(Math.max(158, Math.min(240, getResources().getConfiguration().screenWidthDp / 5)));
+        navigationWidth = dp(Math.max(compact ? 124 : 158, Math.min(240, width / 5)));
         LinearLayout.LayoutParams menuLayout = new LinearLayout.LayoutParams(navigationWidth, -1);
         menuLayout.setMargins(0, 0, dp(9), 0);
         columns.addView(menuPanel, menuLayout);
@@ -271,7 +303,12 @@ public class MainActivity extends Activity {
         creatorRail.addView(sectionTitle("CREATOR STUDIOS","#5DEEFF"));
         creatorRail.addView(text("Searching worldwide…",14,false));
         syncStudioScreen();
-        TextView help = text("↑↓  SURF CHANNELS     •     OK  WATCH / GUIDE     •     BACK  RETURN TO GUIDE", 10, true); help.setTextColor(color("#7184A9")); guide.addView(help);
+        if (height >= 420) {
+            TextView help = text("↑↓  SURF CHANNELS     •     OK  WATCH / GUIDE     •     BACK  RETURN TO GUIDE", 10, true);
+            help.setTextColor(color("#7184A9"));
+            help.setSingleLine(true);
+            guide.addView(help);
+        }
         root.addView(guide, new FrameLayout.LayoutParams(-1,-1));
         bufferPanel = panel();
         bufferPanel.setGravity(Gravity.CENTER);
