@@ -168,7 +168,12 @@ class TvAppTests(unittest.TestCase):
             return FakeResponse(executable)
 
         update_dir = Path(tempfile.mkdtemp(prefix="channel-forge-tv-update-"))
-        with mock.patch.object(tv, "UPDATE_DIR", update_dir), mock.patch.object(tv, "latest_tv_release", return_value=release), mock.patch.object(tv.urllib.request, "urlopen", side_effect=response):
+        with (
+            mock.patch.object(tv.sys, "platform", "win32"),
+            mock.patch.object(tv, "UPDATE_DIR", update_dir),
+            mock.patch.object(tv, "latest_tv_release", return_value=release),
+            mock.patch.object(tv.urllib.request, "urlopen", side_effect=response),
+        ):
             job_id = tv.start_tv_update()
             for _ in range(100):
                 job = tv.UPDATE_JOBS[job_id]
@@ -180,6 +185,42 @@ class TvAppTests(unittest.TestCase):
         self.assertEqual(job["percent"], 100)
         self.assertEqual(Path(job["result"]["path"]).read_bytes(), executable)
         self.assertIn("Setup", Path(job["result"]["path"]).name)
+
+    def test_linux_tv_update_selects_and_verifies_linux_archive(self):
+        archive = b"verified-linux-suite"
+        name = "ChannelForge-9.0.0-linux-x64.tar.gz"
+        release = {
+            "latest_version": "9.0.0",
+            "update_available": True,
+            "assets": {
+                name: "https://github.com/example/suite.tar.gz",
+                "SHA256SUMS-Linux.txt": "https://github.com/example/linux-sums.txt",
+                "ChannelForge_Setup.exe": "https://github.com/example/setup.exe",
+            },
+        }
+
+        def response(request, **_kwargs):
+            if request.full_url.endswith("linux-sums.txt"):
+                return FakeResponse(f"{hashlib.sha256(archive).hexdigest()}  {name}\n".encode())
+            self.assertEqual(request.full_url, release["assets"][name])
+            return FakeResponse(archive)
+
+        with (
+            tempfile.TemporaryDirectory(prefix="linux tv update ") as directory,
+            mock.patch.object(tv.sys, "platform", "linux"),
+            mock.patch.object(tv, "UPDATE_DIR", Path(directory)),
+            mock.patch.object(tv, "latest_tv_release", return_value=release),
+            mock.patch.object(tv.urllib.request, "urlopen", side_effect=response),
+        ):
+            job_id = tv.start_tv_update()
+            for _ in range(100):
+                job = tv.UPDATE_JOBS[job_id]
+                if job["status"] != "running":
+                    break
+                time.sleep(0.01)
+            self.assertEqual(job["status"], "complete", job)
+            self.assertEqual(Path(job["result"]["path"]).read_bytes(), archive)
+            self.assertIn("tar -xzf", job["result"]["command"])
 
 
 if __name__ == "__main__":

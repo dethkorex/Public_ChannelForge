@@ -6,10 +6,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$ROOT/release"
 WORK="${RUNNER_TEMP:-/tmp}/public-channelforge-packaging"
 APP_ROOT="$WORK/app"
+PYTHON_FILES=("$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/linux_runtime.py")
 
 rm -rf "$WORK" "$OUT"
 mkdir -p "$OUT" "$APP_ROOT/ChannelForge"
-cp "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$APP_ROOT/ChannelForge/"
+cp "${PYTHON_FILES[@]}" "$ROOT/PLUGIN_DEVELOPMENT.md" "$APP_ROOT/ChannelForge/"
 cp -R "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$APP_ROOT/ChannelForge/"
 cp "$ROOT/scripts/install_linux.sh" "$APP_ROOT/ChannelForge/install.sh"
 cp "$ROOT/scripts/uninstall_linux.sh" "$APP_ROOT/ChannelForge/uninstall.sh"
@@ -20,7 +21,7 @@ cp "$OUT/ChannelForge-${VERSION}-linux-x64.tar.gz" "$OUT/Public_ChannelForge-${V
 
 DEB="$WORK/deb"
 mkdir -p "$DEB/DEBIAN" "$DEB/opt/public-channelforge" "$DEB/usr/bin" "$DEB/usr/share/applications" "$DEB/usr/lib/systemd/user"
-cp "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$DEB/opt/public-channelforge/"
+cp "${PYTHON_FILES[@]}" "$ROOT/PLUGIN_DEVELOPMENT.md" "$DEB/opt/public-channelforge/"
 cp -R "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$DEB/opt/public-channelforge/"
 cat > "$DEB/DEBIAN/control" <<EOF
 Package: public-channelforge
@@ -28,19 +29,19 @@ Version: $VERSION
 Section: video
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.10), python3-webview, ffmpeg, openssh-client
+Depends: python3 (>= 3.10), python3-webview, gir1.2-webkit2-4.1, ffmpeg, openssh-client, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav
 Maintainer: Public ChannelForge contributors
 Description: Local-first personal channel guide builder
  Build personal channel rotations and watch the public TV guide in two desktop apps.
 EOF
 cat > "$DEB/usr/bin/public-channelforge" <<'EOF'
 #!/usr/bin/env bash
-exec python3 /opt/public-channelforge/Public_ChannelForge.py "$@"
+exec /usr/bin/python3 -Es /opt/public-channelforge/Public_ChannelForge.py "$@"
 EOF
 chmod 755 "$DEB/usr/bin/public-channelforge"
 cat > "$DEB/usr/bin/channelforge-tv" <<'EOF'
 #!/usr/bin/env bash
-exec python3 /opt/public-channelforge/ChannelForge_TV.py "$@"
+exec /usr/bin/python3 -Es /opt/public-channelforge/ChannelForge_TV.py "$@"
 EOF
 chmod 755 "$DEB/usr/bin/channelforge-tv"
 cat > "$DEB/usr/share/applications/public-channelforge.desktop" <<'EOF'
@@ -78,7 +79,7 @@ dpkg-deb --root-owner-group --build "$DEB" "$OUT/Public_ChannelForge-${VERSION}-
 
 ARCH="$WORK/arch"
 mkdir -p "$ARCH/opt/public-channelforge" "$ARCH/usr/bin" "$ARCH/usr/share/applications" "$ARCH/usr/lib/systemd/user"
-cp "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/PLUGIN_DEVELOPMENT.md" "$ARCH/opt/public-channelforge/"
+cp "${PYTHON_FILES[@]}" "$ROOT/PLUGIN_DEVELOPMENT.md" "$ARCH/opt/public-channelforge/"
 cp -R "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$ARCH/opt/public-channelforge/"
 cp "$DEB/usr/bin/public-channelforge" "$ARCH/usr/bin/"
 cp "$DEB/usr/bin/channelforge-tv" "$ARCH/usr/bin/"
@@ -102,8 +103,12 @@ depend = openssh
 depend = python-pywebview
 depend = python-gobject
 depend = webkit2gtk-4.1
+depend = gst-plugins-base
+depend = gst-plugins-good
+depend = gst-plugins-bad
+depend = gst-libav
 EOF
-tar --zstd -C "$ARCH" -cf "$OUT/public-channelforge-${VERSION}-1-any.pkg.tar.zst" .PKGINFO opt usr
+tar --zstd --owner=0 --group=0 --numeric-owner -C "$ARCH" -cf "$OUT/public-channelforge-${VERSION}-1-any.pkg.tar.zst" .PKGINFO opt usr
 
 (cd "$OUT" && sha256sum ChannelForge-* Public_ChannelForge-* public-channelforge-* > SHA256SUMS-Linux.txt)
 echo "Linux packages created in $OUT"

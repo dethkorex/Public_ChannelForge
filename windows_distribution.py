@@ -54,8 +54,11 @@ def published_hash(checksums: str, asset: str) -> str:
 def verified_windows_setup(directory: Path, version: str, expected: str, download, progress) -> Path:
     if not re.fullmatch(RELEASE_VERSION, version):
         raise ValueError("GitHub reported an invalid updater version.")
-    directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / f"ChannelForge_Setup-v{version}.exe"
+    return verified_download(directory / f"ChannelForge_Setup-v{version}.exe", expected, download, progress)
+
+
+def verified_download(destination: Path, expected: str, download, progress) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
 
     def matches_cache() -> bool:
         try:
@@ -65,7 +68,7 @@ def verified_windows_setup(directory: Path, version: str, expected: str, downloa
 
     if matches_cache():
         return destination
-    with tempfile.NamedTemporaryFile(dir=directory, prefix=destination.name + ".", suffix=".part", delete=False) as staging:
+    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=destination.name + ".", suffix=".part", delete=False) as staging:
         temporary = Path(staging.name)
     try:
         download(temporary)

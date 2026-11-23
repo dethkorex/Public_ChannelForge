@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ $EUID -eq 0 && -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
+  echo "Run this installer as your desktop user. It will call sudo for system dependencies when needed." >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "$SCRIPT_DIR/Public_ChannelForge.py" ]]; then
   ROOT="$SCRIPT_DIR"
@@ -19,44 +24,54 @@ install_dependencies() {
   fi
   if command -v pacman >/dev/null 2>&1; then
     echo "Installing ChannelForge dependencies for Arch/Omarchy…"
-    "${elevate[@]}" pacman -S --needed python ffmpeg openssh python-pywebview python-gobject webkit2gtk-4.1
+    "${elevate[@]}" pacman -S --needed python ffmpeg openssh python-pywebview python-gobject webkit2gtk-4.1 \
+      gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
   elif command -v apt-get >/dev/null 2>&1; then
     echo "Installing ChannelForge dependencies for Debian/Ubuntu…"
     "${elevate[@]}" apt-get update
-    "${elevate[@]}" apt-get install -y python3 ffmpeg openssh-client python3-webview gir1.2-webkit2-4.1
+    "${elevate[@]}" apt-get install -y python3 ffmpeg openssh-client python3-webview gir1.2-webkit2-4.1 \
+      gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
   else
     echo "Unsupported package manager. Install Python 3, FFmpeg, PyWebView, GTK and WebKitGTK, then rerun install.sh."
     exit 1
   fi
 }
 
-if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ssh >/dev/null 2>&1 || ! python3 -c 'import webview' >/dev/null 2>&1; then
+has_desktop_runtime() {
+  /usr/bin/python3 -Es -c 'import webview, gi; gi.require_version("Gtk", "3.0"); gi.require_version("WebKit2", "4.1"); from gi.repository import Gtk, WebKit2' >/dev/null 2>&1 \
+    && command -v ffmpeg >/dev/null 2>&1 \
+    && command -v ssh >/dev/null 2>&1 \
+    && gst-inspect-1.0 avdec_h264 >/dev/null 2>&1 \
+    && gst-inspect-1.0 avdec_aac >/dev/null 2>&1 \
+    && gst-inspect-1.0 h264parse >/dev/null 2>&1
+}
+
+if ! has_desktop_runtime; then
   install_dependencies
 fi
-command -v ffmpeg >/dev/null 2>&1 || { echo "FFmpeg is still unavailable after dependency installation."; exit 1; }
-python3 -c 'import webview' >/dev/null 2>&1 || { echo "PyWebView is still unavailable after dependency installation."; exit 1; }
+has_desktop_runtime || { echo "The system Python, GTK/WebKit, FFmpeg, SSH, or H.264/AAC playback dependencies failed to load." >&2; exit 1; }
 
 APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/public-channelforge/app"
 BIN_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$SYSTEMD_DIR"
-cp -R "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$ROOT/PLUGIN_DEVELOPMENT.md" "$APP_DIR/"
+cp -R "$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/linux_runtime.py" "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$ROOT/PLUGIN_DEVELOPMENT.md" "$APP_DIR/"
 cat > "$BIN_DIR/public-channelforge" <<EOF
 #!/usr/bin/env bash
-exec python3 "$APP_DIR/Public_ChannelForge.py" "\$@"
+exec /usr/bin/python3 -Es "$APP_DIR/Public_ChannelForge.py" "\$@"
 EOF
 chmod +x "$BIN_DIR/public-channelforge"
 cat > "$BIN_DIR/channelforge-tv" <<EOF
 #!/usr/bin/env bash
-exec python3 "$APP_DIR/ChannelForge_TV.py" "\$@"
+exec /usr/bin/python3 -Es "$APP_DIR/ChannelForge_TV.py" "\$@"
 EOF
 chmod +x "$BIN_DIR/channelforge-tv"
 cat > "$DESKTOP_DIR/public-channelforge.desktop" <<EOF
 [Desktop Entry]
 Name=ChannelForge Creator
 Comment=Build personal channels from local folders or Plex
-Exec=$BIN_DIR/public-channelforge
+Exec="$BIN_DIR/public-channelforge"
 Icon=$APP_DIR/assets/channel-forge-creator.png
 Terminal=false
 Type=Application
@@ -66,7 +81,7 @@ cat > "$DESKTOP_DIR/channelforge-tv.desktop" <<EOF
 [Desktop Entry]
 Name=ChannelForge TV
 Comment=Watch public creator channels and Rewind Cinema
-Exec=$BIN_DIR/channelforge-tv
+Exec="$BIN_DIR/channelforge-tv"
 Icon=$APP_DIR/assets/channel-forge-tv.png
 Terminal=false
 Type=Application
@@ -79,7 +94,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$BIN_DIR/public-channelforge --no-browser
+ExecStart="$BIN_DIR/public-channelforge" --no-browser
 Restart=on-failure
 RestartSec=5
 
@@ -88,7 +103,7 @@ WantedBy=default.target
 EOF
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   systemctl --user daemon-reload
-  if systemctl --user enable --now public-channelforge.service; then
+  if systemctl --user enable public-channelforge.service && systemctl --user restart public-channelforge.service; then
     echo "Background service enabled and started."
   else
     echo "User service installed but could not start in this session. Start it with: systemctl --user enable --now public-channelforge"

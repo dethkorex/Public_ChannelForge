@@ -8,8 +8,10 @@ sub load()
   payload = ParseJson(transfer.GetToString())
   if payload <> invalid and payload.items <> invalid
     for each item in payload.items
-      node = root.CreateChild("ContentNode") : node.title = item.title : node.description = item.summary : node.hdPosterUrl = item.poster_url : node.url = item.stream_url : node.streamFormat = "hls"
-      if item.year <> invalid then node.shortDescriptionLine1 = item.year.ToStr()
+      if item.type = "movie"
+        node = root.CreateChild("ContentNode") : node.title = item.title : node.description = item.summary : node.hdPosterUrl = item.poster_url : node.url = item.stream_url : node.streamFormat = "hls"
+        if item.year <> invalid then node.shortDescriptionLine1 = item.year.ToStr()
+      end if
     end for
   end if
   m.top.content = root

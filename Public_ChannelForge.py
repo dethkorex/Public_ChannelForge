@@ -30,10 +30,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.8"
+VERSION = "3.5.9"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -72,7 +73,8 @@ ENCODER_START_LOCKS = tuple(threading.Lock() for _ in range(32))
 HLS_PROXY: dict[str, tuple[str, float]] = {}
 HLS_PROXY_CHANNELS: dict[str, str] = {}
 UPDATE_JOBS: dict[str, dict] = {}
-PLAYBACK_ERRORS: dict[str, str] = {}
+PLAYBACK_ERRORS: dict[str, tuple[float, str]] = {}
+PLAYBACK_ERROR_COOLDOWN = 30
 FFMPEG_SESSIONS: dict[str, dict] = {}
 LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
 AUDIO_SELECTION_CACHE: dict[str, int] = {}
@@ -199,12 +201,7 @@ def update_asset_name(release: dict) -> tuple[str, str]:
     version = release["latest_version"]
     if sys.platform == "win32":
         return windows_setup_asset(names, "ChannelForge_Creator_Setup.exe"), "SHA256SUMS.txt"
-    if Path("/etc/arch-release").exists():
-        candidate = f"public-channelforge-{version}-1-any.pkg.tar.zst"
-    elif Path("/etc/debian_version").exists():
-        candidate = f"Public_ChannelForge-{version}-linux-all.deb"
-    else:
-        candidate = f"ChannelForge-{version}-linux-x64.tar.gz" if f"ChannelForge-{version}-linux-x64.tar.gz" in names else f"Public_ChannelForge-{version}-linux-x64.tar.gz"
+    candidate = linux_release_asset(names, version, Path(__file__).resolve().parent)
     if candidate not in names:
         raise ValueError("The latest release does not contain an installer for this platform.")
     return candidate, "SHA256SUMS-Linux.txt"
@@ -250,12 +247,7 @@ def download_verified_update(progress=None) -> dict:
     if actual != expected:
         raise ValueError("The downloaded installer failed SHA-256 verification.")
     temporary.replace(destination)
-    if asset_name.endswith(".deb"):
-        command = f'sudo apt install "{destination}"'
-    elif asset_name.endswith(".pkg.tar.zst"):
-        command = f'sudo pacman -U "{destination}"'
-    else:
-        command = f'Extract "{destination}" and run install.sh'
+    command = linux_install_command(destination)
     progress("complete", destination.stat().st_size, destination.stat().st_size)
     return {"version": release["latest_version"], "asset": asset_name, "path": str(destination), "sha256": actual, "command": command, "can_launch": sys.platform == "win32"}
 
@@ -1082,7 +1074,7 @@ def refresh_plex_movie_catalog() -> dict:
                     movies.extend({
                         **item, "source": source, "section": str(loaded_library["key"]),
                         "library": loaded_library.get("title", "Movies"),
-                    } for item in items)
+                    } for item in items if item.get("type") == "movie")
                 except (OSError, ValueError) as exc:
                     failed.append({"library": library.get("title", "Movies"), "error": str(exc)})
     movies.sort(key=lambda item: (str(item.get("title", "")).casefold(), str(item.get("year", ""))))
@@ -1952,34 +1944,41 @@ def vault_item_id(item: dict) -> str:
     return hashlib.sha256(identity.encode()).hexdigest()[:24]
 
 
+def vault_movies():
+    for item in cached_plex_movies():
+        if item.get("type") == "movie":
+            yield str(item.get("section", "")), item
+    for channel in channels():
+        for item in channel.get("items", []):
+            if item.get("type") == "movie":
+                yield str(channel.get("section", "")), item
+
+
 def vault_items() -> list[dict]:
     result, seen = [], set()
     base = server_base()
-    sources = [(str(item.get("section", "")), [item]) for item in cached_plex_movies()]
-    sources.extend((str(channel.get("section", "")), channel.get("items", [])) for channel in channels())
-    for section, items in sources:
-        for item in items:
-            item_id = vault_item_id(item)
-            if item_id in seen:
-                continue
-            seen.add(item_id)
-            thumb = str(item.get("thumb", ""))
-            if item.get("source") == "local" and thumb:
-                media_section = str(item.get("section") or section)
-                poster_url = f"{base}/api/local/image?section={urllib.parse.quote(media_section)}&id={urllib.parse.quote(str(item.get('id', '')))}"
-            elif thumb:
-                server_id = urllib.parse.quote(str(item.get("plex_server_id", "")))
-                poster_url = f"{base}/api/plex/image?path={urllib.parse.quote(thumb)}&server={server_id}"
-            else:
-                poster_url = ""
-            result.append({
-                "id": item_id, "title": item.get("title", "Untitled"), "year": item.get("year", ""),
-                "type": item.get("type", "video"), "summary": item.get("summary", ""),
-                "genres": list(item.get("genres", [])), "content_rating": item.get("content_rating", "") or "Unrated",
-                "library": item.get("library", ""),
-                "poster_url": poster_url, "stream_url": f"{base}/vault/{item_id}.m3u8",
-                "duration_ms": item.get("duration_ms", 1800000),
-            })
+    for section, item in vault_movies():
+        item_id = vault_item_id(item)
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        thumb = str(item.get("thumb", ""))
+        if item.get("source") == "local" and thumb:
+            media_section = str(item.get("section") or section)
+            poster_url = f"{base}/api/local/image?section={urllib.parse.quote(media_section)}&id={urllib.parse.quote(str(item.get('id', '')))}"
+        elif thumb:
+            server_id = urllib.parse.quote(str(item.get("plex_server_id", "")))
+            poster_url = f"{base}/api/plex/image?path={urllib.parse.quote(thumb)}&server={server_id}"
+        else:
+            poster_url = ""
+        result.append({
+            "id": item_id, "title": item.get("title", "Untitled"), "year": item.get("year", ""),
+            "type": "movie", "summary": item.get("summary", ""),
+            "genres": list(item.get("genres", [])), "content_rating": item.get("content_rating", "") or "Unrated",
+            "library": item.get("library", ""),
+            "poster_url": poster_url, "stream_url": f"{base}/vault/{item_id}.m3u8",
+            "duration_ms": item.get("duration_ms", 1800000),
+        })
     return result
 
 
@@ -2008,9 +2007,8 @@ def public_channel_catalog() -> dict:
             else:
                 server_id = str(current.get("plex_server_id", ""))
                 online = bool(plex_credentials(server_id).get("token") and plex_credentials(server_id).get("url")) if server_id else bool(settings.get("plex_token") and settings.get("plex_url"))
-            with LOCK:
-                if PLAYBACK_ERRORS.get(str(channel.get("id", ""))):
-                    online = False
+            if playback_error(str(channel.get("id", ""))):
+                online = False
             slots = schedule_window(channel, moment, end)
         except (OSError, ValueError, TypeError):
             online, slots = False, []
@@ -2033,14 +2031,21 @@ def public_channel_catalog() -> dict:
 
 
 def vault_source(item_id: str) -> dict:
-    for item in cached_plex_movies():
+    for _section, item in vault_movies():
         if vault_item_id(item) == item_id:
             return item
-    for channel in channels():
-        for item in channel.get("items", []):
-            if vault_item_id(item) == item_id:
-                return item
-    raise ValueError("Vault title was not found.")
+    raise FileNotFoundError("Vault movie was not found.")
+
+
+def playback_error(channel_id: str) -> str:
+    with LOCK:
+        failure = PLAYBACK_ERRORS.get(channel_id)
+        if failure:
+            failed_at, message = failure
+            if time.monotonic() - failed_at < PLAYBACK_ERROR_COOLDOWN:
+                return message
+            PLAYBACK_ERRORS.pop(channel_id, None)
+    return ""
 
 
 def start_vault_session(item_id: str) -> str:
@@ -2158,8 +2163,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(200, data, content_type)
             elif parsed.path == "/api/playback/status":
                 channel_id = urllib.parse.parse_qs(parsed.query).get("channel", [""])[0]
-                with LOCK:
-                    error = PLAYBACK_ERRORS.get(channel_id, "")
+                error = playback_error(channel_id)
                 self.send_json(200, {"ok": not bool(error), "error": error})
             elif parsed.path == "/api/guide":
                 offset = max(-24, min(168, int(urllib.parse.parse_qs(parsed.query).get("offset", ["0"])[0])))
@@ -2206,7 +2210,7 @@ class Handler(BaseHTTPRequestHandler):
                         PLAYBACK_ERRORS.pop(channel_id, None)
                 except Exception as exc:
                     with LOCK:
-                        PLAYBACK_ERRORS[channel_id] = sanitized_playback_error(exc)
+                        PLAYBACK_ERRORS[channel_id] = (time.monotonic(), sanitized_playback_error(exc))
                     raise
                 self.redirect(route)
             elif parsed.path.startswith("/vault/") and parsed.path.endswith(".m3u8"):
@@ -2243,7 +2247,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     if channel_id:
                         with LOCK:
-                            PLAYBACK_ERRORS[channel_id] = sanitized_playback_error(exc)
+                            PLAYBACK_ERRORS[channel_id] = (time.monotonic(), sanitized_playback_error(exc))
                     raise
                 self.send_bytes(status, data, content_type, {"Content-Range": content_range, "Accept-Ranges": "bytes"})
             elif parsed.path.startswith("/user-assets/"):
@@ -2519,17 +2523,24 @@ def main() -> None:
     url = f"http://{HOST if bind_host in {'0.0.0.0', '::'} else bind_host}:{port}"
     try:
         server = ThreadingHTTPServer((bind_host, port), Handler)
-    except OSError:
+    except OSError as error:
         # The Linux package can keep Creator hosting through its user service.
         # Opening the desktop icon should attach to that existing service instead
         # of failing with "address already in use" or spawning another copy.
+        try:
+            with urllib.request.urlopen(url + "/api/status", timeout=2) as response:
+                is_creator = response.headers.get("Server", "").startswith(APP_NAME + "/")
+        except OSError:
+            is_creator = False
+        if not is_creator:
+            raise SystemExit(f"ChannelForge Creator could not listen on {url}: {error}") from error
         if args.no_browser:
             print(f"ChannelForge Creator is already running at {url}")
             return
         try:
             import webview
-            APP_WINDOW = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(1100, 720), background_color="#08111f")
-            webview.start(debug=False)
+            APP_WINDOW = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(760, 480), background_color="#08111f")
+            start_webview(webview)
         except ImportError:
             webbrowser.open(url)
         return
@@ -2590,9 +2601,9 @@ def main() -> None:
             import webview
             thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server")
             thread.start()
-            APP_WINDOW = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(1100, 720), background_color="#08111f")
+            APP_WINDOW = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(760, 480), background_color="#08111f")
             try:
-                webview.start(debug=False)
+                start_webview(webview)
             finally:
                 server.shutdown()
                 server.server_close()

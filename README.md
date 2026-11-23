@@ -40,6 +40,8 @@ All ChannelForge apps expose an update control backed by the official GitHub Rel
 
 ChannelForge v3.5.8 makes Creator and TV share one verified Windows updater download. Updates reuse the selected install folder and move older Desktop installations into the suite folder. The Desktop shows shortcuts to both installed apps. Old ChannelForge setup downloads are cleared from the apps’ update caches after an upgrade. The Linux releases include both apps in portable, Debian, and Arch/Omarchy packages.
 
+ChannelForge v3.5.9 fixes the Linux TV updater and launches both Linux apps with the system GTK and WebKit runtime. Rewind Cinema lists titles classified as movies, including movies from shared Plex libraries. TV episodes stay in the Live TV lineup.
+
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
 ![ChannelForge TV home hub](preview/channel-forge-tv-v346-home.png)
@@ -75,7 +77,7 @@ Windows may show a SmartScreen warning because community builds are not code-sig
 
 ## Linux, Arch Linux, and Omarchy
 
-Requirements: Python 3.10 or newer, FFmpeg, and PyWebView. Every Linux package installs both native desktop applications: ChannelForge Creator and ChannelForge TV. Debian and Arch packages declare the required media and desktop runtimes; the portable installer shows the exact distro command if one is missing.
+Every Linux package installs ChannelForge Creator and ChannelForge TV. The Debian and Arch packages declare their GTK, WebKit, FFmpeg, and GStreamer dependencies. The portable installer checks for those dependencies and can offer to install them on Debian- and Arch-based systems.
 
 ### Debian, Ubuntu, Mint, and similar distributions
 
@@ -89,12 +91,10 @@ channelforge-tv
 
 ### Arch Linux and Omarchy
 
-Download the `.pkg.tar.zst` file from the latest release, then run:
+Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-*-any.pkg.tar.zst
-public-channelforge
-channelforge-tv
+sudo pacman -U ./public-channelforge-3.5.9-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation
@@ -122,7 +122,7 @@ channelforge-tv
 On Arch Linux or Omarchy, install prerequisites if needed:
 
 ```bash
-sudo pacman -S --needed python git ffmpeg python-pywebview python-gobject webkit2gtk-4.1
+sudo pacman -S --needed python git ffmpeg openssh python-pywebview python-gobject webkit2gtk-4.1 gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
 ```
 
 If `public-channelforge` is not found, add this to `~/.bashrc` or `~/.zshrc`, then open a new terminal:

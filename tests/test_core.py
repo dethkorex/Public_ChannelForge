@@ -447,13 +447,30 @@ class CoreTests(unittest.TestCase):
             server.server_close()
 
     def test_public_rewind_cinema_uses_proxied_posters_and_playable_urls(self):
-        app.save_channel({"name": "Vault TV", "number": "80", "items": [{"id": "99", "title": "Retro Movie", "year": "1985", "duration_ms": 600000, "key": "/library/metadata/99", "thumb": "/library/metadata/99/thumb/1"}]})
+        movie = {"id": "99", "title": "Retro Movie", "type": "movie", "year": "1985",
+                 "duration_ms": 600000, "key": "/library/metadata/99", "thumb": "/library/metadata/99/thumb/1"}
+        episode = {"id": "100", "title": "Pilot", "type": "episode"}
+        unknown = {"id": "101", "title": "Untyped video"}
+        app.save_channel({"name": "Vault TV", "number": "80", "items": [movie, episode, unknown]})
+        app.atomic_json(app.VAULT_CATALOG_FILE, {"items": [movie, episode]})
         items = app.vault_items()
+        self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["title"], "Retro Movie")
         self.assertIn("/api/plex/image?path=", items[0]["poster_url"])
         self.assertNotIn("X-Plex-Token", items[0]["poster_url"])
         self.assertRegex(items[0]["stream_url"], r"/vault/[a-f0-9]{24}\.m3u8$")
         self.assertEqual(app.vault_source(items[0]["id"])["id"], "99")
+        with self.assertRaises(FileNotFoundError):
+            app.vault_source(app.vault_item_id(episode))
+        self.assertEqual([item["id"] for item in app.channels()[0]["items"]], ["99", "100", "101"])
+
+    def test_transient_live_playback_failure_expires(self):
+        with mock.patch.object(app, "PLAYBACK_ERRORS", {"retry-channel": (100.0, "Source timed out")}):
+            with mock.patch.object(app.time, "monotonic", return_value=105.0):
+                self.assertEqual(app.playback_error("retry-channel"), "Source timed out")
+            with mock.patch.object(app.time, "monotonic", return_value=140.0):
+                self.assertEqual(app.playback_error("retry-channel"), "")
+            self.assertNotIn("retry-channel", app.PLAYBACK_ERRORS)
 
     def test_rewind_cinema_automatically_indexes_all_plex_movies(self):
         libraries = [{"key": "1", "title": "Movies", "type": "movie", "source": "plex"}, {"key": "2", "title": "TV", "type": "show", "source": "plex"}]

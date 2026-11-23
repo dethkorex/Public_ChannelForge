@@ -239,7 +239,17 @@ public class MainActivity extends Activity {
         return result;
     }
 
-    private List<VaultItem> parseVault(String value)throws Exception{List<VaultItem> result=new ArrayList<>();JSONArray items=new JSONObject(value).getJSONArray("items");for(int i=0;i<items.length();i++){JSONObject item=items.getJSONObject(i);result.add(new VaultItem(item.optString("title","Untitled"),item.optString("year"),item.optString("summary"),item.optString("poster_url"),item.getString("stream_url")));}return result;}
+    private List<VaultItem> parseVault(String value) throws Exception {
+        List<VaultItem> result = new ArrayList<>();
+        JSONArray items = new JSONObject(value).getJSONArray("items");
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.getJSONObject(i);
+            if (!"movie".equals(item.optString("type"))) continue;
+            result.add(new VaultItem(item.optString("title", "Untitled"), item.optString("year"),
+                    item.optString("summary"), item.optString("poster_url"), item.getString("stream_url")));
+        }
+        return result;
+    }
 
     private List<Channel> parseM3u(String m3u){List<Channel> result=new ArrayList<>();String pending="";for(String raw:m3u.split("\\r?\\n")){String line=raw.trim();if(line.startsWith("#EXTINF:")){int comma=line.lastIndexOf(',');pending=comma>=0?line.substring(comma+1).trim():"Channel";}else if(!line.isEmpty()&&!line.startsWith("#")&&!pending.isEmpty()){result.add(new Channel(pending,line));pending="";}}return result;}
 
