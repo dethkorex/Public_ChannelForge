@@ -250,12 +250,16 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("Fish", content)
 
     def test_installs_complete_neutral_starter_asset_pack(self):
+        self.assertEqual(len(app.DEFAULT_ASSET_THEMES), 20)
         app.install_default_assets()
         built_ins = [asset for asset in app.asset_manifest() if asset.get("built_in")]
         self.assertEqual(len(built_ins), len(app.DEFAULT_ASSET_THEMES) * 3)
         self.assertEqual({asset["kind"] for asset in built_ins}, {"logo", "guide-background", "corner-bug"})
         for asset in built_ins:
             self.assertTrue((app.ASSETS_DIR / asset["filename"]).is_file())
+            root = app.ET.fromstring((app.ASSETS_DIR / asset["filename"]).read_bytes())
+            self.assertEqual(root.tag.rsplit("}", 1)[-1], "svg")
+            self.assertTrue(any(node.tag.rsplit("}", 1)[-1] in {"path", "circle", "rect", "ellipse"} for node in root.iter()))
         with self.assertRaisesRegex(ValueError, "cannot be deleted"):
             app.delete_asset(built_ins[0]["id"])
 

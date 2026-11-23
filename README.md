@@ -30,11 +30,13 @@ After connection, ChannelForge displays the Plex username, server name, and serv
 
 The built-in **Asset Studio** creates original channel logos, guide backgrounds, and corner bugs from a channel name and user-selected colors. Users can also upload artwork they own and assign a logo to an XMLTV channel. Artwork remains in the user's local application-data folder.
 
-Every installation also includes 24 coordinated starter assets: logos, guide/player backgrounds, and corner bugs across Classic TV, Neon Night, Cinema, Kids Pop, Sports Arena, News Desk, Spooky, and Minimal themes. These are original neutral assets created for the public edition. Users can assign all three asset types while creating a channel, then replace them with generated or uploaded artwork later.
+Every installation includes 60 coordinated starter assets: a logo, guide/player background, and corner bug for each of 20 original themes. The collection covers Kids, Anime, Horror, Action, Sci-Fi, Comedy, Drama, Retro, Classic Television, Cinema, Sports, News, Mystery, Fantasy, Adventure, Crime, Music, Nature, Kitchen, and Holiday channels. Each family has its own illustrated symbol and color language rather than a text-only placeholder. Built-ins refresh during upgrades without replacing user-created or uploaded artwork.
+
+![ChannelForge starter theme library](preview/channel-forge-default-themes-v3.4.3.png)
 
 All ChannelForge apps expose an update control backed by the official GitHub Releases feed. Creator and desktop TV check on launch, notify immediately, show download progress, and verify the published SHA-256 checksum before offering the installer or executable. Fire TV detects the release and opens the exact official APK download; Android still requires the user to approve its package-installer prompt. Roku reports release availability in-app; Roku Store installs update automatically when distributed through the Store, while developer/sideload builds must be replaced through Roku's developer installer. Windows Creator opens the verified setup wizard; Linux users receive the verified Debian, Arch/Omarchy, or portable package and a copyable install command. ChannelForge never silently installs or launches an update without confirmation.
 
-ChannelForge TV v3.4.2 uses a collapsible hamburger sidebar. Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and Updates are separate workspaces instead of one long scrolling page. The sidebar collapses to an icon rail on desktop and becomes an overlay on smaller screens.
+ChannelForge TV v3.4.3 uses a collapsible hamburger sidebar. Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and Updates are separate workspaces instead of one long scrolling page. The sidebar collapses to an icon rail on desktop and becomes an overlay on smaller screens.
 
 Demo previews (real installations replace these sample studios and posters with published creator data):
 

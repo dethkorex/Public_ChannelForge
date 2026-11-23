@@ -29,7 +29,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.4.2"
+VERSION = "3.4.3"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -70,14 +70,26 @@ TUNNEL_LOCK = threading.RLock()
 TUNNEL_PROCESS: subprocess.Popen | None = None
 TUNNEL_URL = ""
 DEFAULT_ASSET_THEMES = {
-    "classic": ("Classic TV", "#f4c95d", "#d66b4d"),
-    "neon": ("Neon Night", "#42f5e9", "#9b5cff"),
-    "cinema": ("Cinema", "#f1d18a", "#6b1d2c"),
-    "kids": ("Kids Pop", "#ff6fb5", "#4dd9ff"),
-    "sports": ("Sports Arena", "#7cff6b", "#1473e6"),
-    "news": ("News Desk", "#42a5ff", "#e9f2ff"),
-    "spooky": ("Spooky", "#c875ff", "#ff7b4d"),
-    "minimal": ("Minimal", "#ffffff", "#6f7f95"),
+    "kids": ("Kids Club", "#ffea3d", "#ff5ebc", "star"),
+    "anime": ("Anime Pulse", "#ff4d7d", "#6de8ff", "anime"),
+    "horror": ("Horror Midnight", "#ff334f", "#64118c", "horror"),
+    "action": ("Action Blast", "#ffcf27", "#ff4b18", "action"),
+    "scifi": ("Sci-Fi Signal", "#45f3ff", "#6d4cff", "planet"),
+    "comedy": ("Laugh Track", "#ffe35b", "#3fe09b", "smile"),
+    "drama": ("Drama House", "#eab8ff", "#7b3fc6", "drama"),
+    "retro": ("Retro Rewind", "#ff8ad8", "#38e7df", "cassette"),
+    "classic": ("Classic Television", "#f4c95d", "#d66b4d", "television"),
+    "cinema": ("Cinema Premiere", "#f1d18a", "#8f2437", "clapper"),
+    "sports": ("Sports Arena", "#7cff6b", "#1473e6", "ball"),
+    "news": ("News Desk", "#42a5ff", "#e9f2ff", "globe"),
+    "mystery": ("Mystery Files", "#a98bff", "#26365f", "search"),
+    "fantasy": ("Fantasy Quest", "#ffd45a", "#9a4de2", "crown"),
+    "adventure": ("Adventure Trails", "#ffb44d", "#1bb69d", "mountain"),
+    "crime": ("Crime Watch", "#d8e0ed", "#cb3148", "badge"),
+    "music": ("Music Video", "#ff54cf", "#674dff", "music"),
+    "nature": ("Nature World", "#8cf05c", "#087f73", "leaf"),
+    "kitchen": ("Kitchen Club", "#ff9c52", "#e94562", "chef"),
+    "holiday": ("Holiday Cheer", "#f5fbff", "#3ac7e5", "snowflake"),
 }
 GITHUB_REPOSITORY = "dethkorex/Public_ChannelForge"
 GITHUB_API_RELEASE = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -441,38 +453,80 @@ def save_asset_record(record: dict, content: bytes) -> dict:
     return item
 
 
-def default_asset_svg(label: str, kind: str, primary: str, secondary: str) -> bytes:
+def theme_icon_svg(icon: str, x: float, y: float, size: float, primary: str, secondary: str) -> str:
+    """Return an original, dependency-free SVG mark for a built-in theme."""
+    shapes = {
+        "star": '<path d="M50 5 61 37 95 38 68 58 77 91 50 72 23 91 32 58 5 38 39 37Z" fill="url(#g)"/><circle cx="32" cy="45" r="5" fill="#08111f"/><circle cx="68" cy="45" r="5" fill="#08111f"/>',
+        "anime": '<circle cx="50" cy="50" r="27" fill="url(#g)"/><path d="M50 4v17M50 79v17M4 50h17M79 50h17M18 18l12 12M70 70l12 12M82 18 70 30M30 70 18 82" stroke="currentColor" stroke-width="7"/><path d="M28 53q22-30 44 0-22 27-44 0Z" fill="#08111f"/><circle cx="50" cy="49" r="9" fill="currentColor"/>',
+        "horror": '<path d="M17 24q33-24 66 0l-6 48-18 18H41L23 72Z" fill="url(#g)"/><path d="m27 46 18-7-4 18-15-2m47-9-18-7 4 18 15-2M43 70h14l-3 13h-8Z" fill="#08111f"/>',
+        "action": '<path d="m57 3-39 53h25L34 97l48-60H58Z" fill="url(#g)"/><path d="M8 20h27M4 32h22M74 69h22M66 81h29" stroke="currentColor" stroke-width="6"/>',
+        "planet": '<circle cx="50" cy="49" r="29" fill="url(#g)"/><ellipse cx="50" cy="50" rx="47" ry="17" fill="none" stroke="currentColor" stroke-width="7" transform="rotate(-14 50 50)"/><circle cx="66" cy="34" r="6" fill="#08111f"/>',
+        "smile": '<circle cx="50" cy="50" r="42" fill="url(#g)"/><circle cx="35" cy="40" r="6" fill="#08111f"/><circle cx="65" cy="40" r="6" fill="#08111f"/><path d="M25 57q25 30 50 0" fill="none" stroke="#08111f" stroke-width="8" stroke-linecap="round"/>',
+        "drama": '<path d="M8 18h39v50Q28 96 8 68Z" fill="url(#g)"/><path d="M53 10h39v58Q73 94 53 68Z" fill="currentColor" opacity=".8"/><circle cx="21" cy="39" r="4" fill="#08111f"/><circle cx="35" cy="39" r="4" fill="#08111f"/><path d="M19 55q9 10 18 0M64 47q9-9 18 0" fill="none" stroke="#08111f" stroke-width="5"/>',
+        "cassette": '<rect x="5" y="20" width="90" height="62" rx="8" fill="url(#g)"/><rect x="15" y="29" width="70" height="31" rx="6" fill="#08111f"/><circle cx="34" cy="45" r="10" fill="none" stroke="currentColor" stroke-width="5"/><circle cx="66" cy="45" r="10" fill="none" stroke="currentColor" stroke-width="5"/><path d="m27 70 8-8h30l8 8" fill="none" stroke="#08111f" stroke-width="6"/>',
+        "television": '<rect x="8" y="20" width="84" height="65" rx="13" fill="url(#g)"/><rect x="18" y="30" width="54" height="44" rx="8" fill="#08111f"/><circle cx="82" cy="42" r="6" fill="#08111f"/><circle cx="82" cy="61" r="6" fill="#08111f"/><path d="m36 20-15-17m43 17L79 3" stroke="currentColor" stroke-width="6"/>',
+        "clapper": '<path d="M8 28h84v58H8Z" fill="url(#g)"/><path d="M5 10h88v25H5Z" fill="currentColor"/><path d="m18 11-10 23m35-23L33 34m35-23L58 34m35-23L83 34" stroke="#08111f" stroke-width="8"/><path d="M25 55h50M25 70h31" stroke="#08111f" stroke-width="6"/>',
+        "ball": '<circle cx="50" cy="50" r="44" fill="url(#g)"/><path d="m50 25 17 12-7 20H40l-7-20Zm0 0V7M33 37 15 30m52 7 18-7M40 57 28 78m32-21 12 21" fill="none" stroke="#08111f" stroke-width="6"/>',
+        "globe": '<circle cx="50" cy="50" r="43" fill="url(#g)"/><path d="M8 50h84M50 7c26 23 26 63 0 86M50 7c-26 23-26 63 0 86M15 29h70M15 71h70" fill="none" stroke="#08111f" stroke-width="5"/>',
+        "search": '<circle cx="42" cy="40" r="28" fill="none" stroke="url(#g)" stroke-width="12"/><path d="m62 61 30 30" stroke="currentColor" stroke-width="14" stroke-linecap="round"/><path d="M31 40h22" stroke="currentColor" stroke-width="5"/>',
+        "crown": '<path d="m10 30 20 18 20-35 20 35 20-18-9 55H19Z" fill="url(#g)"/><circle cx="50" cy="66" r="7" fill="#08111f"/>',
+        "mountain": '<circle cx="75" cy="25" r="15" fill="currentColor"/><path d="M3 87 35 28l17 29 12-17 33 47Z" fill="url(#g)"/><path d="m24 49 11-21 10 18-9-4Z" fill="#f5f7fb"/>',
+        "badge": '<path d="M50 4 89 20v32q0 29-39 44Q11 81 11 52V20Z" fill="url(#g)"/><path d="m50 22 8 17 19 3-14 13 4 19-17-9-17 9 4-19-14-13 19-3Z" fill="#08111f"/>',
+        "music": '<path d="M38 19v54q0 15-17 15Q5 88 5 76t19-14q4 0 7 1V12L90 3v55q0 15-17 15-16 0-16-12t19-14q4 0 7 1V25Z" fill="url(#g)"/>',
+        "leaf": '<path d="M89 9Q22 10 13 58q-5 28 24 31 48 5 52-80Z" fill="url(#g)"/><path d="M20 84Q45 51 78 25M43 57l-5-24m18 10 21 2" fill="none" stroke="#08111f" stroke-width="6"/>',
+        "chef": '<path d="M23 45Q4 42 8 25q4-15 23-10Q40-2 51 13q17-10 25 5 20-1 17 18-2 12-17 11v39H23Z" fill="url(#g)"/><path d="M23 66h53M35 48v15m13-15v15m13-15v15" stroke="#08111f" stroke-width="6"/>',
+        "snowflake": '<path d="M50 4v92M10 27l80 46M10 73l80-46M50 4l-9 14m9-14 9 14M10 27l17 1m-17-1 8-15m-8 61 17-1m-17 1 8 15m72-61-17 1m17-1-8-15m8 61-17-1m17 1-8 15M50 96l-9-14m9 14 9-14" stroke="url(#g)" stroke-width="8" stroke-linecap="round"/>',
+    }
+    shape = shapes.get(icon, shapes["star"])
+    return f'<g transform="translate({x-size/2} {y-size/2}) scale({size/100})" color="{primary}">{shape}</g>'
+
+
+def default_asset_svg(label: str, kind: str, primary: str, secondary: str, icon: str = "star") -> bytes:
     dimensions = {"logo": (1200, 675), "guide-background": (1920, 1080), "corner-bug": (600, 600)}
     width, height = dimensions[kind]
     safe_label = html.escape(label.upper())
     if kind == "guide-background":
-        body = f'<path d="M0 {height*.72} Q {width*.28} {height*.48} {width*.52} {height*.7} T {width} {height*.52} V {height} H0Z" fill="url(#g)" opacity=".28"/><g opacity=".18">' + "".join(f'<circle cx="{width*(.12+i*.15)}" cy="{height*(.18+(i%2)*.14)}" r="{height*.12}" fill="none" stroke="{primary}" stroke-width="6"/>' for i in range(6)) + "</g>"
-        title_y, title_size = height * .82, 46
+        icons = "".join(theme_icon_svg(icon, width*(.12+i*.18), height*(.2+(i%2)*.18), height*.19, primary, secondary) for i in range(5))
+        body = f'<path d="M0 {height*.75} Q {width*.28} {height*.45} {width*.55} {height*.7} T {width} {height*.48} V {height} H0Z" fill="url(#g)" opacity=".34"/><g opacity=".16">{icons}</g>{theme_icon_svg(icon,width*.82,height*.57,height*.52,primary,secondary)}'
+        title_y, title_size = height * .86, 54
     elif kind == "corner-bug":
-        body = f'<circle cx="{width/2}" cy="{height/2}" r="{height*.39}" fill="url(#g)" opacity=".92"/><circle cx="{width/2}" cy="{height/2}" r="{height*.31}" fill="#08111f"/>'
-        title_y, title_size = height * .53, 42
+        body = f'<circle cx="{width/2}" cy="{height/2}" r="{height*.43}" fill="url(#g)" opacity=".95"/><circle cx="{width/2}" cy="{height/2}" r="{height*.35}" fill="#08111f"/>{theme_icon_svg(icon,width/2,height*.42,height*.34,primary,secondary)}'
+        title_y, title_size = height * .72, 34
     else:
-        body = f'<rect x="{width*.08}" y="{height*.14}" width="{width*.84}" height="{height*.72}" rx="64" fill="url(#g)" opacity=".9"/><rect x="{width*.105}" y="{height*.18}" width="{width*.79}" height="{height*.64}" rx="48" fill="#08111f"/>'
-        title_y, title_size = height * .53, 64
-    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="{primary}"/><stop offset="1" stop-color="{secondary}"/></linearGradient></defs><rect width="100%" height="100%" fill="#08111f"/>{body}<text x="50%" y="{title_y}" text-anchor="middle" fill="{primary}" font-family="Arial,sans-serif" font-size="{title_size}" font-weight="800" letter-spacing="5">{safe_label}</text></svg>'''
+        body = f'<rect x="{width*.06}" y="{height*.12}" width="{width*.88}" height="{height*.76}" rx="68" fill="url(#g)"/><rect x="{width*.085}" y="{height*.16}" width="{width*.83}" height="{height*.68}" rx="48" fill="#08111f"/>{theme_icon_svg(icon,width*.29,height*.5,height*.47,primary,secondary)}'
+        title_y, title_size = height * .49, max(32, 70-len(label)*2)
+    text_x = "62%" if kind == "logo" else "50%"
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="{primary}"/><stop offset="1" stop-color="{secondary}"/></linearGradient><filter id="glow"><feGaussianBlur stdDeviation="8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><rect width="100%" height="100%" fill="#08111f"/><circle cx="82%" cy="18%" r="24%" fill="{secondary}" opacity=".13"/>{body}<text x="{text_x}" y="{title_y}" text-anchor="middle" fill="#f7fbff" font-family="Arial,sans-serif" font-size="{title_size}" font-weight="900" letter-spacing="3" filter="url(#glow)">{safe_label}</text></svg>'''
     return svg.encode("utf-8")
 
 
 def install_default_assets() -> None:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     values = asset_manifest()
-    known = {item.get("id") for item in values}
-    changed = False
-    for slug, (label, primary, secondary) in DEFAULT_ASSET_THEMES.items():
+    expected_ids = {f"builtin-{slug}-{kind}" for slug in DEFAULT_ASSET_THEMES for kind in ("logo", "guide-background", "corner-bug")}
+    retired = [item for item in values if item.get("built_in") and item.get("id") not in expected_ids]
+    for item in retired:
+        (ASSETS_DIR / Path(str(item.get("filename", ""))).name).unlink(missing_ok=True)
+    if retired:
+        values = [item for item in values if item not in retired]
+    known = {item.get("id"): item for item in values}
+    changed = bool(retired)
+    for slug, (label, primary, secondary, icon) in DEFAULT_ASSET_THEMES.items():
         for kind in ("logo", "guide-background", "corner-bug"):
             asset_id = f"builtin-{slug}-{kind}"
             filename = f"{asset_id}.svg"
             if asset_id not in known:
                 values.append({"id": asset_id, "name": f"{label} {kind.replace('-', ' ').title()}", "kind": kind, "filename": filename, "content_type": "image/svg+xml", "built_in": True, "created_at": "2026-11-19T00:00:00+00:00"})
                 changed = True
+            elif known[asset_id].get("built_in"):
+                expected_name = f"{label} {kind.replace('-', ' ').title()}"
+                if known[asset_id].get("name") != expected_name:
+                    known[asset_id]["name"] = expected_name
+                    changed = True
             path = ASSETS_DIR / filename
-            if not path.exists():
-                path.write_bytes(default_asset_svg(label, kind, primary, secondary))
+            content = default_asset_svg(label, kind, primary, secondary, icon)
+            if not path.exists() or path.read_bytes() != content:
+                path.write_bytes(content)
     if changed:
         atomic_json(ASSETS_DIR / "manifest.json", values)
 
