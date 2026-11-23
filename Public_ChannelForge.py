@@ -31,7 +31,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.5"
+VERSION = "3.5.6"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -114,9 +114,20 @@ GITHUB_API_RELEASE = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases
 
 def atomic_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
+    temporary = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        for attempt in range(7):
+            try:
+                temporary.replace(path)
+                break
+            except PermissionError as exc:
+                if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 6:
+                    raise
+                # Windows readers may keep the destination open briefly.
+                time.sleep(0.02 * (2 ** attempt))
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def load_json(path: Path, fallback: object) -> object:

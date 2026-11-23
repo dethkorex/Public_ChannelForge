@@ -26,6 +26,25 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(value["plex_token"], "")
         self.assertTrue(value["token_saved"])
 
+    def test_atomic_json_retries_a_windows_sharing_violation(self):
+        target = app.DATA_DIR / "retry.json"
+        replace = Path.replace
+        error = PermissionError("sharing violation")
+        error.winerror = 32
+        attempts = []
+
+        def replace_after_unlock(temporary, destination):
+            attempts.append(temporary)
+            if len(attempts) == 1:
+                raise error
+            return replace(temporary, destination)
+
+        with mock.patch.object(Path, "replace", replace_after_unlock):
+            app.atomic_json(target, {"complete": True})
+        self.assertEqual(app.load_json(target, {}), {"complete": True})
+        self.assertEqual(len(attempts), 2)
+        self.assertFalse(attempts[0].exists())
+
     def test_public_media_origin_does_not_publish_creator_controls(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.PublicMediaHandler)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
