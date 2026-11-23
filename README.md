@@ -56,6 +56,8 @@ ChannelForge v3.5.15 removes the scanline overlay, deinterlaces older sources, a
 
 ChannelForge v3.5.17 adds in-app APK downloads and installation on Fire TV. Select the update in the guide and confirm the install in Fire OS.
 
+ChannelForge v3.5.18 keeps Fire TV remote focus on the guide so the Updates button can be reached even while a studio is online.
+
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
 ![ChannelForge TV home hub](preview/channel-forge-tv-v346-home.png)
@@ -108,7 +110,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.17-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.5.18-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation

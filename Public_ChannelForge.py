@@ -36,7 +36,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.17"
+VERSION = "3.5.18"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790

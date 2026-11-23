@@ -141,7 +141,9 @@ public class MainActivity extends Activity {
 
     private void buildUi() {
         FrameLayout root = new FrameLayout(this); root.setBackground(surface(new int[]{color("#050616"),color("#25073D"),color("#070312")},0,0,0));
-        video = new VideoView(this); root.addView(video, new FrameLayout.LayoutParams(-1, -1));
+        video = new VideoView(this);
+        video.setFocusable(false);
+        root.addView(video, new FrameLayout.LayoutParams(-1, -1));
         movieControls = new MediaController(this);
         guide = new LinearLayout(this); guide.setOrientation(LinearLayout.VERTICAL); guide.setPadding(dp(26),dp(16),dp(26),dp(15)); guide.setBackgroundColor(Color.argb(238, 4, 5, 20));
         LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(10));
@@ -149,6 +151,10 @@ public class MainActivity extends Activity {
         LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);TextView brand=text("CHANNELFORGE TV",25,true);brand.setTextColor(color("#FFF229"));brand.setLetterSpacing(.16f);brandBox.addView(brand);TextView subtitle=text("THE COMMUNITY DIAL",11,true);subtitle.setTextColor(color("#55EFFF"));subtitle.setLetterSpacing(.28f);brandBox.addView(subtitle);header.addView(brandBox,new LinearLayout.LayoutParams(0,-2,1));
         TextView pair=focusButton("OPTIONAL DIRECT PAIR");pair.setOnClickListener(v->showPairingDialog());header.addView(pair);
         updateButton=focusButton("UPDATES  •  v"+BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->selectUpdate());LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
+        pair.setId(View.generateViewId());
+        updateButton.setId(View.generateViewId());
+        pair.setNextFocusRightId(updateButton.getId());
+        updateButton.setNextFocusLeftId(pair.getId());
         View line=new View(this);line.setBackgroundColor(color("#16DFF5"));guide.addView(line,new LinearLayout.LayoutParams(-1,dp(2)));
         status = text("●  CONNECTING TO THE PUBLIC CHANNEL DIRECTORY…", 12, true); status.setTextColor(color("#77F6A3"));status.setBackground(surface(new int[]{color("#111A3B"),color("#0A0B20")},color("#225E8B"),1,11));LinearLayout.LayoutParams statusLayout=new LinearLayout.LayoutParams(-1,-2);statusLayout.setMargins(0,dp(12),0,dp(12));guide.addView(status,statusLayout);
         LinearLayout columns = new LinearLayout(this); columns.setOrientation(LinearLayout.HORIZONTAL); guide.addView(columns, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -177,6 +183,7 @@ public class MainActivity extends Activity {
         bp.setMargins(dp(35), 0, dp(35), dp(35));
         root.addView(bannerPanel, bp);
         setContentView(root);
+        pair.requestFocus();
         video.setOnPreparedListener(player -> {
             status.setText("●  STREAM READY  •  ENGLISH AUDIO PREFERRED");
             player.start();
@@ -617,6 +624,7 @@ public class MainActivity extends Activity {
         guideVisible = false;
         movieControls.hide();
         video.setMediaController(null);
+        video.setFocusable(true);
         video.requestFocus();
         video.removeCallbacks(continueLive);
         continueLive.run();
@@ -630,6 +638,7 @@ public class MainActivity extends Activity {
         guide.setVisibility(View.GONE);
         guideVisible = false;
         video.setMediaController(movieControls);
+        video.setFocusable(true);
         video.requestFocus();
         showBuffering("Connecting to the studio…", true);
         video.setVideoURI(Uri.parse(url));
@@ -741,6 +750,7 @@ public class MainActivity extends Activity {
         movieControls.hide();
         video.removeCallbacks(continueLive);
         video.stopPlayback();
+        video.setFocusable(false);
         guideVisible = true;
         guide.setVisibility(View.VISIBLE);
         bannerPanel.setVisibility(View.GONE);
