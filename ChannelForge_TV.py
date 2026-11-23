@@ -20,7 +20,7 @@ from pathlib import Path
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.23"
+VERSION = "3.5.24"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -728,7 +728,6 @@ function appendVaultBatch(amount=24){
         b.setAttribute('aria-label','Play '+x.title+(x.year?' ('+x.year+')':''));
         const thumbnail=x.thumbnail_url||x.poster_url;
         b.innerHTML=cinemaCase(x,thumbnail,'loading="lazy"')
-            +'<span class="cinema-movie-title">'+esc(x.title)+'</span>'
             +(x.year?'<span class="cinema-movie-year">'+esc(x.year)+'</span>':'');
         b.querySelector('img')?.addEventListener('error',event=>hideFailedPoster(event.currentTarget,x.poster_url));
         b.onfocus=b.onmouseenter=()=>selectTape(x,b);
@@ -827,10 +826,15 @@ function hideFailedPoster(image,fallback=''){
     image.remove();
 }
 function cinemaCase(movie,poster,attributes=''){
-    return '<span class="cinema-case" aria-hidden="true"><span class="cinema-case-spine">VHS</span>'
-        +'<span class="cinema-case-cover"><span class="cinema-case-placeholder">'+esc(movie.title)+'</span>'
-        +(poster?'<img '+attributes+' decoding="async" src="'+esc(poster)+'" alt="">':'')
-        +'<span class="cinema-case-label">CF HOME VIDEO <b>VHS</b></span></span></span>';
+    const title=esc(movie.title);
+    return '<span class="cinema-case" aria-hidden="true">'
+        +'<span class="cinema-case-spine"><b>CF</b><span>'+title+'</span><em>VHS</em></span>'
+        +'<span class="cinema-case-cover"><span class="cinema-case-masthead">'
+        +'<b>CHANNELFORGE TV</b><small>REWIND CINEMA</small></span>'
+        +'<span class="cinema-case-window"><span class="cinema-case-placeholder">REWIND CINEMA</span>'
+        +(poster?'<img '+attributes+' decoding="async" src="'+esc(poster)+'" alt="">':'')+'</span>'
+        +'<span class="cinema-case-title">'+title+'</span>'
+        +'<span class="cinema-case-label"><i>CF HOME VIDEO</i><b>VHS</b></span></span></span>';
 }
 function selectTape(movie,tape){
     const previous=$('#vault [aria-current]');

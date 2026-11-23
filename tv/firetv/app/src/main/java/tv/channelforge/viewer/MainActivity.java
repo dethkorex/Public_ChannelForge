@@ -625,7 +625,8 @@ public class MainActivity extends Activity {
     private void updateStudioStatus(String creator) {
         status.setText("●  " + creator.toUpperCase(Locale.US) + "  •  " + channels.size()
                 + " LIVE CHANNELS  •  " + (movieShelfLoaded
-                ? vaultItems.size() + (nextMovieOffset >= 0 ? "+" : "") + " MOVIES" : "CHECKING MOVIES"));
+                ? vaultItems.size() + (nextMovieOffset >= 0 ? "+" : "") + " MOVIES"
+                : moviePageLoading ? "CHECKING MOVIES" : "REWIND CINEMA"));
     }
 
     private void renderMovies(Creator creator) {
@@ -640,7 +641,7 @@ public class MainActivity extends Activity {
         title.setTextSize(24);
         title.setGravity(Gravity.CENTER);
         hero.addView(title, new FrameLayout.LayoutParams(-1, -1));
-        movieRail.addView(hero, new LinearLayout.LayoutParams(-1, dp(102)));
+        movieRail.addView(hero, new LinearLayout.LayoutParams(-1, dp(74)));
         if (vaultItems.isEmpty()) {
             movieRail.addView(text("No movies available from this studio.", 14, false));
             return;
@@ -681,21 +682,37 @@ public class MainActivity extends Activity {
     private View vaultBox(VaultItem item) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(9), dp(5), dp(5), dp(6));
+        box.setPadding(dp(12), dp(6), dp(6), dp(5));
         box.setFocusable(true);
-        int[] sleeve = {color("#534250"), color("#191320"), color("#47312B")};
-        box.setBackground(surface(sleeve, color("#B08B64"), 1, 6));
+        box.setContentDescription(item.title + (item.year.isEmpty() ? "" : ", " + item.year));
+        int[] sleeve = {color("#5D493B"), color("#151021"), color("#452044")};
+        box.setBackground(surface(sleeve, color("#C9AE83"), 1, 6));
+        TextView brand = text("CHANNELFORGE TV", 8, true);
+        brand.setGravity(Gravity.CENTER);
+        brand.setTextColor(color("#FFE06A"));
+        brand.setPadding(0, 0, 0, dp(3));
+        box.addView(brand);
         ImageView poster = new ImageView(this);
         poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
         poster.setBackgroundColor(color("#201528"));
-        box.addView(poster, new LinearLayout.LayoutParams(-1, dp(138)));
-        TextView label = text("CF HOME VIDEO  •  VHS", 8, true);
-        label.setTextColor(color("#FFE0A7"));
-        box.addView(label);
-        TextView title = text(item.title + (item.year.isEmpty() ? "" : " (" + item.year + ")"), 12, true);
+        FrameLayout posterFrame = new FrameLayout(this);
+        posterFrame.setPadding(dp(1), dp(1), dp(1), dp(1));
+        posterFrame.setBackground(surface(new int[]{color("#E84998"), color("#A93772")}, 0, 0, 3));
+        posterFrame.addView(poster, new FrameLayout.LayoutParams(-1, -1));
+        box.addView(posterFrame, new LinearLayout.LayoutParams(-1, dp(119)));
+        TextView title = text(item.title, 12, true);
+        title.setGravity(Gravity.CENTER);
+        title.setTextColor(color("#F3D8AE"));
         title.setMaxLines(2);
-        box.addView(title, new LinearLayout.LayoutParams(-1, dp(42)));
-        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(dp(112), -2);
+        title.setPadding(0, dp(1), 0, dp(1));
+        box.addView(title, new LinearLayout.LayoutParams(-1, dp(35)));
+        TextView label = text("CF HOME VIDEO  •  VHS", 8, true);
+        label.setGravity(Gravity.CENTER);
+        label.setTextColor(color("#FFE0A7"));
+        label.setPadding(0, dp(2), 0, dp(2));
+        label.setBackground(surface(new int[]{color("#271730"), color("#17101F")}, color("#C8A473"), 1, 3));
+        box.addView(label);
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(dp(120), -2);
         layout.setMargins(dp(5), dp(6), dp(5), dp(5));
         box.setLayoutParams(layout);
         box.setOnFocusChangeListener((view, focused) -> {
@@ -704,7 +721,7 @@ public class MainActivity extends Activity {
             float scale = focused && !reduceMotion ? 1.055f : 1f;
             view.animate().scaleX(scale).scaleY(scale).translationY(focused && !reduceMotion ? -dp(3) : 0)
                     .setDuration(reduceMotion ? 0 : 170).start();
-            view.setBackground(surface(sleeve, color(focused ? "#FF68D7" : "#B08B64"), focused ? 3 : 1, 6));
+            view.setBackground(surface(sleeve, color(focused ? "#FF68D7" : "#C9AE83"), focused ? 3 : 1, 6));
         });
         box.setOnClickListener(view -> new AlertDialog.Builder(this).setTitle(item.title)
                 .setPositiveButton("Insert movie", (dialog, which) -> playUrl(item.title, item.url))
