@@ -74,6 +74,49 @@ class CoreTests(unittest.TestCase):
             server.server_close()
             worker.join(timeout=5)
 
+    def test_automatic_media_origin_does_not_take_over_a_busy_port(self):
+        with app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler) as occupied:
+            with mock.patch.object(app, "PUBLIC_MEDIA_PORT", occupied.server_port), mock.patch.object(app, "PUBLIC_MEDIA_SERVER", None):
+                try:
+                    app.start_public_media_server(automatic=True)
+                    self.assertNotEqual(app.PUBLIC_MEDIA_SERVER.server_port, occupied.server_port)
+                finally:
+                    app.stop_public_media_server()
+
+    def test_new_channel_publication_is_queued_and_can_be_disabled(self):
+        with mock.patch.object(app, "PUBLISH_CHANGED", threading.Event()):
+            self.assertTrue(app.queue_channel_publication({"name": "My new channel"}, True))
+            self.assertTrue(app.PUBLISH_CHANGED.is_set())
+            first = app.config()["pending_creator_profile"]
+            self.assertEqual(first["name"], "My new channel")
+            self.assertTrue(app.queue_channel_publication({"name": "Another channel"}, True))
+            self.assertEqual(app.config()["pending_creator_profile"], first)
+            self.assertFalse(app.queue_channel_publication({"name": "Local channel"}, False))
+            self.assertFalse(app.config(True)["publishing_pending"])
+            self.assertFalse(app.config()["auto_publish_channels"])
+
+    def test_local_movie_catalog_uses_loopback_even_when_studio_is_public(self):
+        app.atomic_json(app.CONFIG_FILE, {"public_url": "https://public-studio.example"})
+        app.atomic_json(app.VAULT_CATALOG_FILE, {"items": [
+            {"id": "42", "title": "Movie", "type": "movie", "thumb": "/library/metadata/42/thumb/1"},
+        ]})
+        with app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler) as local:
+            threading.Thread(target=local.serve_forever, daemon=True).start()
+            client = http.client.HTTPConnection("127.0.0.1", local.server_port, timeout=5)
+            try:
+                client.request("GET", "/api/public/vault")
+                response = client.getresponse()
+                self.assertEqual(response.status, 200)
+                movie = json.loads(response.read())["items"][0]
+                direct = f"http://127.0.0.1:{local.server_port}/"
+                self.assertTrue(movie["poster_url"].startswith(direct))
+                self.assertTrue(movie["stream_url"].startswith(direct))
+                self.assertTrue(movie["thumbnail_url"].endswith("&size=mini"))
+                self.assertTrue(app.vault_items()[0]["poster_url"].startswith("https://public-studio.example/"))
+            finally:
+                client.close()
+                local.shutdown()
+
     def test_creator_prefers_hls_js_when_chromium_claims_native_hls(self):
         script = (app.WEB_DIR / "app.js").read_text(encoding="utf-8")
         hls_branch = 'if(window.Hls&&Hls.isSupported())'

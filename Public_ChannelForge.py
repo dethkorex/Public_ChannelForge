@@ -8,6 +8,7 @@ import base64
 import concurrent.futures
 import hashlib
 import gzip
+import io
 import html
 import importlib.util
 import json
@@ -35,7 +36,7 @@ from linux_runtime import linux_install_command, linux_release_asset, start_webv
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.5.10"
+VERSION = "3.5.11"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -71,6 +72,7 @@ CREATOR_ICON = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) /
 LOCK = threading.RLock()
 # Bound the lock pool while allowing different channels to start in parallel.
 ENCODER_START_LOCKS = tuple(threading.Lock() for _ in range(32))
+POSTER_CACHE_LOCKS = tuple(threading.Lock() for _ in range(32))
 HLS_PROXY: dict[str, tuple[str, float]] = {}
 HLS_PROXY_CHANNELS: dict[str, str] = {}
 UPDATE_JOBS: dict[str, dict] = {}
@@ -78,7 +80,8 @@ PLAYBACK_ERRORS: dict[str, tuple[float, str]] = {}
 PLAYBACK_ERROR_COOLDOWN = 30
 FFMPEG_SESSIONS: dict[str, dict] = {}
 LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
-AUDIO_SELECTION_CACHE: dict[str, int] = {}
+AUDIO_SELECTION_CACHE: dict[str, tuple[int, bool]] = {}
+ENCODER_FILE = r"(?:index(?:_(?:economy|hd))?\.m3u8|segment(?:(?:economy|hd)_)?\d+\.ts)"
 PLEX_RESOURCE_CACHE: dict[str, object] = {"expires": 0.0, "servers": {}}
 STREAM_DIR = DATA_DIR / "streams"
 TUNNEL_LOCK = threading.RLock()
@@ -86,6 +89,8 @@ TUNNEL_PROCESS: subprocess.Popen | None = None
 TUNNEL_URL = ""
 TUNNEL_URLS: queue.Queue[str] = queue.Queue()
 PUBLISH_LOCK = threading.RLock()
+PUBLISH_CHANGED = threading.Event()
+MOVIE_SCAN_LOCK = threading.RLock()
 PUBLIC_MEDIA_SERVER: ThreadingHTTPServer | None = None
 PUBLIC_MEDIA_PORT = DEFAULT_PUBLIC_MEDIA_PORT
 PUBLIC_MEDIA_LOCK = threading.RLock()
@@ -318,8 +323,11 @@ def config(public: bool = False) -> dict:
         "creator_id": "" if legacy_directory else str(value.get("creator_id", "")),
         "creator_key": "" if legacy_directory else str(value.get("creator_key", "")),
         "creator_profile": value.get("creator_profile", {}) if isinstance(value.get("creator_profile", {}), dict) else {},
+        "pending_creator_profile": value.get("pending_creator_profile", {}) if isinstance(value.get("pending_creator_profile", {}), dict) else {},
+        "auto_publish_channels": bool(value.get("auto_publish_channels", True)),
     }
     if public:
+        result["publishing_pending"] = bool(result.pop("pending_creator_profile"))
         result["plex_token"] = ""
         result["token_saved"] = bool(value.get("plex_token"))
         result["creator_published"] = bool(result["creator_id"] and result["creator_key"])
@@ -439,7 +447,7 @@ def publish_creator(payload: dict) -> dict:
     if not isinstance(raw, dict):
         raw = {}
     raw.update({"directory_url": settings["directory_url"], "creator_id": creator_id,
-                "creator_key": creator_key, "creator_profile": profile})
+                "creator_key": creator_key, "creator_profile": profile, "pending_creator_profile": {}})
     atomic_json(CONFIG_FILE, raw)
     return result.get("creator", {"id": creator_id, **profile})
 
@@ -450,7 +458,8 @@ def unpublish_creator() -> None:
         directory_request("DELETE", f'/v1/creators/{settings["creator_id"]}', None, settings["creator_key"])
     raw = load_json(CONFIG_FILE, {})
     if isinstance(raw, dict):
-        raw.update({"creator_id": "", "creator_key": "", "creator_profile": {}})
+        raw.update({"creator_id": "", "creator_key": "", "creator_profile": {},
+                    "pending_creator_profile": {}, "auto_publish_channels": False})
         atomic_json(CONFIG_FILE, raw)
 
 
@@ -470,7 +479,7 @@ def publish_studio(payload: dict) -> dict:
         manual_origin = str(payload.get("public_url", "")).strip().rstrip("/")
         already_serving = PUBLIC_MEDIA_SERVER is not None
         already_relaying = TUNNEL_PROCESS is not None
-        start_public_media_server()
+        start_public_media_server(automatic=not manual_origin)
         try:
             origin = manual_origin or start_public_tunnel()
             raw.update({"public_url": origin, "public_tunnel": not manual_origin})
@@ -488,6 +497,28 @@ def publish_studio(payload: dict) -> dict:
         if manual_origin:
             stop_public_tunnel()
         return creator
+
+
+def queue_channel_publication(channel: dict, enabled: bool) -> bool:
+    """Remember a requested publication so the background service can retry it."""
+    with LOCK:
+        raw = load_json(CONFIG_FILE, {})
+        if not isinstance(raw, dict):
+            raw = {}
+        raw["auto_publish_channels"] = enabled
+        queued = bool(enabled and not raw.get("creator_id"))
+        if queued and not raw.get("pending_creator_profile"):
+            plex = raw.get("plex_profile") or {}
+            raw["pending_creator_profile"] = {
+                "name": plex.get("server_name") or channel["name"],
+                "slug": "studio-" + secrets.token_hex(6),
+            }
+        elif not enabled:
+            raw["pending_creator_profile"] = {}
+        atomic_json(CONFIG_FILE, raw)
+    if queued:
+        PUBLISH_CHANGED.set()
+    return queued
 
 
 def channels() -> list[dict]:
@@ -803,10 +834,39 @@ def plex_server_request(path: str, server_id: str = "") -> ET.Element:
     raise error or ValueError("That shared Plex server is offline.")
 
 
-def plex_binary(path: str, server_id: str = "") -> tuple[bytes, str]:
+def plex_binary(path: str, server_id: str = "", size: str = "") -> tuple[bytes, str]:
     if not path.startswith("/") or path.startswith("//"):
         raise ValueError("Invalid Plex image path.")
     cache_key = hashlib.sha256(f"{server_id}:{path}".encode()).hexdigest()
+    width = {"mini": 128, "poster": 384}.get(size)
+    with POSTER_CACHE_LOCKS[int(cache_key[:2], 16) % len(POSTER_CACHE_LOCKS)]:
+        thumbnail = POSTER_CACHE_DIR / f"{cache_key}-{width}.jpg"
+        if width and thumbnail.is_file():
+            return thumbnail.read_bytes(), "image/jpeg"
+        data, content_type = load_plex_image(path, server_id, cache_key)
+        if not width:
+            return data, content_type
+        try:
+            from PIL import Image, ImageOps
+        except ImportError:
+            return data, content_type
+        try:
+            with Image.open(io.BytesIO(data)) as source:
+                if source.width * source.height > 25_000_000:
+                    return data, content_type
+                image = ImageOps.exif_transpose(source)
+                image.thumbnail((width, width * 3 // 2), Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                image.convert("RGB").save(output, "JPEG", quality=78, optimize=True)
+            temporary = thumbnail.with_suffix(".tmp")
+            temporary.write_bytes(output.getvalue())
+            temporary.replace(thumbnail)
+            return output.getvalue(), "image/jpeg"
+        except (OSError, ValueError, Image.DecompressionBombError):
+            return data, content_type
+
+
+def load_plex_image(path: str, server_id: str, cache_key: str) -> tuple[bytes, str]:
     cache_file, cache_meta = POSTER_CACHE_DIR / f"{cache_key}.img", POSTER_CACHE_DIR / f"{cache_key}.json"
     if cache_file.is_file() and cache_meta.is_file():
         metadata = load_json(cache_meta, {})
@@ -819,9 +879,9 @@ def plex_binary(path: str, server_id: str = "") -> tuple[bytes, str]:
     request = urllib.request.Request(url, headers={"Accept": "image/*", "X-Plex-Product": APP_NAME})
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
-            data = response.read(12_000_000)
+            data = response.read(12_000_001)
             content_type = response.headers.get_content_type()
-            if not content_type.startswith("image/"):
+            if not content_type.startswith("image/") or len(data) > 12_000_000:
                 raise ValueError("Plex did not return an image.")
             POSTER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             temporary = cache_file.with_suffix(".tmp")
@@ -1051,6 +1111,11 @@ def plex_items(section: str) -> list[dict]:
 
 
 def refresh_plex_movie_catalog() -> dict:
+    with MOVIE_SCAN_LOCK:
+        return scan_plex_movies()
+
+
+def scan_plex_movies() -> dict:
     """Cache every movie library visible to the signed-in Plex account.
 
     Plex Home/shared-library grants are account scoped, so Rewind Cinema uses
@@ -1094,15 +1159,21 @@ def cached_plex_movies() -> list[dict]:
     return items if isinstance(items, list) else []
 
 
-def sync_plex_movies_async() -> None:
+def sync_plex_movies_async(*, skip_recent: bool = False) -> None:
     if not config().get("plex_token"):
         return
+    if skip_recent and VAULT_CATALOG_FILE.is_file() and time.time() - VAULT_CATALOG_FILE.stat().st_mtime < 1200:
+        return
     def worker() -> None:
+        if not MOVIE_SCAN_LOCK.acquire(blocking=False):
+            return
         try:
             result = refresh_plex_movie_catalog()
             print(f'Rewind Cinema indexed {result["movies"]} Plex movies.')
         except Exception as exc:
             print(f"Rewind Cinema sync failed: {exc}")
+        finally:
+            MOVIE_SCAN_LOCK.release()
     threading.Thread(target=worker, daemon=True, name="channel-forge-rewind-sync").start()
 
 
@@ -1544,6 +1615,8 @@ def relay_address(event: str) -> str:
 def start_public_tunnel() -> str:
     global TUNNEL_PROCESS, TUNNEL_URL, TUNNEL_URLS
     with TUNNEL_LOCK:
+        if PUBLIC_MEDIA_SERVER is None:
+            raise ValueError("The read-only media server is not running.")
         if TUNNEL_PROCESS is None or TUNNEL_PROCESS.poll() is not None:
             bundled = Path(getattr(sys, "_MEIPASS", "")) / "openssh" / "ssh.exe"
             ssh = str(bundled) if getattr(sys, "frozen", False) and bundled.is_file() else shutil.which("ssh")
@@ -1558,7 +1631,7 @@ def start_public_tunnel() -> str:
                  "-o", "StrictHostKeyChecking=yes", "-o", "HostKeyAlgorithms=ssh-ed25519",
                  "-o", f'UserKnownHostsFile="{known_hosts.as_posix()}"', "-o", f"GlobalKnownHostsFile={null}",
                  "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
-                 "-o", "ServerAliveCountMax=2", "-R", f"80:{HOST}:{PUBLIC_MEDIA_PORT}",
+                 "-o", "ServerAliveCountMax=2", "-R", f"80:{HOST}:{PUBLIC_MEDIA_SERVER.server_port}",
                  "nokey@localhost.run", "--", "--output", "json"],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
@@ -1651,29 +1724,32 @@ def ffprobe_path() -> str:
     return found
 
 
-def preferred_audio_index(item: dict, media_input: str) -> int:
-    """Prefer an English audio track, then the file default, then track zero."""
+def playback_audio_track(item: dict, media_input: str) -> tuple[int, bool | None]:
+    """Resolve the preferred audio track and whether the source has audio."""
     recorded_language = str(item.get("audio_language", "")).casefold()
     recorded_index = max(0, int(item.get("audio_stream_index", 0) or 0))
     if recorded_language in {"en", "eng"} or recorded_language.startswith("english"):
-        return recorded_index
+        return recorded_index, True
     identity = hashlib.sha256(f'{item.get("source")}:{item.get("id")}:{media_input}'.encode()).hexdigest()
     if identity in AUDIO_SELECTION_CACHE:
         return AUDIO_SELECTION_CACHE[identity]
     try:
         completed = subprocess.run(
             [ffprobe_path(), "-v", "error", "-select_streams", "a", "-show_entries", "stream=index:stream_tags=language:stream_disposition=default", "-of", "json", media_input],
-            capture_output=True, text=True, timeout=15, creationflags=0x08000000 if sys.platform == "win32" else 0,
+            capture_output=True, text=True, timeout=6, creationflags=0x08000000 if sys.platform == "win32" else 0,
         )
+        if completed.returncode != 0:
+            return recorded_index, True if item.get("audio_stream_id") else None
         streams = json.loads(completed.stdout or "{}").get("streams", [])
         choice = next((index for index, stream in enumerate(streams) if str(stream.get("tags", {}).get("language", "")).casefold() in {"en", "eng"}), None)
         if choice is None:
             choice = next((index for index, stream in enumerate(streams) if int(stream.get("disposition", {}).get("default", 0) or 0) == 1), None)
         recorded_index = int(choice if choice is not None else recorded_index)
-    except (OSError, ValueError, TypeError, subprocess.SubprocessError, json.JSONDecodeError):
-        pass
-    AUDIO_SELECTION_CACHE[identity] = recorded_index
-    return recorded_index
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return recorded_index, True if item.get("audio_stream_id") else None
+    selection = (recorded_index, bool(streams))
+    AUDIO_SELECTION_CACHE[identity] = selection
+    return selection
 
 
 def ffmpeg_status() -> dict:
@@ -1733,6 +1809,24 @@ def start_ffmpeg_session(channel: dict) -> str:
         return start_or_reuse_encoder(channel)
 
 
+def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool) -> tuple[list[str], list[str]]:
+    filters = (
+        "[0:v:0]split=2[economy_in][hd_in];"
+        "[economy_in]scale=w='min(480,iw)':h='min(270,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2[economy];"
+        "[hd_in]scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2[hd]"
+    )
+    maps = ["-filter_complex_threads", "2", "-filter_complex", filters, "-map", "[economy]", "-map", "[hd]"]
+    if has_audio:
+        maps += ["-map", f"0:a:{audio_index}", "-map", f"0:a:{audio_index}",
+                 "-b:a:0", "32k", "-ac:a:0", "1", "-b:a:1", "64k", "-ac:a:1", "2"]
+    variants = "v:0,a:0,name:economy v:1,a:1,name:hd" if has_audio else "v:0,name:economy v:1,name:hd"
+    maps += ["-b:v:0", "110k", "-maxrate:v:0", "145k", "-bufsize:v:0", "160k", "-threads:v:0", "1",
+             "-b:v:1", "420k", "-maxrate:v:1", "500k", "-bufsize:v:1", "500k", "-threads:v:1", "2"]
+    output = ["-master_pl_name", "index.m3u8", "-var_stream_map", variants,
+              "-hls_segment_filename", str(directory / "segment%v_%06d.ts"), str(directory / "index_%v.m3u8")]
+    return maps, output
+
+
 def start_or_reuse_encoder(channel: dict) -> str:
     position = schedule_position(channel)
     item = position["item"]
@@ -1761,20 +1855,26 @@ def start_or_reuse_encoder(channel: dict) -> str:
     output_timing = [] if on_demand else ["-t", f"{remaining:.3f}"]
     # Retain evicted segments briefly for remote viewers without increasing live delay.
     hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments"] if on_demand else
-                   ["-hls_list_size", "5", "-hls_delete_threshold", "30",
+                   ["-hls_list_size", "5", "-hls_delete_threshold", "60",
                     "-hls_flags", "delete_segments+independent_segments"])
-    relay_encoding = []
-    if config()["public_tunnel"]:
-        relay_encoding = ["-vf", "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-                          "-b:v", "420k", "-maxrate", "500k", "-bufsize", "500k", "-b:a", "64k"]
+    audio_index, has_audio = playback_audio_track(item, media_input)
+    relay = config()["public_tunnel"]
+    if relay and has_audio is not None:
+        encoding, output = adaptive_relay_options(directory, audio_index, has_audio)
+    else:
+        encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?", "-ac", "2"]
+        if relay:
+            encoding += ["-vf", "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                         "-b:v", "420k", "-maxrate", "500k", "-bufsize", "500k", "-b:a", "64k"]
+        output = ["-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8")]
     command = [
         ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin",
         *input_timing, "-i", media_input, *output_timing,
-        "-map", "0:v:0", "-map", f"0:a:{preferred_audio_index(item, media_input)}?", "-c:v", "libx264", "-preset", "ultrafast",
+        *encoding, "-c:v", "libx264", "-preset", "ultrafast",
         "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*1)",
-        "-c:a", "aac", "-ac", "2", "-ar", "48000", *relay_encoding,
+        "-c:a", "aac", "-ar", "48000",
         "-f", "hls", "-hls_time", "1", *hls_options,
-        "-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8"),
+        *output,
     ]
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=0x08000000 if sys.platform == "win32" else 0)
     with LOCK:
@@ -1958,9 +2058,9 @@ def vault_movies():
                 yield str(channel.get("section", "")), item
 
 
-def vault_items() -> list[dict]:
+def vault_items(base: str | None = None) -> list[dict]:
     result, seen = [], set()
-    base = server_base()
+    base = base or server_base()
     for section, item in vault_movies():
         item_id = vault_item_id(item)
         if item_id in seen:
@@ -1971,8 +2071,8 @@ def vault_items() -> list[dict]:
             media_section = str(item.get("section") or section)
             poster_url = f"{base}/api/local/image?section={urllib.parse.quote(media_section)}&id={urllib.parse.quote(str(item.get('id', '')))}"
         elif thumb:
-            server_id = urllib.parse.quote(str(item.get("plex_server_id", "")))
-            poster_url = f"{base}/api/plex/image?path={urllib.parse.quote(thumb)}&server={server_id}"
+            server_id = urllib.parse.quote(str(item.get("plex_server_id", "")), safe="")
+            poster_url = f"{base}/api/plex/image?path={urllib.parse.quote(thumb, safe='')}&server={server_id}&size=poster"
         else:
             poster_url = ""
         result.append({
@@ -1981,14 +2081,15 @@ def vault_items() -> list[dict]:
             "genres": list(item.get("genres", [])), "content_rating": item.get("content_rating", "") or "Unrated",
             "library": item.get("library", ""),
             "poster_url": poster_url, "stream_url": f"{base}/vault/{item_id}.m3u8",
+            "thumbnail_url": poster_url.replace("&size=poster", "&size=mini"),
             "duration_ms": item.get("duration_ms", 1800000),
         })
     return result
 
 
-def public_channel_catalog() -> dict:
+def public_channel_catalog(base: str | None = None) -> dict:
     """Return lightweight guide/status data without starting a media session."""
-    base = server_base()
+    base = base or server_base()
     moment = datetime.now(timezone.utc)
     end = moment + timedelta(hours=3)
     assets = {item.get("id"): item for item in asset_manifest()}
@@ -2096,16 +2197,23 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
 
+    def catalog_base(self) -> str:
+        port = self.server.server_port
+        if self.headers.get("Host", "") in {f"{HOST}:{port}", f"localhost:{port}", f"[::1]:{port}"}:
+            return f"http://{HOST}:{port}"
+        return server_base()
+
     def send_bytes(self, status: int, body: bytes, content_type: str, extra_headers: dict[str, str] | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        headers = extra_headers or {}
+        self.send_header("Cache-Control", headers.get("Cache-Control", "no-store"))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self' http: https:; media-src 'self' blob: http: https:")
-        for name, value in (extra_headers or {}).items():
-            if value:
+        for name, value in headers.items():
+            if value and name.lower() != "cache-control":
                 self.send_header(name, value)
         try:
             self.end_headers()
@@ -2144,7 +2252,8 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/local-creator":
                 settings = config()
                 name = settings["creator_profile"].get("name") or settings["plex_profile"].get("server_name")
-                self.send_json(200, {"app": APP_NAME, "name": name, "channel_count": len(channels())})
+                self.send_json(200, {"app": APP_NAME, "name": name, "channel_count": len(channels()),
+                                     "creator_id": settings["creator_id"], "public_url": settings["public_url"]})
             elif parsed.path == "/api/status":
                 values = channels()
                 now_playing = {}
@@ -2176,8 +2285,8 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/plex/image":
                 query = urllib.parse.parse_qs(parsed.query)
                 image_path = query.get("path", [""])[0]
-                data, content_type = plex_binary(image_path, query.get("server", [""])[0])
-                self.send_bytes(200, data, content_type)
+                data, content_type = plex_binary(image_path, query.get("server", [""])[0], query.get("size", [""])[0])
+                self.send_bytes(200, data, content_type, {"Cache-Control": "public, max-age=3600"})
             elif parsed.path == "/api/playback/status":
                 channel_id = urllib.parse.parse_qs(parsed.query).get("channel", [""])[0]
                 error = playback_error(channel_id)
@@ -2191,9 +2300,10 @@ class Handler(BaseHTTPRequestHandler):
                     guide.append({"channel_id": channel["id"], "name": channel["name"], "number": channel["number"], "logo_asset_id": channel.get("logo_asset_id", ""), "programs": [{"title": slot["item"].get("title", "Untitled"), "year": slot["item"].get("year", ""), "type": slot["item"].get("type", "video"), "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat()} for slot in slots]})
                 self.send_json(200, {"generated_at": moment.isoformat(), "channels": guide})
             elif parsed.path == "/api/public/vault":
-                self.send_json(200, {"version": 1, "generated_at": datetime.now(timezone.utc).isoformat(), "items": vault_items()})
+                self.send_json(200, {"version": 1, "generated_at": datetime.now(timezone.utc).isoformat(),
+                                     "items": vault_items(self.catalog_base())})
             elif parsed.path == "/api/public/channels":
-                self.send_json(200, public_channel_catalog())
+                self.send_json(200, public_channel_catalog(self.catalog_base()))
             elif parsed.path == "/api/update":
                 release = latest_release()
                 release.pop("assets", None)
@@ -2237,7 +2347,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.redirect(start_vault_session(item_id))
             elif parsed.path.startswith("/ffmpeg-stream/"):
                 parts = parsed.path.strip("/").split("/")
-                if len(parts) != 3 or not re.fullmatch(r"(?:index\.m3u8|segment\d+\.ts)", parts[2]):
+                if len(parts) != 3 or not re.fullmatch(ENCODER_FILE, parts[2]):
                     raise FileNotFoundError
                 with LOCK:
                     session = FFMPEG_SESSIONS.get(parts[1])
@@ -2308,6 +2418,7 @@ class Handler(BaseHTTPRequestHandler):
                     "local_libraries": old["local_libraries"],
                     "directory_url": str(payload.get("directory_url", old["directory_url"])).strip().rstrip("/"),
                     "creator_id": old["creator_id"], "creator_key": old["creator_key"], "creator_profile": old["creator_profile"],
+                    "auto_publish_channels": old["auto_publish_channels"], "pending_creator_profile": old["pending_creator_profile"],
                 }
                 if token:
                     root = plex_request("/", updated)
@@ -2339,7 +2450,10 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/directory/publish":
                 self.send_json(200, {"creator": publish_studio(payload)})
             elif parsed.path == "/api/channels":
-                self.send_json(200, {"channel": save_channel(payload)})
+                channel = save_channel(payload)
+                preference = payload.get("publish_worldwide")
+                pending = queue_channel_publication(channel, preference) if isinstance(preference, bool) else False
+                self.send_json(200, {"channel": channel, "publishing_pending": pending})
             elif parsed.path == "/api/channels/order":
                 ids = payload.get("ids", [])
                 if not isinstance(ids, list):
@@ -2402,6 +2516,9 @@ class Handler(BaseHTTPRequestHandler):
 class PublicMediaHandler(Handler):
     """Limit the public HTTPS origin to the paths TV viewers consume."""
 
+    def catalog_base(self) -> str:
+        return server_base()
+
     def send_json(self, status: int, payload: object) -> None:
         if status == 400:
             payload = {"error": "Published media is temporarily unavailable."}
@@ -2419,7 +2536,7 @@ class PublicMediaHandler(Handler):
             "/exports/guide.xml", "/exports/channels.m3u",
         } and not re.fullmatch(
             r"/(?:live|vault)/[a-zA-Z0-9_-]+\.m3u8|"
-            r"/ffmpeg-stream/[a-zA-Z0-9_-]+/(?:index\.m3u8|segment\d+\.ts)|"
+            rf"/ffmpeg-stream/[a-zA-Z0-9_-]+/{ENCODER_FILE}|"
             r"/hls-proxy/[a-zA-Z0-9_-]+|/user-assets/[^/]+",
             path,
         ):
@@ -2433,13 +2550,17 @@ class PublicMediaHandler(Handler):
     do_POST = do_PUT = do_DELETE = reject_write
 
 
-def start_public_media_server() -> None:
+def start_public_media_server(*, automatic: bool = False) -> None:
     global PUBLIC_MEDIA_SERVER
     with PUBLIC_MEDIA_LOCK:
-        if PUBLIC_MEDIA_SERVER is None:
-            server = ThreadingHTTPServer((HOST, PUBLIC_MEDIA_PORT), PublicMediaHandler)
+        previous = PUBLIC_MEDIA_SERVER
+        if previous is None or (not automatic and previous.server_port != PUBLIC_MEDIA_PORT):
+            server = ThreadingHTTPServer((HOST, 0 if automatic else PUBLIC_MEDIA_PORT), PublicMediaHandler)
             threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-public-media").start()
             PUBLIC_MEDIA_SERVER = server
+            if previous is not None:
+                previous.shutdown()
+                previous.server_close()
 
 
 def stop_public_media_server() -> None:
@@ -2499,14 +2620,23 @@ def restore_public_sharing() -> None:
     time.sleep(1)
     registered_origin = ""
     while True:
+        PUBLISH_CHANGED.clear()
         with PUBLISH_LOCK:
             settings = config()
             profile = settings["creator_profile"]
-            if not profile:
+            pending = settings["pending_creator_profile"]
+            if pending and not profile:
+                try:
+                    published = publish_studio(pending)
+                    if published:
+                        registered_origin = config()["public_url"]
+                except Exception as exc:
+                    print(f"ChannelForge public sharing will retry: {sanitized_playback_error(exc)}")
+            elif not profile:
                 registered_origin = ""
             else:
                 try:
-                    start_public_media_server()
+                    start_public_media_server(automatic=settings["public_tunnel"])
                     origin = start_public_tunnel() if settings["public_tunnel"] else settings["public_url"]
                     if origin != registered_origin:
                         raw = load_json(CONFIG_FILE, {})
@@ -2517,7 +2647,7 @@ def restore_public_sharing() -> None:
                         registered_origin = origin
                 except Exception as exc:
                     print(f"ChannelForge public sharing could not connect: {sanitized_playback_error(exc)}")
-        time.sleep(20)
+        PUBLISH_CHANGED.wait(20)
 
 
 def main() -> None:
@@ -2569,6 +2699,7 @@ def main() -> None:
         print(f"Read-only media origin is listening on http://{HOST}:{PUBLIC_MEDIA_PORT}")
     threading.Thread(target=reap_idle_sessions, daemon=True, name="channel-forge-idle-reaper").start()
     threading.Thread(target=restore_public_sharing, daemon=True, name="channel-forge-public-sharing").start()
+    sync_plex_movies_async(skip_recent=True)
     if not args.no_browser and sys.platform == "win32":
         import webview
         import ctypes

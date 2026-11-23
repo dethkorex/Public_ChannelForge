@@ -24,12 +24,12 @@ install_dependencies() {
   fi
   if command -v pacman >/dev/null 2>&1; then
     echo "Installing ChannelForge dependencies for Arch/Omarchy…"
-    "${elevate[@]}" pacman -S --needed python ffmpeg openssh python-pywebview python-gobject webkit2gtk-4.1 \
+    "${elevate[@]}" pacman -S --needed python ffmpeg openssh python-pywebview python-pillow python-gobject webkit2gtk-4.1 \
       gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
   elif command -v apt-get >/dev/null 2>&1; then
     echo "Installing ChannelForge dependencies for Debian/Ubuntu…"
     "${elevate[@]}" apt-get update
-    "${elevate[@]}" apt-get install -y python3 ffmpeg openssh-client python3-webview gir1.2-webkit2-4.1 \
+    "${elevate[@]}" apt-get install -y python3 ffmpeg openssh-client python3-webview python3-pil gir1.2-webkit2-4.1 \
       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
   else
     echo "Unsupported package manager. Install Python 3, FFmpeg, PyWebView, GTK and WebKitGTK, then rerun install.sh."
@@ -38,7 +38,7 @@ install_dependencies() {
 }
 
 has_desktop_runtime() {
-  /usr/bin/python3 -Es -c 'import webview, gi; gi.require_version("Gtk", "3.0"); gi.require_version("WebKit2", "4.1"); from gi.repository import Gtk, WebKit2' >/dev/null 2>&1 \
+  /usr/bin/python3 -Es -c 'import webview, gi, PIL; gi.require_version("Gtk", "3.0"); gi.require_version("WebKit2", "4.1"); from gi.repository import Gtk, WebKit2' >/dev/null 2>&1 \
     && command -v ffmpeg >/dev/null 2>&1 \
     && command -v ssh >/dev/null 2>&1 \
     && gst-inspect-1.0 avdec_h264 >/dev/null 2>&1 \

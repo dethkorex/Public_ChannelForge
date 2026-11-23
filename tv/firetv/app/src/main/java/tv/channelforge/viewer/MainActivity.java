@@ -290,7 +290,7 @@ public class MainActivity extends Activity {
             JSONObject item = items.getJSONObject(i);
             if (!"movie".equals(item.optString("type"))) continue;
             result.add(new VaultItem(item.optString("title", "Untitled"), item.optString("year"),
-                    item.optString("summary"), item.optString("poster_url"), item.getString("stream_url")));
+                    item.optString("summary"), item.optString("thumbnail_url", item.optString("poster_url")), item.getString("stream_url")));
         }
         return result;
     }

@@ -18,7 +18,7 @@ from pathlib import Path
 from linux_runtime import linux_install_command, linux_release_asset, start_webview
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.5.10"
+VERSION = "3.5.11"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -96,6 +96,9 @@ def local_creator() -> dict:
         "playlist_url": f"{LOCAL_CREATOR}/exports/channels.m3u",
         "status_url": f"{LOCAL_CREATOR}/api/public/channels",
         "vault_url": f"{LOCAL_CREATOR}/api/public/vault",
+        "public_id": status.get("creator_id") or config.get("creator_id", ""),
+        "public_playlist_url": (str(status.get("public_url") or config.get("public_url")).rstrip("/") + "/exports/channels.m3u"
+                                if status.get("public_url") or config.get("public_url") else ""),
         "logo_url": "", "local": True,
     }}
 
@@ -290,6 +293,20 @@ function refreshGuideFromStudios(){
         else renderFavorites();
     });
 }
+function sameStudio(local, remote){
+    return local.playlist_url===remote.playlist_url||local.public_playlist_url===remote.playlist_url
+        ||Boolean(local.public_id&&local.public_id===remote.id);
+}
+function creatorMedia(url, creator){
+    if(!url||!creator.local)return url||'';
+    try{
+        const target=new URL(url);
+        if(/^\/(?:api\/(?:plex|local)\/image$|user-assets\/|live\/|vault\/)/.test(target.pathname)){
+            return new URL(target.pathname+target.search,creator.status_url).href;
+        }
+    }catch(_error){}
+    return url;
+}
 function adoptCreators(creators){
     allCreators=creators;
     const current=creators.find(creator=>creator.playlist_url===selectedCreator?.playlist_url);
@@ -311,7 +328,7 @@ function adoptCreators(creators){
             const b=document.createElement('button');
             b.className='creator';
             b.innerHTML=(c.logo_url?'<img loading="lazy" src="'+esc(c.logo_url)+'" style="width:46px;height:46px;object-fit:contain;float:left;margin-right:12px">':'')+'<b>'+esc(c.name)+'</b><br><small>'+esc(c.description)+(c.local?' • THIS PC':'')+'</small>';
-            b.onclick=()=>{selectedCreator=c;showScreen('cinema');studio(c)};
+            b.onclick=()=>{selectedCreator=c;showScreen('cinema');studio(c,true)};
             fragment.append(b);
         }
         if(!creators.length)list.innerHTML='<span class="empty">No public creator studios are online right now.</span>';
@@ -347,7 +364,13 @@ async function scanStudio(creator){
         if(creator.status_url){
             const value=await json(creator.status_url,true,controller.signal);
             channels=(value.channels||[]).filter(channel=>channel.online)
-                .map(channel=>({...channel,creator_name:creator.name}));
+                .map(channel=>({...channel,creator_name:creator.name,
+                    stream_url:creatorMedia(channel.stream_url,creator),
+                    logo_url:creatorMedia(channel.logo_url,creator),
+                    programs:(channel.programs||[]).map(program=>({...program,
+                        poster_url:creatorMedia(program.poster_url,creator),
+                        backdrop_url:creatorMedia(program.backdrop_url,creator)}))
+                }));
         }else{
             const response=await creatorResponse(creator.playlist_url,true,controller.signal);
             channels=parsePlaylist(await response.text(),creator);
@@ -374,7 +397,7 @@ async function refreshDirectory(){
     const localLookup=localJson('/api/local-creator').then(value=>{
         local=value.available?value.creator:null;
         if(local){
-            adoptCreators([local,...allCreators.filter(c=>!c.local&&c.playlist_url!==local.playlist_url)]);
+            adoptCreators([local,...allCreators.filter(c=>!c.local&&!sameStudio(local,c))]);
             check(local);
         }
     }).catch(()=>{});
@@ -382,7 +405,7 @@ async function refreshDirectory(){
     try{
         const remotePromise=publicDirectory().catch(()=>{unavailable=true;return allCreators.filter(c=>!c.local)});
         const remote=await remotePromise;
-        adoptCreators([...(local?[local]:[]),...remote.filter(c=>c.playlist_url&&c.playlist_url!==local?.playlist_url)]);
+        adoptCreators([...(local?[local]:[]),...remote.filter(c=>c.playlist_url&&(!local||!sameStudio(local,c)))]);
         const pending=allCreators.filter(c=>!c.local);
         let next=0;
         await Promise.all(Array.from({length:Math.min(8,pending.length)},async()=>{
@@ -391,6 +414,7 @@ async function refreshDirectory(){
         await localLookup;
         if(local)await check(local);
         refreshGuideFromStudios();
+        if(selectedCreator&&!document.querySelector('.vault-layout').hidden&&Date.now()-vaultLoadedAt>60_000)studio(selectedCreator,true);
         const count=liveChannels.length;
         status.textContent=(count+' online channel'+(count===1?'':'s'))+(unavailable?' • directory unavailable':' • scanned '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}));
         return liveChannels;
@@ -404,7 +428,7 @@ async function scanChannels(){
     return directoryScan;
 }
 async function load(){return scanChannels()}
-let vaultController, loadingVaultUrl='', selectedVaultUrl='', vaultSearchTimer, selectedTape=null;
+let vaultController, loadingVaultUrl='', selectedVaultUrl='', vaultSearchTimer, selectedTape=null, vaultLoadedAt=0;
 const movieIndex=new WeakMap();
 const movieOrders=new Map();
 function indexVault(items){
@@ -445,7 +469,9 @@ function appendVaultBatch(amount=24){
     for(const x of vaultVisible.slice(vaultRenderCount,end)){
         const b=document.createElement('button');
         b.className='tape';
-        b.innerHTML='<span class="tape-ridge"></span>'+(x.poster_url?'<img loading="lazy" decoding="async" src="'+esc(x.poster_url)+'" alt="">':'<span class="empty">&nbsp;</span>')+'<span class="tape-label"><b>'+esc(x.title)+'</b><small><span>CF HOME VIDEO • VHS / HI-FI</span><mark>'+esc(x.year||'N/A')+'</mark></small></span><i>INSERT ▷</i>';
+        const thumbnail=x.thumbnail_url||x.poster_url;
+        b.innerHTML='<span class="tape-ridge"></span>'+(thumbnail?'<img loading="lazy" decoding="async" src="'+esc(thumbnail)+'" alt="">':'<span class="empty">&nbsp;</span>')+'<span class="tape-label"><b>'+esc(x.title)+'</b><small><span>CF HOME VIDEO • VHS / HI-FI</span><mark>'+esc(x.year||'N/A')+'</mark></small></span><i>INSERT ▷</i>';
+        b.querySelector('img')?.addEventListener('error',event=>hideFailedPoster(event.currentTarget,x.poster_url));
         b.onfocus=b.onmouseenter=()=>selectTape(x);
         b.onclick=()=>play(x.stream_url,{kind:'movie',title:x.title,movie:x});
         fragment.append(b);
@@ -469,41 +495,58 @@ function renderVaultPage(focusFirst=false){
     if(focusFirst)box.firstElementChild?.focus({preventScroll:true});
 }
 function renderVaultBatch(){renderVaultPage(false)}
-async function studio(c){
-    if(!c?.vault_url||selectedVaultUrl===c.vault_url||loadingVaultUrl===c.vault_url)return;
+async function studio(c, force=false){
+    if(!c?.vault_url||loadingVaultUrl===c.vault_url)return;
+    const updating=selectedVaultUrl===c.vault_url;
+    if(updating&&(!force||Date.now()-vaultLoadedAt<5000))return;
     vaultController?.abort();
     const controller=new AbortController();
     vaultController=controller;
     loadingVaultUrl=c.vault_url;
-    selectedVaultUrl='';
-    vaultItems=[];
-    indexVault(vaultItems);
-    selectedTape=null;
-    $('#movie-count').textContent='';
-    $('#selection').textContent='';
-    $('#vault').innerHTML='<span class="empty">Loading movies and posters…</span>';
+    if(!updating){
+        selectedVaultUrl='';
+        vaultItems=[];
+        indexVault(vaultItems);
+        selectedTape=null;
+        $('#movie-count').textContent='';
+        $('#selection').textContent='';
+        $('#vault').innerHTML='<span class="empty">Loading movies and posters…</span>';
+    }
     try{
         const value=await json(c.vault_url,false,controller.signal);
         if(controller.signal.aborted)return;
-        vaultItems=Array.isArray(value.items)?value.items.filter(item=>item?.type==='movie'):[];
+        vaultItems=Array.isArray(value.items)?value.items.filter(item=>item?.type==='movie')
+            .map(item=>({...item,poster_url:creatorMedia(item.poster_url,c),
+                thumbnail_url:creatorMedia(item.thumbnail_url,c),stream_url:creatorMedia(item.stream_url,c)})):[];
         indexVault(vaultItems);
         selectedVaultUrl=c.vault_url;
-        vaultSearch='';
-        vaultFilter=vaultGenre=vaultRating='all';
-        vaultSort='title';
-        $('#movie-search').value='';
+        vaultLoadedAt=Date.now();
+        if(!updating){
+            vaultSearch='';
+            vaultFilter=vaultGenre=vaultRating='all';
+            vaultSort='title';
+            $('#movie-search').value='';
+        }
         const genre=$('#movie-genre'),rating=$('#movie-rating');
         genre.innerHTML='<option value="all">ALL GENRES</option>'+[...new Set(vaultItems.flatMap(item=>item.genres||[]).filter(Boolean))].sort().map(value=>'<option value="'+esc(value)+'">'+esc(value).toUpperCase()+'</option>').join('');
         rating.innerHTML='<option value="all">ALL RATINGS</option>'+[...new Set(vaultItems.map(item=>item.content_rating||'Unrated'))].sort().map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join('');
-        $('#movie-sort').value='title';
+        genre.value=vaultGenre;
+        rating.value=vaultRating;
+        if(!genre.value)genre.value=vaultGenre='all';
+        if(!rating.value)rating.value=vaultRating='all';
+        $('#movie-sort').value=vaultSort;
         applyVaultFilters();
     }catch(error){
-        if(!controller.signal.aborted)$('#vault').innerHTML='<span class="empty">Could not load this studio: '+esc(error.message)+'</span>';
+        if(!controller.signal.aborted&&!updating)$('#vault').innerHTML='<span class="empty">Could not load this studio: '+esc(error.message)+'</span>';
     }finally{
         if(vaultController===controller)loadingVaultUrl='';
     }
 }
-function selectTape(x){if(selectedTape===x)return;selectedTape=x;$('#selection').innerHTML='<div class="vhs-box"><img src="'+esc(x.poster_url)+'" alt="'+esc(x.title)+' poster"><span>CHANNELFORGE HOME VIDEO</span></div><div><span class="eyebrow">SELECTED CASSETTE</span><h2>'+esc(x.title)+'</h2><b class="pink">'+esc(x.year)+'</b> • '+esc(x.type)+'<p>'+esc(x.summary||'No description supplied.')+'</p><button id="selected-play">▷ INSERT MOVIE</button><small>Insert this movie to begin playback. Poster and details come from the connected creator library.</small></div>';$('#selected-play').onclick=()=>play(x.stream_url,{kind:'movie',title:x.title,movie:x})}
+function hideFailedPoster(image,fallback=''){
+    if(fallback&&image.getAttribute('src')!==fallback){image.src=fallback;return}
+    image.style.visibility='hidden';
+}
+function selectTape(x){if(selectedTape===x)return;selectedTape=x;$('#selection').innerHTML='<div class="vhs-box">'+(x.poster_url?'<img decoding="async" src="'+esc(x.poster_url)+'" alt="'+esc(x.title)+' poster">':'<img alt="" style="visibility:hidden">')+'<span>CHANNELFORGE HOME VIDEO</span></div><div><span class="eyebrow">SELECTED CASSETTE</span><h2>'+esc(x.title)+'</h2><b class="pink">'+esc(x.year)+'</b> • '+esc(x.type)+'<p>'+esc(x.summary||'No description supplied.')+'</p><button id="selected-play">▷ INSERT MOVIE</button><small>Insert this movie to begin playback. Poster and details come from the connected creator library.</small></div>';$('#selection img')?.addEventListener('error',event=>hideFailedPoster(event.currentTarget));$('#selected-play').onclick=()=>play(x.stream_url,{kind:'movie',title:x.title,movie:x})}
 function liveEdge(v){if(!liveMode)return;if(hls?.liveSyncPosition&&Math.abs(v.currentTime-hls.liveSyncPosition)>6)v.currentTime=hls.liveSyncPosition;else if(v.buffered.length&&v.currentTime<v.buffered.end(v.buffered.length-1)-8)v.currentTime=v.buffered.end(v.buffered.length-1)-2}
 function setPlayerState(message,error=false,canRetry=error){
     const state=$('#player-state');
@@ -562,7 +605,8 @@ function play(url,media=null,continuing=false){
     })};
     if(window.Hls&&Hls.isSupported()){
         const options=liveMode?{startPosition:-1,liveSyncDurationCount:1,liveMaxLatencyDurationCount:3,maxLiveSyncPlaybackRate:1.35,backBufferLength:2,maxBufferLength:6,maxMaxBufferLength:10,startFragPrefetch:true,manifestLoadingTimeOut:10000,fragLoadingTimeOut:12000}:{startPosition:-1,backBufferLength:120,maxBufferLength:60};
-        const player=new Hls(options);hls=player;
+        // Start on the smallest rendition. HLS can raise quality after measuring the connection.
+        const player=new Hls({startLevel:0,...options});hls=player;
         let movieRecovery=false;
         player.on(Hls.Events.MANIFEST_PARSED,start);
         player.on(Hls.Events.ERROR,(_event,data)=>{

@@ -44,6 +44,8 @@ ChannelForge v3.5.9 fixes the Linux TV updater and launches both Linux apps with
 
 ChannelForge v3.5.10 shows channels as each studio responds, compresses large guide and movie catalogs, and lets you retry a stream from the player. Creators keep live segments available longer so viewers on slower connections can finish downloading them.
 
+ChannelForge v3.5.11 binds automatic worldwide sharing to the running Creator, while same-PC viewing uses the direct connection. The public relay offers an economical video rendition alongside 720p. **Publish worldwide when I save** is selected by default when creating a channel and can be turned off for a private studio.
+
 Demo previews (real installations replace these sample studios and posters with published creator data):
 
 ![ChannelForge TV home hub](preview/channel-forge-tv-v346-home.png)
@@ -96,7 +98,7 @@ channelforge-tv
 Download the `.pkg.tar.zst` file from the latest release, then run the following command from the download directory. The Creator and TV entries will appear in your app launcher.
 
 ```bash
-sudo pacman -U ./public-channelforge-3.5.10-1-any.pkg.tar.zst
+sudo pacman -U ./public-channelforge-3.5.11-1-any.pkg.tar.zst
 ```
 
 ### Universal Linux user installation
@@ -124,7 +126,7 @@ channelforge-tv
 On Arch Linux or Omarchy, install prerequisites if needed:
 
 ```bash
-sudo pacman -S --needed python git ffmpeg openssh python-pywebview python-gobject webkit2gtk-4.1 gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
+sudo pacman -S --needed python git ffmpeg openssh python-pywebview python-pillow python-gobject webkit2gtk-4.1 gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
 ```
 
 If `public-channelforge` is not found, add this to `~/.bashrc` or `~/.zshrc`, then open a new terminal:
