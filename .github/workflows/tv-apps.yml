@@ -36,10 +36,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Package Roku channel
         run: |
-          mkdir -p tv-release
-          cd tv/roku
-          zip -r ../../tv-release/ChannelForgeTV-Roku.zip manifest source components images
-          cd ../..
+          python3 scripts/package_roku.py tv-release/ChannelForgeTV-Roku.zip
           sha256sum tv-release/ChannelForgeTV-Roku.zip > tv-release/SHA256SUMS-Roku.txt
       - uses: actions/upload-artifact@v4
         with:

@@ -90,7 +90,7 @@ class TvAppTests(unittest.TestCase):
         release = {"tag_name": "v3.9.42", "body": "Playback and library improvements.",
                    "assets": [{"name": "ChannelForge_Setup.exe"}]}
         error = urllib.error.HTTPError(release_metadata.SOURCES[0], 429, "Too many requests", {}, None)
-        with mock.patch.object(release_metadata.urllib.request, "urlopen",
+        with mock.patch.object(tv, "VERSION", "3.6.2"), mock.patch.object(release_metadata.urllib.request, "urlopen",
                                side_effect=[error, FakeResponse(json.dumps(release).encode())]) as fetch:
             result = tv.latest_tv_release()
         self.assertTrue(result["update_available"])
@@ -142,7 +142,7 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("m.top.fallbackUrl", catalog)
         self.assertIn("mm_icon_focus_fhd=pkg:/images/channel-icon-fhd.png", manifest)
         self.assertIn("mm_icon_focus_hd=pkg:/images/channel-icon-hd.png", manifest)
-        self.assertIn("manifest source components images", workflow)
+        self.assertIn("scripts/package_roku.py tv-release/ChannelForgeTV-Roku.zip", workflow)
         self.assertNotIn("Public_ChannelForge.py", "\n".join(path.name for path in (root / "tv/roku").rglob("*")))
 
     def test_linux_packages_and_installer_include_creator_and_tv(self):
