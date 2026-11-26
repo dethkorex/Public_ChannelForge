@@ -19,6 +19,8 @@
     const [refresh, copy, close] = panel.querySelectorAll('button');
 
     function currentPlayback() {
+        const native = !creator && window.ChannelForgeNative?.diagnostics();
+        if (native) return native;
         const video = document.querySelector(creator ? '#tv-player' : '#player');
         const engine = creator ? hlsPlayer : hls;
         const level = engine?.levels?.[engine.currentLevel];
