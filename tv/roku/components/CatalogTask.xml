@@ -1,2 +1,14 @@
 <?xml version="1.0" encoding="utf-8" ?>
-<component name="CatalogTask" extends="Task"><interface><field id="url" type="string"/><field id="fallbackUrl" type="string"/><field id="content" type="node"/></interface><script type="text/brightscript" uri="CatalogTask.brs"/></component>
+<component name="CatalogTask" extends="Task">
+  <interface>
+    <field id="url" type="string"/>
+    <field id="fallbackUrl" type="string"/>
+    <field id="previousRows" type="array"/>
+    <field id="hasPrevious" type="boolean"/>
+    <field id="rows" type="array"/>
+    <field id="stale" type="boolean"/>
+    <field id="content" type="node"/>
+  </interface>
+  <script type="text/brightscript" uri="CatalogState.brs"/>
+  <script type="text/brightscript" uri="CatalogTask.brs"/>
+</component>

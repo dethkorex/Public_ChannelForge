@@ -2,4 +2,4 @@
 
 Native SceneGraph/BrightScript client for the hosted Creator Directory. It provides creator browsing, M3U loading, HLS playback, channel surfing, and a remote-first guide overlay.
 
-Package the `manifest`, `source`, and `components` folders as a ZIP for Roku developer sideload testing. Replace the `directory_url` manifest constant with the deployed directory URL. Roku Channel Store publication requires a Roku developer account, channel artwork, certification, privacy/terms URLs, and Roku review.
+From the repository root, run `python scripts/package_roku.py build/ChannelForgeTV-Roku.zip` to package the manifest, source, components and artwork for sideloading. MainScene configures the public directory URL. The [Roku alpha test and signing guide](../../docs/alpha4-roku.md) includes off-device checks, hardware playback tests and Store signing steps.

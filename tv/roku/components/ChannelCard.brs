@@ -1,7 +1,12 @@
 sub itemChanged()
   m.top.findNode("number").text = m.top.itemContent.shortDescriptionLine1
   m.top.findNode("title").text = m.top.itemContent.title
-  m.top.findNode("now").text = "LIVE NOW  •  Press OK to watch"
+  state = m.top.itemContent.availability
+  label = "Press OK to watch"
+  if state = "offline" then label = "Studio reports this channel is offline"
+  if state = "reconnecting" then label = "Reconnecting to the studio"
+  if state = "overloaded" then label = "Studio is busy"
+  m.top.findNode("now").text = label
 end sub
 sub focusChanged()
   if m.top.focusPercent > 0.5 then m.top.findNode("background").color = "0x225b5aff" else m.top.findNode("background").color = "0x0d1724ff"

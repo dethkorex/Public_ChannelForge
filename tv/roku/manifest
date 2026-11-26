@@ -1,9 +1,8 @@
-title=ChannelForge TV
-major_version=3
-minor_version=6
-build_version=2
+title=ChannelForge TV Alpha
+major_version=4
+minor_version=0
+build_version=0
 ui_resolutions=fhd
-bs_const=directory_url=https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog
 mm_icon_focus_fhd=pkg:/images/channel-icon-fhd.png
 mm_icon_focus_hd=pkg:/images/channel-icon-hd.png
 mm_icon_focus_sd=pkg:/images/channel-icon-sd.png

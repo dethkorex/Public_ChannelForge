@@ -18,17 +18,18 @@ sub load()
     end for
     m.top.notes = notes
   end if
-  installed = [3, 6, 2]
+  installedVersion = CreateObject("roAppInfo").GetVersion()
+  installed = installedVersion.Tokenize(".")
   candidate = Mid(release.tag_name, 2).Tokenize(".")
   for index = 0 to 2
     part = Val(candidate[index])
-    if part > installed[index]
+    if part > Val(installed[index])
       m.top.result = "UPDATE " + release.tag_name + " AVAILABLE  ✓"
       return
     end if
-    if part < installed[index] then exit for
+    if part < Val(installed[index]) then exit for
   end for
-  m.top.result = "UP TO DATE  ✓  v3.6.2"
+  m.top.result = "UP TO DATE  ✓  v" + installedVersion
 end sub
 
 function requestRelease(address as string) as object

@@ -8,24 +8,62 @@ sub load()
   transfer.EnableEncodings(true)
   transfer.SetMinimumTransferRate(128, 6)
   transfer.SetUrl(m.top.url)
-  payload = transfer.GetToString()
+  port = CreateObject("roMessagePort")
+  transfer.SetMessagePort(port)
+  payload = ""
+  if transfer.AsyncGetToString()
+    event = wait(7000, port)
+    if event <> invalid and event.GetResponseCode() = 200
+      payload = event.GetString()
+    else
+      transfer.AsyncCancel()
+    end if
+  end if
   root = CreateObject("roSGNode", "ContentNode")
   if m.top.onlineCatalog
-    catalog = ParseJson(payload)
-    if catalog <> invalid and catalog.channels <> invalid
+    catalog = invalid
+    if payload <> "" then catalog = ParseJson(payload)
+    identity = m.top.studioId
+    if identity = "" then identity = m.top.url
+    digest = CreateObject("roEVPDigest")
+    digest.Setup("sha256")
+    bytes = CreateObject("roByteArray")
+    bytes.FromAsciiString(identity)
+    cache = "cachefs:/channelforge-guide-" + digest.Process(bytes) + ".json"
+    if type(catalog) = "roAssociativeArray" and type(catalog.channels) = "roArray"
       m.top.catalogAvailable = true
+      if Len(payload) < 524288
+        WriteAsciiFile(cache, FormatJson({source: m.top.url, channels: catalog.channels}))
+      else
+        DeleteFile(cache)
+      end if
+    else
+      cached = ReadAsciiFile(cache)
+      if cached <> "" then catalog = ParseJson(cached)
+      if type(catalog) <> "roAssociativeArray" or catalog.source <> m.top.url then catalog = invalid
+      m.top.stale = true
+    end if
+    if type(catalog) = "roAssociativeArray" and type(catalog.channels) = "roArray"
       for each channel in catalog.channels
-        if channel.online = true
+        if type(channel) = "roAssociativeArray" and channel.stream_url <> invalid and channel.stream_url <> ""
           node = root.CreateChild("ContentNode")
-          node.title = channel.name
-          node.shortDescriptionLine1 = channel.number
-          node.hdPosterUrl = channel.logo_url
-          node.AddField("programs", "array", false)
-          if channel.programs <> invalid then node.programs = channel.programs
+          node.AddFields({channelId: "", availability: "standby", programs: [], continuous: false})
+          if channel.id <> invalid then node.channelId = channel.id
+          if channel.state <> invalid then node.availability = channel.state
+          if channel.name <> invalid then node.title = channel.name
+          if m.top.stale
+            node.title = node.title + " (reconnecting)"
+            node.availability = "reconnecting"
+          else if node.availability = "offline" or (channel.online = false and channel.state = invalid)
+            node.title = node.title + " (offline)"
+            node.availability = "offline"
+          end if
+          if channel.number <> invalid then node.shortDescriptionLine1 = channel.number.ToStr()
+          if channel.logo_url <> invalid then node.hdPosterUrl = channel.logo_url
+          if type(channel.programs) = "roArray" then node.programs = channel.programs
           node.url = channel.stream_url
           if channel.continuous_url <> invalid and channel.continuous_url <> ""
             node.url = channel.continuous_url
-            node.AddField("continuous", "boolean", false)
             node.continuous = true
           end if
           node.streamFormat = "hls"
@@ -36,6 +74,8 @@ sub load()
     return
   end if
   lines = payload.Tokenize(chr(10))
+  m.top.catalogAvailable = Left(payload.Trim(), 7) = "#EXTM3U"
+  m.top.stale = not m.top.catalogAvailable
   pending = ""
   number = 1
   for each raw in lines

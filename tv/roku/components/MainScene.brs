@@ -6,6 +6,9 @@ sub init()
   m.liveRetryTimer.observeField("fire", "resumePlayback")
   m.playbackDeadline = m.top.findNode("playbackDeadline")
   m.playbackDeadline.observeField("fire", "playbackTimedOut")
+  m.updates.text = "UPDATES  •  v" + CreateObject("roAppInfo").GetVersion()
+  m.progressTimer = m.top.findNode("progressTimer")
+  m.progressTimer.observeField("fire", "checkPlaybackProgress")
   m.upcomingTimer = m.top.findNode("upcomingTimer")
   m.upcomingTimer.observeField("fire", "showUpcomingBanner")
   m.programBoundaryTimer = m.top.findNode("programBoundaryTimer")
@@ -30,40 +33,127 @@ sub init()
   m.checkingOffline = false
   m.liveRetries = 0
   m.waitingForVideo = false
+  m.retryPending = false
+  m.resolvingLive = false
+  m.resolvingMovie = false
   m.upcomingDue = false
   m.upcomingShown = false
   m.catalogLoading = false
   m.creatorUrl = ""
+  m.creatorId = ""
+  m.movieKeys = {}
+  m.pairBase = CreateObject("roRegistrySection", "ChannelForge").Read("creator_url")
   refreshCatalog()
 end sub
 sub refreshCatalog()
-  if m.guide.visible = false or m.catalogLoading = true then return
+  if m.guide.visible then m.status.text = "Refreshing public creator studios…"
+  requestCatalog()
+end sub
+sub requestCatalog()
+  if m.catalogLoading then return
   m.catalogLoading = true
-  m.status.text = "Refreshing public creator studios…"
   task = CreateObject("roSGNode", "CatalogTask") : task.url = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog" : task.fallbackUrl = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json" : task.observeField("content", "catalogLoaded")
+  if m.directoryRows <> invalid
+    task.previousRows = m.directoryRows
+    task.hasPrevious = true
+  end if
   m.catalogTask = task
   task.control = "run"
 end sub
-sub catalogLoaded()
+sub catalogLoaded(event as object)
+  if not currentTask(event, m.catalogTask) then return
   m.catalogLoading = false
-  m.creators.content = m.catalogTask.content
-  m.status.text = m.catalogTask.content.GetChildCount().ToStr() + " creator studios online"
-  if m.catalogTask.content.GetChildCount() > 0
-    selected = 0
-    for index = 0 to m.catalogTask.content.GetChildCount() - 1
-      if m.catalogTask.content.GetChild(index).url = m.creatorUrl then selected = index
-    end for
-    loadCreator(selected)
-  else
-    registry = CreateObject("roRegistrySection", "ChannelForge")
-    paired = registry.Read("creator_url")
-    if paired <> ""
-      connectPaired(paired)
-    else
-      m.status.text = "No public studios are online. The TV app is standalone; optional direct pairing is available for recovery."
-      m.pair.SetFocus(true)
+  m.directoryRows = m.catalogTask.rows
+  root = event.GetData()
+  if m.pairBase <> "" then addPaired(root, m.pairBase)
+  m.creators.content = root
+  selected = -1
+  for index = 0 to root.GetChildCount() - 1
+    creator = root.GetChild(index)
+    if (m.creatorId <> "" and creator.studioId = m.creatorId) or creator.url = m.creatorUrl then selected = index
+  end for
+  if selected < 0 and not m.guide.visible then closeRemovedStudio()
+  if root.GetChildCount() > 0
+    if selected < 0 then selected = 0
+    m.creators.jumpToItem = selected
+    if m.guide.visible
+      loadCreator(selected)
+    else if m.resolvingMovie and m.activeMovie <> invalid and not m.ejectingMovie
+      m.resolvingMovie = false
+      creator = root.GetChild(selected)
+      suffix = "/api/public/vault"
+      endpoint = creator.shortDescriptionLine2
+      path = Instr(9, m.activeMovie.url, "/vault/")
+      if Right(endpoint, Len(suffix)) = suffix and path > 0 and Instr(path, m.activeMovie.url, "?") = 0
+        m.activeMovie.url = Left(endpoint, Len(endpoint) - Len(suffix)) + Mid(m.activeMovie.url, path)
+      end if
+      restartMovie()
+    else if m.resolvingLive
+      creator = root.GetChild(selected)
+      if creator.statusUrl <> invalid and creator.statusUrl <> ""
+        m.guideStatusUrl = creator.statusUrl + "?guide=brief"
+        refreshOnAirGuide()
+      else
+        m.resolvingLive = false
+        restartLive()
+      end if
+    else if m.liveItem <> invalid and not m.retryPending and m.video.state = "playing"
+      refreshOnAirGuide()
     end if
+    return
   end if
+  clearStudio()
+  if m.catalogTask.stale
+    m.status.text = "Directory unavailable. Retrying automatically."
+  else
+    m.status.text = "No studios are registered."
+  end if
+  m.pair.SetFocus(true)
+end sub
+function currentTask(event as object, task as dynamic) as boolean
+  if task = invalid then return false
+  return event.GetRoSGNode().IsSameNode(task)
+end function
+sub cancelContentTask(task as dynamic)
+  if task = invalid then return
+  task.unobserveField("content")
+  task.control = "stop"
+end sub
+sub clearStudio()
+  cancelContentTask(m.playlistTask)
+  cancelContentTask(m.vaultTask)
+  cancelContentTask(m.onAirGuideTask)
+  m.playlistTask = invalid
+  m.vaultTask = invalid
+  m.onAirGuideTask = invalid
+  m.channels.content = invalid
+  m.vault.content = invalid
+  m.selectedMovie = invalid
+  m.movieKeys = {}
+  m.creatorUrl = ""
+  m.creatorId = ""
+  m.guideStatusUrl = ""
+  m.top.findNode("movieDetails").visible = false
+  m.moreMovies.visible = false
+end sub
+sub closeRemovedStudio()
+  m.liveItem = invalid
+  m.resolvingLive = false
+  m.resolvingMovie = false
+  m.retryPending = false
+  m.activeMovie = invalid
+  m.guide.visible = true
+  m.video.control = "stop"
+  m.video.visible = false
+  m.bufferPanel.visible = false
+  m.liveRetryTimer.control = "stop"
+  m.upcomingTimer.control = "stop"
+  m.programBoundaryTimer.control = "stop"
+  m.tapeTimer.control = "stop"
+  m.top.findNode("tapeMotion").visible = false
+  m.ejectingMovie = false
+  clearPlaybackDeadline()
+  hideChannelBanner()
 end sub
 sub showPairing()
   dialog = CreateObject("roSGNode", "KeyboardDialog")
@@ -95,7 +185,18 @@ sub pairingSelected()
   dialog.close = true
 end sub
 sub connectPaired(base as string)
-  root = CreateObject("roSGNode", "ContentNode")
+  m.pairBase = base
+  root = m.creators.content
+  if root = invalid then root = CreateObject("roSGNode", "ContentNode")
+  index = addPaired(root, base)
+  m.creators.content = root
+  m.creators.jumpToItem = index
+  loadCreator(index)
+end sub
+function addPaired(root as object, base as string) as integer
+  for index = 0 to root.GetChildCount() - 1
+    if root.GetChild(index).url = base + "/exports/channels.m3u" then return index
+  end for
   creator = root.CreateChild("ContentNode")
   creator.title = "Paired Creator"
   creator.description = "Direct secure pairing"
@@ -103,26 +204,31 @@ sub connectPaired(base as string)
   creator.AddField("statusUrl", "string", false)
   creator.statusUrl = base + "/api/public/channels"
   creator.shortDescriptionLine2 = base + "/api/public/vault"
-  m.creators.content = root
-  loadCreator(0)
-end sub
+  return root.GetChildCount() - 1
+end function
 sub creatorSelected()
   loadCreator(m.creators.itemSelected)
 end sub
 sub loadCreator(index as integer)
+  if m.creators.content = invalid then return
   creator = m.creators.content.GetChild(index)
   if creator = invalid then return
-  switched = m.creatorUrl <> creator.url
+  id = ""
+  if creator.studioId <> invalid then id = creator.studioId
+  switched = m.creatorUrl <> creator.url or m.creatorId <> id
+  if switched then clearStudio()
+  m.creatorId = id
   m.creatorUrl = creator.url
   m.status.text = "Loading " + creator.title + "…"
   task = CreateObject("roSGNode", "PlaylistTask") : task.url = creator.url
+  if creator.studioId <> invalid then task.studioId = creator.studioId
   if creator.statusUrl <> invalid and creator.statusUrl <> ""
     task.url = creator.statusUrl + "?guide=brief"
     task.onlineCatalog = true
   end if
   m.guideStatusUrl = task.url
   if not task.onlineCatalog then m.guideStatusUrl = ""
-  if m.playlistTask <> invalid then m.playlistTask.unobserveField("content")
+  cancelContentTask(m.playlistTask)
   task.observeField("content", "playlistLoaded")
   m.playlistTask = task
   task.control = "run"
@@ -130,13 +236,14 @@ sub loadCreator(index as integer)
     m.selectedMovie = invalid
     m.top.findNode("movieDetails").visible = false
     m.moreMovies.visible = false
-    if m.vaultTask <> invalid then m.vaultTask.unobserveField("content")
+    cancelContentTask(m.vaultTask)
     vaultTask = CreateObject("roSGNode", "VaultTask") : vaultTask.url = creator.shortDescriptionLine2 : vaultTask.observeField("content", "vaultLoaded")
     m.vaultTask = vaultTask
     vaultTask.control = "run"
   end if
 end sub
-sub vaultLoaded()
+sub vaultLoaded(event as object)
+  if not currentTask(event, m.vaultTask) then return
   if not m.vaultTask.loaded
     m.moreMovies.text = "RETRY MOVIES"
     m.moreMovies.visible = true
@@ -144,20 +251,27 @@ sub vaultLoaded()
   end if
   if m.vaultTask.offset = 0 or m.vault.content = invalid
     m.vault.content = m.vaultTask.content
+    m.movieKeys = {}
+    for index = 0 to m.vault.content.GetChildCount() - 1
+      m.movieKeys[m.vault.content.GetChild(index).movieKey] = true
+    end for
   else
     current = m.vault.content
     page = m.vaultTask.content
     for index = 0 to page.GetChildCount() - 1
       movie = page.GetChild(index)
-      entry = current.CreateChild("ContentNode")
-      entry.title = movie.title
-      entry.hdPosterUrl = movie.hdPosterUrl
-      entry.description = movie.description
-      entry.url = movie.url
-      entry.streamFormat = movie.streamFormat
-      entry.shortDescriptionLine1 = movie.shortDescriptionLine1
+      if not m.movieKeys.DoesExist(movie.movieKey)
+        m.movieKeys[movie.movieKey] = true
+        entry = current.CreateChild("ContentNode")
+        entry.title = movie.title
+        entry.hdPosterUrl = movie.hdPosterUrl
+        entry.description = movie.description
+        entry.url = movie.url
+        entry.streamFormat = movie.streamFormat
+        entry.shortDescriptionLine1 = movie.shortDescriptionLine1
+      end if
     end for
-    m.vault.SetFocus(true)
+    if m.guide.visible then m.vault.SetFocus(true)
   end if
   m.moreMovies.visible = m.vaultTask.nextOffset > 0
   m.moreMovies.text = "MORE MOVIES"
@@ -170,18 +284,28 @@ sub loadMoreMovies()
   m.moreMovies.visible = false
   task = CreateObject("roSGNode", "VaultTask")
   task.url = m.vaultTask.url
+  cancelContentTask(m.vaultTask)
   task.offset = offset
   task.observeField("content", "vaultLoaded")
   m.vaultTask = task
   task.control = "run"
 end sub
-sub playlistLoaded()
+sub playlistLoaded(event as object)
+  if not currentTask(event, m.playlistTask) then return
+  if m.playlistTask.stale and m.playlistTask.content.GetChildCount() = 0 and m.lastGuideUrl = m.creatorUrl
+    m.status.text = "Studio unavailable. Showing the last guide."
+    return
+  end if
+  m.lastGuideUrl = m.creatorUrl
   firstGuide = m.channels.content = invalid
   m.channels.content = m.playlistTask.content
   m.status.text = m.playlistTask.content.GetChildCount().ToStr() + " channels ready"
+  if m.catalogTask <> invalid and m.catalogTask.stale then m.status.text += " • Directory incomplete"
+  if m.playlistTask.stale then m.status.text = "Studio unavailable. Reconnecting..."
   if firstGuide and m.guide.visible and not m.insertMovie.HasFocus() and not m.moreMovies.HasFocus() then m.channels.SetFocus(true)
 end sub
 sub vaultSelected()
+  if m.vault.content = invalid then return
   item = m.vault.content.GetChild(m.vault.itemSelected)
   if item = invalid then return
   m.selectedMovie = item
@@ -197,12 +321,17 @@ sub insertSelectedMovie()
   m.moviePosition = 0
   m.movieRetryPosition = 0
   m.movieRetries = 0
+  m.retryPending = false
+  m.resolvingLive = false
+  m.resolvingMovie = false
+  clearPlaybackDeadline()
   m.liveItem = invalid
   m.liveRetryTimer.control = "stop"
   m.upcomingTimer.control = "stop"
   m.programBoundaryTimer.control = "stop"
   hideChannelBanner()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
+  item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
   m.video.content = item : m.video.visible = true : m.guide.visible = false : m.video.SetFocus(true)
   animateTape(true)
 end sub
@@ -221,6 +350,9 @@ sub animateTape(inserting as boolean)
     m.top.findNode("insertTapeMotion").control = "start"
     m.tapeTimer.duration = 1.85
   else
+    clearPlaybackDeadline()
+    m.resolvingMovie = false
+    m.retryPending = false
     m.liveRetryTimer.control = "stop"
     m.video.control = "pause"
     m.top.findNode("ejectTapeMotion").control = "start"
@@ -276,6 +408,18 @@ sub playChannel(index as integer)
   if index >= m.channels.content.GetChildCount() then index = 0
   m.channels.jumpToItem = index
   item = m.channels.content.GetChild(index)
+  clearPlaybackDeadline()
+  m.resolvingLive = false
+  m.retryPending = false
+  cancelContentTask(m.onAirGuideTask)
+  m.onAirGuideTask = invalid
+  m.liveStableTime = invalid
+  if item.availability = "offline"
+    closeRemovedStudio()
+    m.status.text = item.title + " is currently offline."
+    m.channels.SetFocus(true)
+    return
+  end if
   m.liveRetryTimer.control = "stop"
   m.liveItem = item
   m.checkingOffline = false
@@ -283,12 +427,14 @@ sub playChannel(index as integer)
   m.liveProgramStop = 0
   updateLiveProgramStop()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
+  item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
+  item.live = item.continuous = true
   m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
   startPlaybackDeadline()
   showChannelBanner(item)
 end sub
 sub videoStateChanged()
-  if m.guide.visible then return
+  if m.guide.visible or m.ejectingMovie or m.resolvingLive or m.resolvingMovie or m.retryPending then return
   state = m.video.state
   if state = "playing"
     if m.crtWaiting = true and m.activeMovie <> invalid
@@ -299,14 +445,20 @@ sub videoStateChanged()
       m.tapeTimer.control = "start"
     end if
     clearPlaybackDeadline()
+    m.lastProgress = CreateObject("roTimespan")
+    m.lastPosition = m.video.position
+    m.progressTimer.control = "start"
     m.bufferPanel.visible = false
     if m.liveItem <> invalid and m.liveRetries > 0 then m.liveStableTime = CreateObject("roTimespan")
     if m.liveItem <> invalid then showChannelBanner(m.liveItem)
     if m.upcomingDue then showUpcomingBanner()
   else if state = "buffering"
+    m.progressTimer.control = "stop"
+    m.liveStableTime = invalid
     startPlaybackDeadline()
     if m.video.content <> invalid then showBuffering("BUFFERING VIDEO", m.video.content.title)
   else if state = "finished" and m.liveItem <> invalid
+    clearPlaybackDeadline()
     if m.liveItem.continuous = true
       clearPlaybackDeadline()
       m.programBoundaryTimer.control = "stop"
@@ -316,24 +468,10 @@ sub videoStateChanged()
     end if
   else if state = "finished" and m.activeMovie <> invalid and not m.ejectingMovie
     animateTape(false)
-  else if state = "error"
-    if m.crtWaiting = true then m.top.findNode("tapeMotion").visible = false
-    m.crtWaiting = false
+  else if state = "paused"
     clearPlaybackDeadline()
-    if m.activeMovie <> invalid and scheduleMovieRetry() then return
-    if m.liveItem <> invalid and m.liveRetries < 3
-      showBuffering("RECONNECTING TO THE STUDIO", m.liveItem.title)
-      m.liveRetries = m.liveRetries + 1
-      m.liveRetryTimer.duration = m.liveRetries * 2
-      m.liveRetryTimer.control = "start"
-    else
-      showBuffering("STREAM UNAVAILABLE", "Press Back to return to the guide.")
-      if m.liveItem <> invalid
-        m.checkingOffline = true
-        m.programBoundaryTimer.control = "stop"
-        refreshOnAirGuide()
-      end if
-    end if
+  else if state = "error"
+    playbackTimedOut()
   end if
 end sub
 sub startPlaybackDeadline()
@@ -343,27 +481,43 @@ sub startPlaybackDeadline()
 end sub
 sub clearPlaybackDeadline()
   m.playbackDeadline.control = "stop"
+  m.progressTimer.control = "stop"
   m.waitingForVideo = false
+end sub
+sub checkPlaybackProgress()
+  if not m.guide.visible and not m.ejectingMovie and m.video.state = "playing" and m.lastProgress <> invalid
+    if m.lastProgress.TotalSeconds() >= 20 then playbackTimedOut()
+  end if
 end sub
 sub playbackTimedOut()
   clearPlaybackDeadline()
   if m.crtWaiting = true then m.top.findNode("tapeMotion").visible = false
   m.crtWaiting = false
-  if m.guide.visible then return
+  if m.guide.visible or m.ejectingMovie or m.retryPending or m.resolvingLive or m.resolvingMovie then return
   m.liveRetryTimer.control = "stop"
   m.programBoundaryTimer.control = "stop"
+  m.upcomingTimer.control = "stop"
   m.video.control = "stop"
   if scheduleMovieRetry() then return
   if m.liveItem <> invalid and m.liveRetries < 2
     m.liveRetries = m.liveRetries + 1
+    m.retryPending = true
     showBuffering("RECONNECTING TO THE STUDIO", m.liveItem.title)
     m.liveRetryTimer.duration = m.liveRetries * 2
     m.liveRetryTimer.control = "start"
     return
   end if
   showBuffering("THE STUDIO DID NOT DELIVER VIDEO", "Press OK to retry or Back for the guide.")
+  if m.liveItem <> invalid
+    m.checkingOffline = true
+    refreshOnAirGuide()
+  end if
 end sub
 sub trackPlaybackPosition()
+  if m.video.state <> "playing" or m.guide.visible or m.ejectingMovie then return
+  if m.video.position = m.lastPosition then return
+  m.lastPosition = m.video.position
+  if m.lastProgress <> invalid then m.lastProgress.Mark()
   if m.liveItem <> invalid and m.liveRetries > 0 and m.video.state = "playing"
     if m.liveStableTime <> invalid and m.liveStableTime.TotalSeconds() >= 8 then m.liveRetries = 0
   end if
@@ -376,6 +530,7 @@ function scheduleMovieRetry() as boolean
   if m.movieRetries >= 2 then return false
   m.movieRetryPosition = m.moviePosition
   m.movieRetries = m.movieRetries + 1
+  m.retryPending = true
   showBuffering("RECONNECTING TO THE MOVIE", m.activeMovie.title)
   m.liveRetryTimer.duration = m.movieRetries * 2
   m.liveRetryTimer.control = "start"
@@ -383,15 +538,32 @@ function scheduleMovieRetry() as boolean
 end function
 sub resumePlayback()
   if m.guide.visible or m.ejectingMovie then return
+  m.retryPending = false
   if m.activeMovie = invalid
-    continueLive()
+    if m.liveItem = invalid then return
+    if m.liveRetries > 0 and m.creatorId <> ""
+      m.resolvingLive = true
+      requestCatalog()
+    else
+      continueLive()
+    end if
     return
   end if
+  if m.movieRetries > 0 and m.creatorId <> ""
+    m.resolvingMovie = true
+    requestCatalog()
+  else
+    restartMovie()
+  end if
+end sub
+sub restartMovie()
+  if m.activeMovie = invalid or m.guide.visible or m.ejectingMovie then return
   item = CreateObject("roSGNode", "ContentNode")
   item.url = m.activeMovie.url
   item.streamFormat = m.activeMovie.streamFormat
   item.title = m.activeMovie.title
   item.playStart = m.moviePosition
+  item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
   m.video.content = item
   m.video.control = "play"
   startPlaybackDeadline()
@@ -495,41 +667,66 @@ end sub
 
 sub refreshOnAirGuide()
   if m.guideStatusUrl = invalid or m.guideStatusUrl = "" then return
-  if m.onAirGuideTask <> invalid then m.onAirGuideTask.unobserveField("content")
+  cancelContentTask(m.onAirGuideTask)
   task = CreateObject("roSGNode", "PlaylistTask")
   task.url = m.guideStatusUrl
   task.onlineCatalog = true
+  task.studioId = m.creatorId
   task.observeField("content", "onAirGuideLoaded")
   m.onAirGuideTask = task
   task.control = "run"
 end sub
 
-sub onAirGuideLoaded()
-  if m.liveItem = invalid or m.guide.visible then return
+sub onAirGuideLoaded(event as object)
+  if not currentTask(event, m.onAirGuideTask) or m.liveItem = invalid or m.guide.visible then return
   guideContent = m.onAirGuideTask.content
+  resolving = m.resolvingLive
+  m.resolvingLive = false
   for index = 0 to guideContent.GetChildCount() - 1
     channel = guideContent.GetChild(index)
-    if channel.url = m.liveItem.url
+    if (channel.channelId <> "" and channel.channelId = m.liveItem.channelId) or channel.url = m.liveItem.url
+      if channel.availability = "offline"
+        if m.onAirGuideTask.catalogAvailable then channelOffline()
+        return
+      end if
       if m.checkingOffline then return
-      m.liveItem.programs = channel.programs
+      m.liveItem = channel
       updateLiveProgramStop()
+      if resolving then restartLive()
       if m.video.state = "playing" then showChannelBanner(m.liveItem)
       return
     end if
   end for
-  if m.checkingOffline and m.onAirGuideTask.catalogAvailable
-    showBuffering("THIS CHANNEL IS OFFLINE", "Press Back to return to the guide.")
+  if m.onAirGuideTask.catalogAvailable
+    channelOffline()
+  else if resolving
+    restartLive()
   end if
+end sub
+sub channelOffline()
+  clearPlaybackDeadline()
+  m.retryPending = false
+  m.liveRetryTimer.control = "stop"
+  m.programBoundaryTimer.control = "stop"
+  m.upcomingTimer.control = "stop"
+  m.video.control = "stop"
+  showBuffering("THIS CHANNEL IS OFFLINE", "Press OK to check again or Back for the guide.")
 end sub
 
 sub continueLive()
   if m.liveItem = invalid or m.guide.visible then return
   updateLiveProgramStop()
   refreshOnAirGuide()
+  restartLive()
+end sub
+sub restartLive()
+  if m.liveItem = invalid or m.guide.visible then return
   item = CreateObject("roSGNode", "ContentNode")
   item.url = m.liveItem.url
   item.title = m.liveItem.title
   item.streamFormat = m.liveItem.streamFormat
+  item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
+  item.live = m.liveItem.continuous = true
   m.video.control = "stop"
   m.video.content = item
   m.video.control = "play"
@@ -538,13 +735,16 @@ end sub
 function onKeyEvent(key as string, press as boolean) as boolean
   if not press then return false
   if m.guide.visible = false
+    if key = "OK" and m.bufferPanel.visible and (m.retryPending or m.resolvingLive or m.resolvingMovie) then return true
     if key = "OK" and m.bufferPanel.visible and not m.waitingForVideo and m.activeMovie <> invalid and not m.ejectingMovie and not m.top.findNode("tapeMotion").visible
-      m.movieRetries = 0
+      m.movieRetries = 1
       resumePlayback()
       return true
     end if
     if key = "OK" and m.bufferPanel.visible and not m.waitingForVideo and m.liveItem <> invalid
-      playChannel(m.channels.itemFocused)
+      m.checkingOffline = false
+      m.liveRetries = 1
+      resumePlayback()
       return true
     end if
     if key = "back" or (key = "OK" and m.liveItem <> invalid)
@@ -553,6 +753,10 @@ function onKeyEvent(key as string, press as boolean) as boolean
         return true
       end if
       m.liveItem = invalid
+      m.retryPending = false
+      m.resolvingLive = false
+      cancelContentTask(m.onAirGuideTask)
+      m.onAirGuideTask = invalid
       clearPlaybackDeadline()
       m.liveRetryTimer.control = "stop"
       m.upcomingTimer.control = "stop"
@@ -579,7 +783,7 @@ function onKeyEvent(key as string, press as boolean) as boolean
   if key = "left" and m.guide.visible and m.updates.HasFocus() then m.pair.SetFocus(true) : return true
   if key = "left" and m.guide.visible and not m.vault.HasFocus() then m.creators.SetFocus(true) : return true
   if key = "right" and m.guide.visible and not m.vault.HasFocus() then m.channels.SetFocus(true) : return true
-  if key = "down" and m.guide.visible and m.channels.HasFocus() and m.channels.itemFocused >= m.channels.content.GetChildCount() - 1 then m.vault.SetFocus(true) : return true
+  if key = "down" and m.guide.visible and m.channels.HasFocus() and m.channels.content <> invalid and m.channels.itemFocused >= m.channels.content.GetChildCount() - 1 then m.vault.SetFocus(true) : return true
   if key = "up" and m.guide.visible and m.vault.HasFocus() then m.channels.SetFocus(true) : return true
   if key = "up" and m.guide.visible and m.creators.HasFocus() then m.pair.SetFocus(true) : return true
   if key = "down" and m.guide.visible and m.updates.HasFocus() then m.channels.SetFocus(true) : return true
