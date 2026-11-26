@@ -240,25 +240,52 @@ def installation_lock():
 def install_binaries(folder: Path, keys: tuple[str, ...]) -> bool:
     folder.mkdir(parents=True, exist_ok=True)
     replacements = []
+    originals = {}
+    installed_paths = []
+    scratch = []
+    retain_backups = False
     try:
         for key in keys:
-            installed = app_target(folder, key)
-            if installed.is_file() and sha256_file(installed) == sha256_file(payload_for(key)):
-                continue
-            with tempfile.NamedTemporaryFile(dir=folder, prefix=f".{installed.name}.", suffix=".updating", delete=False) as file:
-                staged = Path(file.name)
-            replacements.append((installed, staged))
-            shutil.copy2(payload_for(key), staged)
-        replace_binaries(replacements)
-        for key in keys:
-            shutil.copy2(icon_for(key), folder / PRODUCTS[key]["icon"])
+            for installed, source in ((app_target(folder, key), payload_for(key)),
+                                      (folder / PRODUCTS[key]["icon"], icon_for(key))):
+                if installed.is_symlink():
+                    raise ValueError(f"Remove the symbolic link before updating {installed.name}.")
+                exists = installed.is_file()
+                if exists and sha256_file(installed) == sha256_file(source):
+                    continue
+                with tempfile.NamedTemporaryFile(dir=folder, prefix=f".{installed.name}.", suffix=".updating", delete=False) as file:
+                    staged = Path(file.name)
+                scratch.append(staged)
+                shutil.copy2(source, staged)
+                replacements.append((installed, staged))
+                if exists:
+                    with tempfile.NamedTemporaryFile(dir=folder, prefix=f".{installed.name}.", suffix=".rollback", delete=False) as file:
+                        original = Path(file.name)
+                    originals[installed] = original
+                    shutil.copy2(installed, original)
+        try:
+            replace_binaries(replacements, installed_paths)
+        except (OSError, ValueError):
+            try:
+                for installed in reversed(installed_paths):
+                    if installed in originals:
+                        os.replace(originals[installed], installed)
+                    else:
+                        installed.unlink(missing_ok=True)
+            except OSError as restore_error:
+                retain_backups = True
+                raise OSError(f"Could not roll back the update. Recovery files are in {folder}.") from restore_error
+            raise
     finally:
-        for _installed, staged in replacements:
-            staged.unlink(missing_ok=True)
-    return bool(replacements)
+        for path in scratch:
+            path.unlink(missing_ok=True)
+        if not retain_backups:
+            for path in originals.values():
+                path.unlink(missing_ok=True)
+    return any(path.suffix.lower() == ".exe" for path in installed_paths)
 
 
-def replace_binaries(replacements: list[tuple[Path, Path]]) -> None:
+def replace_binaries(replacements: list[tuple[Path, Path]], installed_paths: list[Path]) -> None:
     deadline = time.monotonic() + 120
     force_close_at = time.monotonic() + 8
     force_close_attempted = False
@@ -269,6 +296,7 @@ def replace_binaries(replacements: list[tuple[Path, Path]]) -> None:
         for installed, replacement in pending:
             try:
                 os.replace(replacement, installed)
+                installed_paths.append(installed)
             except PermissionError as exc:
                 last_error = exc
                 still_pending.append((installed, replacement))
@@ -276,7 +304,7 @@ def replace_binaries(replacements: list[tuple[Path, Path]]) -> None:
         if pending:
             if not force_close_attempted and time.monotonic() >= force_close_at:
                 force_close_attempted = True
-                stop_locked_channel_forge_apps([installed for installed, _replacement in pending])
+                stop_locked_channel_forge_apps([installed for installed, _replacement in pending if installed.suffix.lower() == ".exe"])
             time.sleep(0.5)
     if pending:
         raise ValueError(f"ChannelForge did not close in time to finish the update: {last_error}")
@@ -323,7 +351,14 @@ def clean_legacy_desktop_files(folder: Path, obsolete_folders: tuple[Path, ...] 
                     time.sleep(0.3)
     for root in roots | {folder}:
         for name in names:
-            (root / (name + ".updating")).unlink(missing_ok=True)
+            candidates = [root / (name + ".updating")]
+            candidates.extend(root.glob(f".{name}.*.updating"))
+            for path in candidates:
+                try:
+                    if path.is_file() and not path.is_symlink():
+                        path.unlink()
+                except OSError:
+                    continue
     if desktop != folder and any(path.parent == desktop for path in old_apps):
         for name in ("channel-forge-creator.ico", "channel-forge-tv.ico"):
             (desktop / name).unlink(missing_ok=True)
@@ -393,7 +428,7 @@ def apply_silent_update(target: Path, wait_pid: int, product: str | None = None)
             )
             register_installation(folder, keys, desktop_shortcuts, None)
             clean_legacy_desktop_files(folder, (source,))
-        elif target != app_target(folder, product):
+        else:
             clean_legacy_desktop_files(folder, include_desktop=False)
         if changed or target != app_target(folder, product):
             subprocess.Popen([str(app_target(folder, product))], cwd=str(folder))

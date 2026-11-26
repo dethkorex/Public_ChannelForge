@@ -4,16 +4,50 @@ let mediaLoadRequest = 0, workspaceLibraryRequest = 0, workspaceMediaRequest = 0
 let libraryRequest, libraryFetchedAt = 0;
 let builderLibraryKind = "all", builderLibraries = [], builderLibraryRequest = 0;
 const builderLibrarySelections = new Map();
+const builderPageSize = 100;
+let builderDisplayLimit = builderPageSize, builderReturnView = "channels", builderTrigger, builderSaving = false;
 const workspaceBatchSize = 96;
 let workspaceDisplayLimit = workspaceBatchSize;
 const $=s=>document.querySelector(s),escapeHtml=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const mediaThumb=(item,section)=>item.source==="local"?`/api/local/image?section=${encodeURIComponent(section)}&id=${encodeURIComponent(item.id)}`:`/api/plex/image?path=${encodeURIComponent(item.thumb)}&server=${encodeURIComponent(item.plex_server_id||"")}`;
+function mediaThumb(item, section) {
+  if (item.source === "local") return `/api/local/image?section=${encodeURIComponent(section)}&id=${encodeURIComponent(item.id)}`;
+  if (item.source === "jellyfin") return `/api/jellyfin/image?section=${encodeURIComponent(section)}&id=${encodeURIComponent(item.thumb)}`;
+  return `/api/plex/image?path=${encodeURIComponent(item.thumb)}&server=${encodeURIComponent(item.plex_server_id || "")}&size=poster`;
+}
 const nextChannelNumber=()=>String(Math.max(0,...state.channels.map(channel=>Number.parseInt(channel.number,10)||0))+1);
 if(window.Hls){Hls.DefaultConfig.manifestLoadingTimeOut=30000;Hls.DefaultConfig.fragLoadingTimeOut=30000}
 async function api(path,options={}){const response=await fetch(path,{headers:{"Content-Type":"application/json"},...options});const data=await response.json();if(!response.ok)throw new Error(data.error||`Request failed (${response.status})`);return data}
 function toast(message,error=false){const el=$("#toast");el.textContent=message;el.className=error?"show error":"show";setTimeout(()=>el.className="",3500)}
 function renderChannels(){const box=$("#channel-list");box.innerHTML=state.channels.length?state.channels.map(c=>{const logo=state.assets.find(a=>a.id===c.logo_asset_id),live=state.now_playing?.[c.id],finished=Date.parse(c.air_until)<=Date.now(),mode={ordered:"In order",shuffle:"Shuffled",shuffle_in_order:"Shuffle shows · episodes in order",marathon:"Series marathon",franchise:"Smart franchise timeline"}[c.playback_mode||"ordered"];return `<article class="channel-card" draggable="true" data-channel-card="${c.id}" data-search="${escapeHtml(`${c.name} ${c.number}`.toLowerCase())}">${logo?`<img class="channel-logo-small" src="/user-assets/${encodeURIComponent(logo.filename)}" alt="">`:""}<span class="drag-handle">⋮⋮</span><span class="channel-number">CH ${escapeHtml(c.number)} · ${finished?"OFFLINE":"LIVE"}</span><h3>${escapeHtml(c.name)}</h3><p class="meta">${finished?"Lineup finished":live?`Now playing: ${escapeHtml(live.title)}`:`${c.items.length} titles in rotation`} · ${mode}</p><div class="actions">${finished?`<button class="primary" data-channel-action="reair" data-id="${c.id}">Put back on TV</button>`:`<button class="primary" data-watch="${c.id}" data-view="watch">Test in player</button>`}<button data-channel-action="refresh" data-id="${c.id}">Refresh guide</button><button data-channel-action="shuffle" data-id="${c.id}">Reshuffle lineup</button><button data-edit="${c.id}">Edit</button><button class="danger" data-delete="${c.id}">Delete</button></div></article>`}).join(""):`<div class="empty">No channels yet. Add a local folder or connect Plex in Media Sources, then create your first channel.</div>`}
-function showView(view){if(view!=="watch")stopCreatorPreview();document.querySelectorAll(".view,nav button").forEach(element=>element.classList.remove("active"));$(`#${view}`)?.classList.add("active");document.querySelector(`nav button[data-view="${view}"]`)?.classList.add("active");window.scrollTo({top:0,behavior:"smooth"})}
+function builderIsOpen(){return $("#channel-builder").classList.contains("active")}
+function showView(view) {
+  const building = view === "channel-builder";
+  const navView = building ? "channels" : ["updates", "tools"].includes(view) ? "system" : view;
+  if (!building && builderIsOpen()) {
+    ++builderLibraryRequest;
+    ++mediaLoadRequest;
+  }
+  if (view !== "watch") stopCreatorPreview();
+  document.querySelectorAll(".view").forEach(element => element.classList.toggle("active", element.id === view));
+  for (const button of document.querySelectorAll(".studio-sidebar button[data-view]")) {
+    const current = button.dataset.view === navView;
+    button.classList.toggle("active", current);
+    if (current) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+  document.body.classList.toggle("building-channel", building);
+  window.scrollTo({top:0});
+}
+function selectSettingsPanel(panel) {
+  for (const button of document.querySelectorAll("[data-settings-panel]")) {
+    const selected = button.dataset.settingsPanel === panel;
+    button.setAttribute("aria-pressed", String(selected));
+    document.getElementById(button.getAttribute("aria-controls")).hidden = !selected;
+  }
+}
+for (const button of document.querySelectorAll("[data-settings-panel]")) {
+  button.addEventListener("click", () => selectSettingsPanel(button.dataset.settingsPanel));
+}
 function renderStudioSummary(){
   const count=state.channels.length;
   $("#overview-channel-count").textContent=`${count} channel${count===1?"":"s"}`;
@@ -21,7 +55,7 @@ function renderStudioSummary(){
   const checks=[{name:"Plex connection",ok:state.config.token_saved,detail:state.config.plex_profile?.server_name||"Not connected"},{name:"Standalone encoder",ok:state.playback_engine?.available!==false,detail:state.playback_engine?.source||"FFmpeg HLS engine"},{name:"Hosted guide",ok:true,detail:`${state.channels.length} channels published`},{name:"Branding library",ok:state.assets.length>0,detail:`${state.assets.length} assets available`}].map(check=>`<article class="${check.ok?"ok":""}"><span class="check-icon">${check.ok?"✓":"!"}</span><div><b>${check.name}</b><small>${escapeHtml(check.detail)}</small></div></article>`).join("");if($("#system-checks").innerHTML!==checks)$("#system-checks").innerHTML=checks;const now=state.channels.map(channel=>{const live=state.now_playing?.[channel.id],logo=state.assets.find(asset=>asset.id===channel.logo_asset_id);return `<article>${logo?`<img class="channel-logo-small" src="/user-assets/${encodeURIComponent(logo.filename)}" alt="">`:""}<span class="channel-number">CH ${escapeHtml(channel.number)}</span><h3>${escapeHtml(channel.name)}</h3><p>${escapeHtml(live?.title||"Ready to play")}</p><div class="actions"><button data-watch="${channel.id}" data-view="watch">Watch now</button><button data-edit="${channel.id}">Edit lineup</button></div></article>`}).join("")||'<div class="empty">Create a channel to begin your live lineup.</div>';if($("#overview-now-playing").innerHTML!==now)$("#overview-now-playing").innerHTML=now;const artwork=state.channels.map(channel=>{const logo=state.assets.find(asset=>asset.id===channel.logo_asset_id);return `<article class="guide-artwork-card">${logo?`<img src="/user-assets/${encodeURIComponent(logo.filename)}" alt="">`:'<span class="poster-placeholder">CF</span>'}<b>CH ${escapeHtml(channel.number)} · ${escapeHtml(channel.name)}</b><small>${logo?"Published in XMLTV":"Uses text identity — assign a logo in Channels"}</small></article>`}).join("");if($("#guide-artwork-grid").innerHTML!==artwork)$("#guide-artwork-grid").innerHTML=artwork}
 function libraryOptions(items) {
   return '<option value="">Choose a library</option>' + items.map(item =>
-    `<option value="${escapeHtml(item.key)}">${escapeHtml(item.title)} (${item.source === "local" ? "local folder" : escapeHtml(item.type)})</option>`
+    `<option value="${escapeHtml(item.key)}">${escapeHtml(item.title)} (${escapeHtml(({local: "local folder", jellyfin: "Jellyfin"})[item.source] || item.type)})</option>`
   ).join("");
 }
 function requestLibraries(force = false) {
@@ -84,9 +118,10 @@ function renderWorkspaceMedia(){
 function updateMediaSelection() {
   const choices = [...selectedLineup.values()];
   const videos = choices.reduce((total, choice) => total + choice.items.length, 0);
-  $("#selection-count").textContent = `${choices.length} selected · ${videos} playable videos`;
+  $("#selection-count").textContent = `${choices.length.toLocaleString()} selected`;
+  $("#selection-count").title = `${videos.toLocaleString()} playable videos`;
   const list = $("#selected-media-list");
-  list.innerHTML = choices.length ? choices.map((choice, index) => `
+  if (!$("#selected-media-panel").hidden) list.innerHTML = choices.length ? choices.map((choice, index) => `
     <button type="button" data-remove-media="${index}">
       <span><b>${escapeHtml(choice.title)}</b>
       <small>${choice.type === "show" ? choice.items.length + " episodes" : escapeHtml(choice.type)}${choice.year ? " · " + escapeHtml(choice.year) : ""}</small></span><i>×</i>
@@ -95,8 +130,40 @@ function updateMediaSelection() {
     input.checked = selectedLineup.has(mediaChoices[Number(input.value)]?.key);
   });
 }
-async function diagnosePlayback(channelId){for(let attempt=0;attempt<12;attempt++){await new Promise(resolve=>setTimeout(resolve,1000));try{const status=await api(`/api/playback/status?channel=${encodeURIComponent(channelId)}`);if(status.error){$("#playback-status").className="danger";$("#playback-status").textContent=status.error;return}if($("#tv-player").readyState>=3)return}catch{return}}}
-function setBuilderStep(step){builderStep=Math.max(1,Math.min(4,step));document.querySelectorAll("[data-builder-step]").forEach(section=>section.classList.toggle("active",Number(section.dataset.builderStep)===builderStep));document.querySelectorAll(".builder-steps span").forEach((dot,index)=>{dot.classList.toggle("active",index+1===builderStep);dot.classList.toggle("done",index+1<builderStep)});$("#builder-back").hidden=builderStep===1;$("#builder-next").hidden=builderStep===4;$("#builder-save").hidden=builderStep!==4;if(builderStep===4){const choices=[...selectedLineup.values()],episodes=choices.reduce((count,choice)=>count+choice.items.length,0);$("#builder-summary").innerHTML=`<b>CH ${escapeHtml($("#channel-number").value)} · ${escapeHtml($("#channel-name").value)}</b><p>${choices.length} selected shows/titles · ${episodes} playable videos · ${escapeHtml($("#playback-mode").selectedOptions[0]?.textContent||"")}</p><small class="muted">Selecting a show automatically adds every playable episode in season and episode order.</small>`}}
+async function diagnosePlayback(channelId) {
+  const generation = previewGeneration;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (generation !== previewGeneration || activeChannel !== channelId || $("#tv-player").readyState >= 3) return;
+    try {
+      const status = await api(`/api/playback/status?channel=${encodeURIComponent(channelId)}`);
+      if (generation !== previewGeneration) return;
+      if (status.error) {
+        $("#playback-status").className = "danger";
+        $("#playback-status").textContent = status.error;
+        return;
+      }
+    } catch { return; }
+  }
+}
+function setBuilderStep(step) {
+  builderStep = step;
+  document.querySelectorAll("[data-builder-step]").forEach(section => section.classList.toggle("active", Number(section.dataset.builderStep) === step));
+  const editing = Boolean($("#channel-id").value);
+  $("#dialog-title").textContent = [editing ? "Edit channel" : "Create channel", "Name & playback", "Channel branding", "Review channel"][step - 1];
+  $("#builder-description").textContent = ["Build a custom channel from your Plex or local libraries.", "Choose the channel name, number, and lineup order.", "Choose how your channel looks in the guide and player.", "Confirm your lineup and sharing settings."][step - 1];
+  $("#selection-count").hidden = step !== 1;
+  $("#builder-back").hidden = step === 1;
+  $("#builder-next").hidden = step === 4;
+  $("#builder-save").hidden = step !== 4;
+  if (step === 4) {
+    const choices = [...selectedLineup.values()];
+    const videos = choices.reduce((count, choice) => count + choice.items.length, 0);
+    $("#builder-summary").innerHTML = `<b>CH ${escapeHtml($("#channel-number").value)} · ${escapeHtml($("#channel-name").value)}</b><p>${choices.length} selected · ${videos} playable videos</p><small>${escapeHtml($("#playback-mode").selectedOptions[0]?.textContent || "")}</small>`;
+  }
+  $("#dialog-title").focus({preventScroll:true});
+  window.scrollTo({top:0});
+}
 function renderAssets(){const box=$("#asset-list");box.innerHTML=state.assets.length?state.assets.map(a=>`<article class="asset-card"><img loading="lazy" decoding="async" class="asset-preview" src="/user-assets/${encodeURIComponent(a.filename)}" alt="${escapeHtml(a.name)}"><div class="asset-body"><h4>${escapeHtml(a.name)}</h4><span class="meta">${escapeHtml(a.kind.replaceAll("-"," "))}${a.built_in?" · starter pack":""}</span><div class="actions"><a class="button" href="/user-assets/${encodeURIComponent(a.filename)}" download>Download</a>${a.built_in?"":`<button class="danger" data-delete-asset="${a.id}">Delete</button>`}</div></div></article>`).join(""):`<div class="empty">No artwork yet. Generate a design or upload your own.</div>`}
 function renderTools(){const box=$("#tool-list");box.innerHTML=state.tools.length?state.tools.map(t=>`<article><h3>${escapeHtml(t.name)}</h3><p>${escapeHtml(t.description)}</p><button data-tool="${t.id}" ${t.disabled?"disabled":""}>Run tool</button></article>`).join(""):`<div class="empty">No tools installed. See PLUGIN_DEVELOPMENT.md to create one.</div>`}
 function renderPlexProfile(){const profile=state.config.plex_profile||{},box=$("#plex-profile");box.innerHTML=state.config.token_saved?`<span class="plex-dot"></span><div><b>${escapeHtml(profile.server_name||"Plex connected")}</b><small>${profile.username?`Signed in as ${escapeHtml(profile.username)} · `:""}${profile.version?`Server ${escapeHtml(profile.version)}`:"Connection verified"}</small></div>`:`<span class="plex-dot offline"></span><div><b>Plex not connected</b><small>Sign in to index movies and build channels.</small></div>`}
@@ -157,9 +224,9 @@ async function startPlexSignin(event){
         if(Date.now()-started>(signin.expires_in||900)*1000){clearInterval(plexSigninTimer);plexSigninTimer=0;button.disabled=false;status.textContent="The Plex sign-in expired. Select Sign in with Plex to try again."}
       }catch(error){clearInterval(plexSigninTimer);plexSigninTimer=0;button.disabled=false;status.textContent=error.message;toast(error.message,true)}
     },1200);
-  }catch(error){if(popup&&!popup.closed)popup.close();button.disabled=false;status.textContent=error.message;toast(error.message,true)}
+  }catch(error){button.disabled=false;status.textContent=error.message;toast(error.message,true)}
 }
-async function checkForUpdate(notifyOnLaunch=false){const status=$("#update-status"),button=$("#install-update");status.textContent="Checking for updates…";button.hidden=true;try{updateRelease=await api("/api/update");$("#installed-version").textContent=`v${updateRelease.current_version}`;const notes=$("#update-notes");notes.textContent=updateRelease.notes||"Playback and reliability improvements.";notes.hidden=false;if(updateRelease.update_available){status.textContent=`Version v${updateRelease.latest_version} is available.`;button.textContent="Download and install";button.hidden=false;if(notifyOnLaunch){showView("updates");$("#workspace-title").textContent="Updates";if(confirm(`ChannelForge v${updateRelease.latest_version} is available. Download, verify, and install it now?`))installUpdate(true)}}else{status.textContent="You have the latest version."}}catch(error){status.textContent=error.message;toast(error.message,true)}}
+async function checkForUpdate(notifyOnLaunch=false){const status=$("#update-status"),button=$("#install-update");status.textContent="Checking for updates…";button.hidden=true;try{updateRelease=await api("/api/update");$("#installed-version").textContent=`v${updateRelease.current_version}`;const notes=$("#update-notes");notes.textContent=updateRelease.notes||"Playback and reliability improvements.";notes.hidden=false;if(updateRelease.update_available){status.textContent=`Version v${updateRelease.latest_version} is available.`;button.textContent="Download and install";button.hidden=false;if(notifyOnLaunch&&!builderIsOpen()){showView("updates");if(confirm(`ChannelForge v${updateRelease.latest_version} is available. Download, verify, and install it now?`))installUpdate(true)}}else{status.textContent="You have the latest version."}}catch(error){status.textContent=error.message;toast(error.message,true)}}
 function formatBytes(bytes){if(!bytes)return "0 B";const units=["B","KB","MB","GB"],power=Math.min(Math.floor(Math.log(bytes)/Math.log(1024)),units.length-1);return `${(bytes/1024**power).toFixed(power?1:0)} ${units[power]}`}
 async function installUpdate(skipConfirmation=false){if(!updateRelease?.update_available)return;if(!skipConfirmation&&!confirm(`Download, verify, and install ChannelForge v${updateRelease.latest_version} in place?`))return;const button=$("#install-update"),wrap=$("#update-progress-wrap"),bar=$("#update-progress");button.disabled=true;button.textContent="Update in progress…";wrap.hidden=false;bar.value=0;try{const started=await api("/api/update/start",{method:"POST",body:JSON.stringify({launch:true})});while(true){const job=await api(`/api/update/progress?id=${encodeURIComponent(started.job_id)}`),labels={starting:"Preparing update…",checking:"Checking release…",checksum:"Downloading checksum…",downloading:"Downloading update…",verifying:"Verifying SHA-256…",installing:"Installing verified update…",complete:"Update verified",error:"Update failed"};$("#update-stage").textContent=labels[job.stage]||job.stage;$("#update-percent").textContent=`${Math.round(job.percent||0)}%`;bar.value=job.percent||0;$("#update-bytes").textContent=job.total?`${formatBytes(job.downloaded)} of ${formatBytes(job.total)}`:job.stage==="verifying"?"Checking downloaded file integrity…":"Contacting GitHub…";if(job.status==="error")throw new Error(job.error||"Update failed.");if(job.status==="complete"){const result=job.result,applied=result.can_launch;button.textContent=applied?"Restarting to update…":"Downloaded — install required";$("#update-status").textContent=applied?"Download verified. ChannelForge will restart and replace the existing application automatically; the setup wizard will not reopen.":"Download verified, but the running version has not changed yet. Complete the installation below.";if(!applied){if(result.install_error)$("#update-status").textContent="Automatic installation could not finish. Use the verified command below.";$("#install-command").textContent=result.command;$("#install-instructions").hidden=false}toast(`Update v${result.version} downloaded and verified.`);break}await new Promise(resolve=>setTimeout(resolve,400))}}catch(error){button.disabled=false;button.textContent="Download and install";$("#update-stage").textContent="Update failed";$("#update-bytes").textContent=error.message;toast(error.message,true)}}
 function renderWatchChannels(){const box=$("#watch-channels"),onAir=state.channels.filter(channel=>!(Date.parse(channel.air_until)<=Date.now()));box.innerHTML=onAir.length?onAir.map(channel=>{const logo=state.assets.find(asset=>asset.id===channel.logo_asset_id),live=state.now_playing?.[channel.id];return `<div class="watch-channel-row"><button class="watch-channel ${activeChannel===channel.id?"active":""}" data-watch="${channel.id}">${logo?`<img src="/user-assets/${encodeURIComponent(logo.filename)}" alt="">`:`<span class="mark">${escapeHtml(channel.number)}</span>`}<span><b>${escapeHtml(channel.name)}</b><small>${escapeHtml(live?.title||"Ready to watch")}</small></span></button><button data-edit="${channel.id}" title="Edit ${escapeHtml(channel.name)}" aria-label="Edit ${escapeHtml(channel.name)}">Edit</button><button class="watch-delete danger" data-delete="${channel.id}" title="Delete ${escapeHtml(channel.name)}" aria-label="Delete ${escapeHtml(channel.name)}">Delete</button></div>`}).join(""):'<div class="empty">No channels on air. Open Channels to create or air a lineup.</div>'}
@@ -197,7 +264,43 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) stopCreatorPreview();
 });
 function watchChannel(channelId){const channel=state.channels.find(item=>item.id===channelId);if(!channel||document.hidden)return;const generation=++previewGeneration;activeChannel=channelId;$("#playback-status").textContent="";clearTimeout(retuneTimer);renderWatchChannels();applyChannelOverlays(channel);const live=state.now_playing?.[channel.id];$("#playing-channel").textContent=`CH ${channel.number} · ${channel.name}`;$("#playing-title").textContent=live?.title||"Live stream";if(live){const start=Date.parse(live.start),stop=Date.parse(live.stop),percent=Math.max(0,Math.min(100,(Date.now()-start)/(stop-start)*100));$("#playing-progress").style.width=`${percent}%`;$("#playing-time").textContent=`${new Date(start).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})} – ${new Date(stop).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`;retuneTimer=setTimeout(async()=>{await refresh();if(generation===previewGeneration&&!document.hidden)watchChannel(channelId)},Math.max(1000,stop-Date.now()+500))}const video=$("#tv-player"),url=`/live/${encodeURIComponent(channelId)}.m3u8`;$("#player-placeholder").hidden=true;video.style.display="block";video.pause();video.removeAttribute("src");video.load();if(hlsPlayer){hlsPlayer.destroy();hlsPlayer=null}if(window.Hls&&Hls.isSupported()){hlsPlayer=new Hls({enableWorker:true,startPosition:-1,liveSyncDurationCount:3});hlsPlayer.loadSource(url);hlsPlayer.attachMedia(video);hlsPlayer.on(Hls.Events.MANIFEST_PARSED,()=>{if(generation===previewGeneration&&!document.hidden)video.play().catch(()=>{})});hlsPlayer.on(Hls.Events.ERROR,(_event,data)=>{if(generation!==previewGeneration||!data.fatal)return;if(data.type===Hls.ErrorTypes.MEDIA_ERROR){hlsPlayer.recoverMediaError();return}showPlaybackError(channelId,`Playback error: ${data.details}`)})}else if(video.canPlayType("application/vnd.apple.mpegurl")){video.src=url;video.play().catch(()=>{})}else{showPlaybackError(channelId,"This browser cannot play HLS video.")}}
-async function refresh(){state=await api("/api/status");$("#version").textContent=`v${state.version}`;$("#plex-url").value=state.config.plex_url;$("#guide-hours").value=state.config.guide_hours;$("#bind-host").value=state.config.bind_host;$("#public-url").value=state.config.public_url;$("#token-status").textContent=state.config.token_saved?"Connected and ready.":"Plex is optional and not connected.";const hasMedia=state.config.token_saved||state.config.local_libraries?.length;$("#step-connect-status").textContent=state.config.local_libraries?.length?`${state.config.local_libraries.length} local folder(s) ready${state.config.token_saved?" · Plex connected":""}.`:state.config.token_saved?`Connected to ${state.config.plex_profile?.server_name||"Plex"}.`:"Add a local folder or connect Plex.";$("#data-dir").textContent=`Application data: ${state.data_dir}`;const base=state.server_base||location.origin;$("#xmltv-url").textContent=`${base}/exports/guide.xml`;$("#m3u-url").textContent=`${base}/exports/channels.m3u`;renderChannels();renderWatchChannels();renderAssets();renderTools();renderPlexProfile();renderLocalLibraries();renderStudioSummary();if(document.querySelector("#watch.active"))loadGuide();const onboarding=$("#plex-onboarding");if(hasMedia&&onboarding.open)onboarding.close()}
+function mediaSourceLabels(config) {
+  const labels = [];
+  const jellyfinCount = config.jellyfin_connections?.length || 0;
+  const folders = config.local_libraries?.length || 0;
+  if (config.token_saved) labels.push("Plex");
+  if (jellyfinCount) labels.push(jellyfinCount === 1 ? "Jellyfin" : `${jellyfinCount} Jellyfin servers`);
+  if (folders) labels.push(`${folders} local folder${folders === 1 ? "" : "s"}`);
+  return labels;
+}
+function renderJellyfinConnections() {
+  const connections = state.config.jellyfin_connections || [];
+  $("#jellyfin-connections").innerHTML = connections.map(connection =>
+    `<article class="local-library-row"><div><b>${escapeHtml(connection.name)}</b><small>${escapeHtml(connection.username)} · ${escapeHtml(connection.url)}</small></div><button type="button" class="danger" data-delete-jellyfin="${escapeHtml(connection.id)}">Disconnect</button></article>`
+  ).join("") || '<p class="muted">No Jellyfin servers connected yet.</p>';
+}
+async function refresh() {
+  state = await api("/api/status");
+  $("#version").textContent = `v${state.version}`;
+  $("#plex-url").value = state.config.plex_url;
+  $("#guide-hours").value = state.config.guide_hours;
+  $("#bind-host").value = state.config.bind_host;
+  $("#public-url").value = state.config.public_url;
+  $("#token-status").textContent = state.config.token_saved ? "Connected and ready." : "Plex is optional and not connected.";
+  const sources = mediaSourceLabels(state.config);
+  const sourceSummary = sources.join(" + ");
+  $("#step-connect-status").textContent = sourceSummary || "Add a local folder or connect Plex or Jellyfin.";
+  $("#topbar-status").textContent = $("#sidebar-source-status").textContent = sourceSummary || "No media source";
+  $("#backup-count").textContent = `${state.backup_count || 0} backups available`;
+  $("#data-dir").textContent = `Application data: ${state.data_dir}`;
+  const base = state.server_base || location.origin;
+  $("#xmltv-url").textContent = `${base}/exports/guide.xml`;
+  $("#m3u-url").textContent = `${base}/exports/channels.m3u`;
+  renderChannels(); renderWatchChannels(); renderAssets(); renderTools(); renderPlexProfile();
+  renderLocalLibraries(); renderJellyfinConnections(); renderStudioSummary();
+  if ($("#watch.active")) loadGuide();
+  if (sources.length && $("#plex-onboarding").open) $("#plex-onboarding").close();
+}
 function resetBuilderFilters() {
   $("#media-filter").value = "";
   $("#smart-genre").value = $("#smart-rating").value = "all";
@@ -228,7 +331,7 @@ async function loadBuilderLibraries(preferred) {
   status.textContent = "Finding connected and shared libraries…";
   let finished = false;
   const show = items => {
-    if (request !== builderLibraryRequest || !$("#channel-dialog").open) return;
+    if (request !== builderLibraryRequest || !builderIsOpen()) return;
     builderLibraries = items;
     setBuilderLibraries(preferred);
   };
@@ -239,26 +342,59 @@ async function loadBuilderLibraries(preferred) {
   try {
     const items = await requestLibraries();
     finished = true;
-    if (request !== builderLibraryRequest || !$("#channel-dialog").open) return;
+    if (request !== builderLibraryRequest || !builderIsOpen()) return;
     show(items);
     status.textContent = "";
   } catch (error) {
     finished = true;
-    if (request === builderLibraryRequest && $("#channel-dialog").open) status.textContent = error.message;
+    if (request === builderLibraryRequest && builderIsOpen()) status.textContent = error.message;
   }
 }
 function smartMatches(choice){const genre=$("#smart-genre").value.toLocaleLowerCase(),rating=$("#smart-rating").value.toLocaleLowerCase(),min=Number($("#smart-year-min").value)||0,max=Number($("#smart-year-max").value)||9999,year=Number(choice.year)||0,genres=(choice.genres||[]).map(value=>String(value).toLocaleLowerCase()),contentRating=String(choice.content_rating||"Unrated").toLocaleLowerCase();return(genre==="all"||genres.includes(genre))&&(rating==="all"||contentRating===rating)&&(!year||year>=min&&year<=max)}
-function mediaSearchMatches(choice){const query=$("#media-filter").value.trim().toLocaleLowerCase();return!query||`${choice.title} ${choice.year||""} ${choice.content_rating||""} ${(choice.genres||[]).join(" ")} ${choice.summary||""}`.toLocaleLowerCase().includes(query)}
-function filteredMediaChoices(){return mediaChoices.filter(choice=>smartMatches(choice)&&mediaSearchMatches(choice))}
-function applyMediaFilters(){const visible=new Set(filteredMediaChoices());document.querySelectorAll("#media-list .media-item").forEach((row,index)=>row.hidden=!visible.has(mediaChoices[index]));return [...visible]}
-function refreshSmartMatches(){if(!mediaChoices.length){$("#smart-match-count").textContent="Load a library to see matches.";return}const matches=applyMediaFilters();$("#smart-match-count").textContent=`Showing ${matches.length} of ${mediaChoices.length} shows/titles · ${matches.reduce((sum,choice)=>sum+choice.items.length,0)} playable videos`}
+function filteredMediaChoices() {
+  const query = $("#media-filter").value.trim().toLocaleLowerCase();
+  return mediaChoices.filter(choice => smartMatches(choice) && (!query || choice.searchText.includes(query)));
+}
+function renderMediaChoices() {
+  const matches = filteredMediaChoices();
+  const box = $("#media-list");
+  $("#smart-match-count").textContent = `${matches.length.toLocaleString()} ${matches.length === 1 ? "title" : "titles"}`;
+  $("#select-all-media").disabled = !matches.length;
+  box.innerHTML = matches.slice(0, builderDisplayLimit).map(choice => {
+    const meta = [choice.year, choice.content_rating, choice.genres[0] || (choice.type === "show" ? `${choice.items.length} episodes` : "")].filter(Boolean).join(" · ");
+    return `<label class="media-item poster-item" title="${escapeHtml(choice.title)}">
+      <input type="checkbox" value="${choice.index}" aria-label="${escapeHtml(choice.title)}" ${selectedLineup.has(choice.key) ? "checked" : ""}>
+      <span class="builder-poster"><i aria-hidden="true" class="film-icon"></i>${choice.thumb ? `<img src="${mediaThumb(choice, choice.section)}" alt="" loading="lazy" decoding="async">` : ""}</span>
+      <span class="builder-card-info"><b>${escapeHtml(choice.title)}</b><small>${escapeHtml(meta)}</small></span>
+    </label>`;
+  }).join("");
+  if (!matches.length && mediaChoices.length) box.innerHTML = '<div class="empty">No titles match your search or filters.</div>';
+  if (matches.length > builderDisplayLimit) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "builder-more";
+    more.textContent = "Show more titles";
+    more.onclick = () => {
+      const next = builderDisplayLimit;
+      builderDisplayLimit += builderPageSize;
+      renderMediaChoices();
+      box.children[next]?.querySelector("input")?.focus();
+    };
+    box.append(more);
+  }
+}
+function refreshSmartMatches() {
+  builderDisplayLimit = builderPageSize;
+  $("#media-list").scrollTop = 0;
+  renderMediaChoices();
+}
 function buildMediaChoices(items, librarySection) {
   const groups = new Map();
   for (const item of items) {
     const section = item.section || librarySection;
     const isShow = item.type === "episode" && Boolean(item.series);
     const title = isShow ? item.series : item.title;
-    const key = JSON.stringify([section, item.plex_server_id || "", isShow ? "show" : "title", isShow ? item.series : String(item.id)]);
+    const key = JSON.stringify([section, item.plex_server_id || "", isShow ? "show" : "title", isShow ? item.series_id || item.series : String(item.id)]);
     if (!groups.has(key)) {
       groups.set(key, {
         key, section, title, id: item.id, type: isShow ? "show" : item.type,
@@ -276,6 +412,8 @@ function buildMediaChoices(items, librarySection) {
       const years = choice.items.map(item => Number(item.year)).filter(Boolean);
       if (years.length) choice.year = Math.min(...years);
     }
+    const credits = new Set(choice.items.flatMap(item => [...(item.actors || []), ...(item.directors || [])]));
+    choice.searchText = [choice.title, choice.year, choice.content_rating, choice.summary, ...choice.genres, ...credits].join(" ").toLocaleLowerCase();
   }
   return [...groups.values()];
 }
@@ -283,45 +421,33 @@ function buildMediaChoices(items, librarySection) {
 async function loadMedia(section) {
   const request = ++mediaLoadRequest;
   const status = $("#media-status");
-  const box = $("#media-list");
   mediaChoices = [];
   if (!section) {
     status.textContent = builderLibraryKind === "show" ? "No TV show libraries available."
       : builderLibraryKind === "movie" ? "No movie libraries available." : "Choose a media library to add titles.";
-    box.innerHTML = "";
     refreshSmartMatches();
     return;
   }
   status.textContent = "Loading titles…";
-  box.innerHTML = '<div class="empty">Loading your library…</div>';
   refreshSmartMatches();
   try {
     const data = libraryMediaCache.get(section) || await api(`/api/library/items?section=${encodeURIComponent(section)}`);
     libraryMediaCache.set(section, data);
-    if (request !== mediaLoadRequest || !$("#channel-dialog").open) return;
+    if (request !== mediaLoadRequest || !builderIsOpen()) return;
     mediaChoices = buildMediaChoices(data.items, section).sort((a,b) => a.title.localeCompare(b.title));
+    mediaChoices.forEach((choice, index) => { choice.index = index; });
     const genres = [...new Set(mediaChoices.flatMap(choice => choice.genres))].sort();
     const ratings = [...new Set(mediaChoices.map(choice => choice.content_rating))].sort();
     const options = (title, values) => '<option value="all">' + title + '</option>'
       + values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
     $("#smart-genre").innerHTML = options("All genres", genres);
     $("#smart-rating").innerHTML = options("All ratings", ratings);
-    status.textContent = `${mediaChoices.length} shows and titles · ${data.items.length} playable videos`;
-    box.innerHTML = mediaChoices.map((choice, index) => `
-      <label class="media-item poster-item show-choice" tabindex="0">
-        <input type="checkbox" value="${index}">
-        ${choice.thumb ? `<img src="${mediaThumb(choice, choice.section)}" alt="" loading="lazy">` : '<span class="poster-placeholder">CF</span>'}
-        <span><b>${escapeHtml(choice.title)}</b>
-          <small>${choice.type === "show" ? choice.items.length + " episodes · Entire series" : escapeHtml(choice.type)}${choice.year ? " · " + escapeHtml(choice.year) : ""} · ${escapeHtml(choice.content_rating)}</small>
-          ${choice.genres.length ? `<em>${escapeHtml(choice.genres.join(" · "))}</em>` : ""}
-        </span>
-      </label>`).join("");
+    status.textContent = mediaChoices.length ? "" : "No playable titles were found in this library.";
     refreshSmartMatches();
     updateMediaSelection();
   } catch (error) {
-    if (request !== mediaLoadRequest || !$("#channel-dialog").open) return;
+    if (request !== mediaLoadRequest || !builderIsOpen()) return;
     status.textContent = error.message;
-    box.innerHTML = "";
     updateMediaSelection();
   }
 }
@@ -345,11 +471,16 @@ $("#restore-preset").onclick = () => {
   toast("Save the channel to start its selected preset from the beginning.");
 };
 async function openChannel(channel = null) {
-  if (!state.config.token_saved && !state.config.local_libraries?.length) {
-    toast("Add a local folder or connect Plex in Sources & Sharing first.", true);
+  if (builderSaving || builderIsOpen()) return;
+  if (!channel && !mediaSourceLabels(state.config).length) {
+    toast("Add a local folder or connect Plex or Jellyfin in Sources & Sharing first.", true);
     return;
   }
+  builderTrigger = document.activeElement;
+  builderReturnView = $(".view.active")?.id || "channels";
   $("#channel-form").reset();
+  setBuilderPanel("builder-filter-toggle", "builder-filters", false);
+  setBuilderPanel("selection-count", "selected-media-panel", false);
   restorePresetOnSave = false;
   $("#restore-preset").hidden = !channel;
   $("#channel-id").value = channel?.id || "";
@@ -367,7 +498,6 @@ async function openChannel(channel = null) {
         .map(asset => '<option value="' + escapeHtml(asset.id) + '">' + escapeHtml(asset.name) + '</option>').join("");
     select.value = selected || "";
   }
-  $("#dialog-title").textContent = channel ? "Edit channel" : "Create channel";
   ++mediaLoadRequest;
   mediaChoices = [];
   selectedLineup.clear();
@@ -384,13 +514,23 @@ async function openChannel(channel = null) {
   $("#publish-on-save").checked = state.config.creator_published || state.config.auto_publish_channels !== false;
   $("#publish-on-save").disabled = Boolean(state.config.creator_published);
   renderChannelBrandingPreview();
-  $("#channel-dialog").showModal();
+  showView("channel-builder");
   setBuilderStep(1);
-  await loadBuilderLibraries(channel?.section);
+  await loadBuilderLibraries(channel?.section || (builderReturnView === "library" ? $("#workspace-library").value : ""));
 }
 
-document.addEventListener("click",async event=>{const button=event.target.closest("button,article[data-watch]");if(!button)return;if(button.dataset.watch)watchChannel(button.dataset.watch);if(button.dataset.view){document.querySelectorAll(".view,nav button").forEach(e=>e.classList.remove("active"));$(`#${button.dataset.view}`).classList.add("active");button.classList.add("active")}if(button.id==="refresh-guide")loadGuide();if(button.id==="new-channel")openChannel();if(button.dataset.edit)openChannel(state.channels.find(c=>c.id===button.dataset.edit));if(button.dataset.delete&&confirm("Delete this channel?")){try{await api(`/api/channels/${button.dataset.delete}`,{method:"DELETE"});await refresh();toast("Channel deleted.")}catch(e){toast(e.message,true)}}if(button.dataset.deleteAsset&&confirm("Delete this artwork? Channels using it will keep working without the logo.")){try{await api(`/api/assets/${button.dataset.deleteAsset}`,{method:"DELETE"});await refresh();toast("Artwork deleted.")}catch(e){toast(e.message,true)}}if(button.dataset.tool){try{const data=await api(`/api/tools/${button.dataset.tool}`,{method:"POST",body:"{}"});toast(typeof data.result==="string"?data.result:"Tool finished.")}catch(e){toast(e.message,true)}}});
-$("#setup-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/setup",{method:"POST",body:JSON.stringify({plex_url:$("#plex-url").value,plex_token:$("#plex-token").value,guide_hours:$("#guide-hours").value,bind_host:$("#bind-host").value,public_url:$("#public-url").value,directory_url:$("#directory-url").value})});$("#plex-token").value="";await refresh();toast("Standalone TV server settings saved.")}catch(e){toast(e.message,true)}});
+function setBuilderPanel(buttonId, panelId, expanded) {
+  document.getElementById(buttonId).setAttribute("aria-expanded", String(expanded));
+  document.getElementById(panelId).hidden = !expanded;
+}
+function cancelBuilder() {
+  if (builderSaving) return;
+  showView(builderReturnView);
+  if (builderTrigger?.isConnected) builderTrigger.focus();
+}
+
+document.addEventListener("click",async event=>{const button=event.target.closest("button,article[data-watch]");if(!button)return;if(button.dataset.view){showView(button.dataset.view);if(button.dataset.view==="watch")loadGuide();if(button.dataset.view==="library")loadWorkspaceLibraries()}if(button.dataset.watch)watchChannel(button.dataset.watch);if(button.id==="refresh-guide")loadGuide();if(button.id==="new-channel")openChannel();if(button.dataset.edit)openChannel(state.channels.find(c=>c.id===button.dataset.edit));if(button.dataset.delete&&confirm("Delete this channel?")){try{await api(`/api/channels/${button.dataset.delete}`,{method:"DELETE"});await refresh();toast("Channel deleted.")}catch(e){toast(e.message,true)}}if(button.dataset.deleteAsset&&confirm("Delete this artwork? Channels using it will keep working without the logo.")){try{await api(`/api/assets/${button.dataset.deleteAsset}`,{method:"DELETE"});await refresh();toast("Artwork deleted.")}catch(e){toast(e.message,true)}}if(button.dataset.tool){try{const data=await api(`/api/tools/${button.dataset.tool}`,{method:"POST",body:"{}"});toast(typeof data.result==="string"?data.result:"Tool finished.")}catch(e){toast(e.message,true)}}});
+$("#setup-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/setup",{method:"POST",body:JSON.stringify({plex_url:$("#plex-url").value,plex_token:$("#plex-token").value,guide_hours:$("#guide-hours").value,bind_host:$("#bind-host").value,public_url:$("#public-url").value})});$("#plex-token").value="";await refresh();toast("Creator settings saved.")}catch(e){toast(e.message,true)}});
 async function publishStudio(event){
   event.preventDefault();
   const status=$("#creator-publish-status"),button=$("#publish-creator");
@@ -424,13 +564,43 @@ $("#channel-library").addEventListener("change", event => {
   resetBuilderFilters();
   loadMedia(event.target.value);
 });
-$("#channel-form").addEventListener("submit",async event=>{event.preventDefault();const items=[...selectedLineup.values()].flatMap(choice=>choice.items);if(!items.length){toast("Select at least one playable title.",true);return}const id=$("#channel-id").value,payload={name:$("#channel-name").value,number:$("#channel-number").value,section:items[0].section,playback_mode:$("#playback-mode").value,logo_asset_id:$("#channel-logo").value,background_asset_id:$("#channel-background").value,corner_bug_asset_id:$("#channel-corner-bug").value,items};if(id && restorePresetOnSave)payload.restore_preset=true;if(!id)payload.publish_worldwide=$("#publish-on-save").checked;try{const saved=await api(id?`/api/channels/${id}`:"/api/channels",{method:id?"PUT":"POST",body:JSON.stringify(payload)});$("#channel-dialog").close();await refresh();toast(saved.publishing_pending?"Channel saved. Publishing this studio worldwide in the background.":"Channel saved and guide regenerated.")}catch(e){toast(e.message,true)}});
+$("#channel-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (builderStep !== 4 || builderSaving) return;
+  const items = [...selectedLineup.values()].flatMap(choice => choice.items);
+  if (!items.length) return;
+  const id = $("#channel-id").value;
+  const payload = {
+    name: $("#channel-name").value.trim(), number: $("#channel-number").value.trim(), section: items[0].section,
+    playback_mode: $("#playback-mode").value, logo_asset_id: $("#channel-logo").value,
+    background_asset_id: $("#channel-background").value, corner_bug_asset_id: $("#channel-corner-bug").value, items
+  };
+  if (id && restorePresetOnSave) payload.restore_preset = true;
+  if (!id) payload.publish_worldwide = $("#publish-on-save").checked;
+  const buttons = [$("#cancel-dialog"), $("#builder-back"), $("#builder-save")];
+  builderSaving = true;
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    const saved = await api(id ? `/api/channels/${id}` : "/api/channels", {method: id ? "PUT" : "POST", body: JSON.stringify(payload)});
+    if (builderIsOpen()) {
+      showView("channels");
+      $("#new-channel").focus();
+    }
+    toast(saved.publishing_pending ? "Channel saved. Publishing this studio worldwide in the background." : "Channel saved and guide regenerated.");
+    await refresh();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    builderSaving = false;
+    buttons.forEach(button => { button.disabled = false; });
+  }
+});
 $("#generate-asset").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/assets/generate",{method:"POST",body:JSON.stringify({name:$("#asset-name").value,kind:$("#asset-kind").value,primary:$("#asset-primary").value,secondary:$("#asset-secondary").value})});await refresh();toast("Original artwork generated.")}catch(e){toast(e.message,true)}});
 $("#upload-asset").addEventListener("submit",async event=>{event.preventDefault();const file=$("#upload-file").files[0];if(!file)return;try{const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error("Could not read that file."));reader.readAsDataURL(file)});await api("/api/assets/upload",{method:"POST",body:JSON.stringify({name:$("#upload-name").value,kind:$("#upload-kind").value,data})});event.target.reset();await refresh();toast("Artwork added to your library.")}catch(e){toast(e.message,true)}});
-$("#close-dialog").onclick=$("#cancel-dialog").onclick=()=>$("#channel-dialog").close();
+$("#cancel-dialog").onclick = cancelBuilder;
 $("#regenerate").onclick=()=>api("/api/exports",{method:"POST",body:"{}"}).then(()=>toast("Exports regenerated.")).catch(e=>toast(e.message,true));
 $("#check-update").onclick=()=>checkForUpdate(false);$("#install-update").onclick=()=>installUpdate(false);$("#plex-signin").onclick=startPlexSignin;
-$("#start-connect").onclick=()=>{showView("setup");$("#workspace-title").textContent="Sources & sharing"};
+$("#start-connect").onclick=()=>{showView("setup");selectSettingsPanel("sources")};
 $("#setup-plex-signin").onclick=startPlexSignin;
 $("#resume-publishing").onclick=async()=>{
   try{
@@ -439,6 +609,47 @@ $("#resume-publishing").onclick=async()=>{
   }catch(error){toast(error.message,true)}
 };
 $("#local-library-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/local/libraries",{method:"POST",body:JSON.stringify({name:$("#local-library-name").value,path:$("#local-library-path").value})});event.target.reset();await refresh();await loadWorkspaceLibraries(true);toast("Local media library added.")}catch(error){toast(error.message,true)}});
+async function reloadConnectedSources() {
+  await libraryRequest?.catch(() => {});
+  libraryFetchedAt = 0;
+  libraryMediaCache.clear();
+  await refresh();
+  if (document.querySelector("#library.active")) await loadWorkspaceLibraries(true);
+}
+$("#jellyfin-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const password = $("#jellyfin-password");
+  button.disabled = true;
+  try {
+    const body = JSON.stringify({url: $("#jellyfin-url").value, name: $("#jellyfin-name").value,
+      username: $("#jellyfin-username").value, password: password.value});
+    password.value = "";
+    await api("/api/jellyfin/connections", {method: "POST", body});
+    form.reset();
+    await reloadConnectedSources();
+    toast("Jellyfin connected.");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#jellyfin-connections").addEventListener("click", async event => {
+  const button = event.target.closest("[data-delete-jellyfin]");
+  if (!button || !confirm("Disconnect this Jellyfin server? Channels skip titles from it until you reconnect.")) return;
+  button.disabled = true;
+  try {
+    await api(`/api/jellyfin/connections/${encodeURIComponent(button.dataset.deleteJellyfin)}`, {method: "DELETE"});
+    await reloadConnectedSources();
+    toast("Jellyfin disconnected.");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
 $("#movie-upload-form").addEventListener("submit",event=>{event.preventDefault();const file=$("#movie-upload-file").files[0],section=$("#upload-library").value;if(!file||!section)return;const wrap=$("#movie-upload-progress"),bar=$("#movie-upload-bar"),percent=$("#movie-upload-percent"),button=event.target.querySelector("button[type=submit],button:not([type])");wrap.hidden=false;bar.value=0;button.disabled=true;const request=new XMLHttpRequest();request.open("POST",`/api/local/upload?section=${encodeURIComponent(section)}`);request.setRequestHeader("X-File-Name",encodeURIComponent(file.name));request.upload.onprogress=progress=>{if(!progress.lengthComputable)return;const value=Math.round(progress.loaded/progress.total*100);bar.value=value;percent.textContent=`${value}%`;$("#movie-upload-stage").textContent=`Uploading ${file.name}…`};request.onload=async()=>{button.disabled=false;if(request.status>=200&&request.status<300){event.target.reset();await refresh();toast("Movie uploaded and added to the library.")}else{try{toast(JSON.parse(request.responseText).error,true)}catch{toast("Movie upload failed.",true)}}};request.onerror=()=>{button.disabled=false;toast("Movie upload failed.",true)};request.send(file)});
 document.addEventListener("click",async event=>{const button=event.target.closest("[data-delete-local]");if(!button||!confirm("Remove this local library? Existing channels keep their lineup, but files cannot play until the folder is added again."))return;try{await api(`/api/local/libraries/${button.dataset.deleteLocal}`,{method:"DELETE"});await refresh();await loadWorkspaceLibraries(true);toast("Local library removed.")}catch(error){toast(error.message,true)}});
 $("#guide-earlier").onclick=()=>{guideOffsetHours=Math.max(-24,guideOffsetHours-6);loadGuide()};
@@ -447,11 +658,14 @@ $("#guide-later").onclick=()=>{guideOffsetHours=Math.min(168,guideOffsetHours+6)
 $("#test-plex").onclick=async()=>{const result=$("#setup-result");result.className="connection-result wide";result.textContent="Testing Plex server and library access…";try{const data=await api("/api/plex/test",{method:"POST",body:JSON.stringify({plex_url:$("#plex-url").value,plex_token:$("#plex-token").value})});result.classList.add("success");result.textContent=`Connected to ${data.profile.server_name||"Plex"}. ${data.libraries} libraries are available.`}catch(error){result.classList.add("error");result.textContent=`Connection failed: ${error.message}`}};
 $("#media-filter").addEventListener("input",refreshSmartMatches);
 for(const selector of ["#smart-genre","#smart-year-min","#smart-year-max","#smart-rating"])$(selector).addEventListener("input",refreshSmartMatches);
-$("#smart-select").onclick = () => {
-  const matches = filteredMediaChoices();
-  for (const choice of matches) selectedLineup.set(choice.key, choice);
+$("#builder-filter-toggle").onclick = () => {
+  setBuilderPanel("builder-filter-toggle", "builder-filters", $("#builder-filters").hidden);
+};
+$("#selection-count").onclick = () => {
+  const expanded = $("#selected-media-panel").hidden;
+  setBuilderPanel("selection-count", "selected-media-panel", expanded);
   updateMediaSelection();
-  toast(matches.length ? `Added ${matches.length} matching shows and titles.` : "No titles match those filters.", !matches.length);
+  if (expanded) $("#selected-media-list button")?.focus({preventScroll:true});
 };
 $("#select-all-media").onclick = () => {
   for (const choice of filteredMediaChoices()) selectedLineup.set(choice.key, choice);
@@ -470,15 +684,32 @@ $("#media-list").addEventListener("change", event => {
   else selectedLineup.delete(choice.key);
   updateMediaSelection();
 });
+$("#media-list").addEventListener("error", event => {
+  if (event.target.matches("img")) event.target.hidden = true;
+}, true);
 $("#selected-media-list").addEventListener("click", event => {
   const button = event.target.closest("[data-remove-media]");
   if (!button) return;
   const key = [...selectedLineup.keys()][Number(button.dataset.removeMedia)];
   selectedLineup.delete(key);
   updateMediaSelection();
+  const next = $("#selected-media-list").children[Number(button.dataset.removeMedia)];
+  (next?.matches("button") ? next : $("#selection-count")).focus();
 });
 $("#overview-create").onclick=$("#library-create-channel").onclick=()=>openChannel();
-$("#builder-next").onclick=()=>{if(builderStep===1&&(!$("#channel-name").reportValidity()||!$("#channel-number").reportValidity()))return;if(builderStep===2&&!selectedLineup.size){toast("Select at least one playable title.",true);return}setBuilderStep(builderStep+1)};
+$("#builder-next").onclick = () => {
+  if (builderStep === 1 && !selectedLineup.size) {
+    toast("Select at least one playable title.", true);
+    return;
+  }
+  if (builderStep === 2) {
+    for (const input of [$("#channel-name"), $("#channel-number")]) {
+      input.value = input.value.trim();
+      if (!input.reportValidity()) return;
+    }
+  }
+  setBuilderStep(builderStep + 1);
+};
 $("#builder-back").onclick=()=>setBuilderStep(builderStep-1);
 $("#workspace-library").addEventListener("change", async event => {
   const request = ++workspaceMediaRequest, section = event.target.value;
@@ -507,13 +738,9 @@ $("#tv-player").addEventListener("canplay",()=>{$("#playback-status").className=
 $("#tv-player").addEventListener("playing",()=>{$("#playback-status").className="muted";$("#playback-status").textContent="✓ Playing live."});
 $("#tv-player").addEventListener("error",()=>showPlaybackError(activeChannel,"Playback failed. Check that the media source is online, then select the channel again."));
 $("#manual-plex-setup").onclick=()=>{clearInterval(plexSigninTimer);plexSigninTimer=0;$("#plex-onboarding").close();showView("setup")};
-$("#add-local-onboarding").onclick=()=>{$("#plex-onboarding").close();showView("setup");$("#local-library-path").focus()};
+$("#add-local-onboarding").onclick=()=>{$("#plex-onboarding").close();showView("setup");selectSettingsPanel("sources");$("#local-library-path").focus()};
 refresh().then(()=>{$("#installed-version").textContent=`v${state.version}`;checkForUpdate(true)}).catch(e=>toast(e.message,true));
-document.addEventListener("click",event=>{const target=event.target.closest("[data-watch],[data-view]");if(target?.dataset.watch)diagnosePlayback(target.dataset.watch);});
-document.addEventListener("click",event=>{const target=event.target.closest("[data-view]");if(!target)return;const names={start:"Overview",watch:"Watch TV",channels:"Channels",library:"Library",assets:"Branding",exports:"Guide artwork",system:"System",setup:"Sources & sharing",updates:"Updates",tools:"Tools"};showView(target.dataset.view);$("#workspace-title").textContent=names[target.dataset.view]||"ChannelForge";if(target.dataset.view==="watch")loadGuide();if(target.dataset.view==="library")loadWorkspaceLibraries()});
-document.addEventListener("click",event=>{if(event.target.closest("#new-channel,#overview-create,#library-create-channel"))setTimeout(()=>setBuilderStep(1),0)});
-setInterval(()=>{const localCount=state.config.local_libraries?.length||0;$("#topbar-status").textContent=state.config.token_saved&&localCount?`Plex + ${localCount} local`:state.config.token_saved?"Plex connected":localCount?`${localCount} local folder${localCount===1?"":"s"} ready`:"No media source"},1000);
-setInterval(()=>{$("#backup-count").textContent=`${state.backup_count||0} backups available`},1000);
+document.addEventListener("click",event=>{const target=event.target.closest("[data-watch]");if(target?.dataset.watch===activeChannel)diagnosePlayback(activeChannel);});
 $("#channel-list").addEventListener("click", async event => {
   const button = event.target.closest("button[data-channel-action]");
   if (!button) return;
@@ -531,7 +758,10 @@ $("#channel-list").addEventListener("dragstart",event=>{const card=event.target.
 $("#channel-list").addEventListener("dragend",event=>{event.target.closest("[data-channel-card]")?.classList.remove("dragging")});
 $("#channel-list").addEventListener("dragover",event=>{if(event.target.closest("[data-channel-card]"))event.preventDefault()});
 $("#channel-list").addEventListener("drop",async event=>{event.preventDefault();const target=event.target.closest("[data-channel-card]");if(!target||!draggedChannel||target.dataset.channelCard===draggedChannel)return;const ids=state.channels.map(channel=>channel.id),from=ids.indexOf(draggedChannel),to=ids.indexOf(target.dataset.channelCard);ids.splice(to,0,ids.splice(from,1)[0]);try{const data=await api("/api/channels/order",{method:"POST",body:JSON.stringify({ids})});state.channels=data.channels;await refresh();toast("Channel order saved.")}catch(error){toast(error.message,true)}});
+let checkingStatus = false;
 setInterval(async()=>{
+  if (document.hidden || checkingStatus) return;
+  checkingStatus = true;
   try{
     const current=await api("/api/status?brief=1");
     if(state.version&&current.version!==state.version)location.reload();
@@ -539,16 +769,25 @@ setInterval(async()=>{
     if (state.channels?.some(c => Date.parse(c.air_until) <= Date.now() && state.now_playing?.[c.id])) {
       await refresh();
     }
-  }catch{/* The updater may temporarily stop the server while installing. */}
-},3000);
+  } catch { /* The updater may temporarily stop the server while installing. */ }
+  finally { checkingStatus = false; }
+},4000);
 
 // One navigation model for keyboard, PC gamepads, and television-style D-pads.
-function controllerTargets(){const scope=document.querySelector("dialog[open]")||document.querySelector(".view.active")||document;return[...scope.querySelectorAll('button:not([disabled]),a[href],input:not([type="hidden"]):not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(element=>!element.hidden&&element.offsetParent!==null&&getComputedStyle(element).visibility!=="hidden")}
+function controllerTargets(){const dialog=$("dialog[open]"),view=$(".view.active"),selector='button:not([disabled]),a[href],input:not([type="hidden"]):not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';const elements=dialog?[...dialog.querySelectorAll(selector)]:[...$(".studio-sidebar nav").querySelectorAll(selector),...(view?.querySelectorAll(selector)||[])];return elements.filter(element=>!element.hidden&&element.offsetParent!==null&&getComputedStyle(element).visibility!=="hidden")}
 function moveControllerFocus(direction){const targets=controllerTargets();if(!targets.length)return;const current=targets.includes(document.activeElement)?document.activeElement:null;if(!current){targets[0].focus({preventScroll:true});targets[0].scrollIntoView({block:"nearest",inline:"nearest"});return}const origin=current.getBoundingClientRect(),ox=origin.left+origin.width/2,oy=origin.top+origin.height/2;let best=null,bestScore=Infinity;for(const target of targets){if(target===current)continue;const rect=target.getBoundingClientRect(),tx=rect.left+rect.width/2,ty=rect.top+rect.height/2,dx=tx-ox,dy=ty-oy,primary=direction==="left"?-dx:direction==="right"?dx:direction==="up"?-dy:dy,secondary=direction==="left"||direction==="right"?Math.abs(dy):Math.abs(dx);if(primary<=4)continue;const score=primary+secondary*2.25;if(score<bestScore){bestScore=score;best=target}}if(best){best.focus({preventScroll:true});best.scrollIntoView({behavior:"smooth",block:"nearest",inline:"nearest"})}}
-function controllerBack(){const dialog=document.querySelector("dialog[open]");if(dialog){dialog.close();return}showView("start");document.querySelector('nav button[data-view="start"]')?.focus()}
+function controllerBack(){const dialog=document.querySelector("dialog[open]");if(dialog){dialog.close();return}if(builderIsOpen()){for(const [button,panel] of [["selection-count","selected-media-panel"],["builder-filter-toggle","builder-filters"]]){if(builderStep===1&&!document.getElementById(panel).hidden){setBuilderPanel(button,panel,false);document.getElementById(button).focus();return}}cancelBuilder();return}showView("start");document.querySelector('nav button[data-view="start"]')?.focus()}
 function controllerActivate(){const target=document.activeElement;if(!target||target===document.body)return;const item=target.closest("label.media-item");if(item){const input=item.querySelector('input[type="checkbox"]');input.checked=!input.checked;input.dispatchEvent(new Event("change",{bubbles:true}));return}target.click()}
-document.addEventListener("keydown",event=>{const editable=event.target.matches?.('input,textarea,select,[contenteditable="true"]');if(editable&&event.key!=="Escape")return;const direction={ArrowLeft:"left",ArrowRight:"right",ArrowUp:"up",ArrowDown:"down"}[event.key];if(direction){event.preventDefault();moveControllerFocus(direction)}else if((event.key==="Enter"||event.key===" ")&&document.activeElement?.matches?.("[tabindex]")){event.preventDefault();controllerActivate()}else if(event.key==="Escape"){event.preventDefault();controllerBack()}});
+document.addEventListener("keydown",event=>{const editable=event.target.matches?.('input:not([type="checkbox"]),textarea,select,[contenteditable="true"]');if(editable&&event.key!=="Escape")return;const direction={ArrowLeft:"left",ArrowRight:"right",ArrowUp:"up",ArrowDown:"down"}[event.key];if(direction){event.preventDefault();moveControllerFocus(direction)}else if((event.key==="Enter"||event.key===" ")&&document.activeElement?.matches?.('[tabindex]:not([tabindex="-1"]),.media-item input')){event.preventDefault();controllerActivate()}else if(event.key==="Escape"){event.preventDefault();controllerBack()}});
 let gamepadState={},gamepadRepeat=0;
-function pollGamepads(now){const pad=[...(navigator.getGamepads?.()||[])].find(Boolean);if(pad){const pressed={up:pad.buttons[12]?.pressed||pad.axes[1]<-.55,down:pad.buttons[13]?.pressed||pad.axes[1]>.55,left:pad.buttons[14]?.pressed||pad.axes[0]<-.55,right:pad.buttons[15]?.pressed||pad.axes[0]>.55,activate:pad.buttons[0]?.pressed,back:pad.buttons[1]?.pressed};for(const action of Object.keys(pressed)){const repeatable=["up","down","left","right"].includes(action),canRepeat=repeatable&&pressed[action]&&gamepadState[action]&&now-gamepadRepeat>190;if(pressed[action]&&(!gamepadState[action]||canRepeat)){if(repeatable){moveControllerFocus(action);gamepadRepeat=now}else if(action==="activate")controllerActivate();else if(action==="back")controllerBack()}}gamepadState=pressed}else gamepadState={};requestAnimationFrame(pollGamepads)}
-requestAnimationFrame(pollGamepads);
+let gamepadFrame = 0;
+function startGamepadPolling() {
+  if (!gamepadFrame && !document.hidden && Array.from(navigator.getGamepads?.() || []).some(Boolean)) {
+    gamepadFrame = requestAnimationFrame(pollGamepads);
+  }
+}
+function pollGamepads(now){gamepadFrame=0;const pad=[...(navigator.getGamepads?.()||[])].find(Boolean);if(pad){const pressed={up:pad.buttons[12]?.pressed||pad.axes[1]<-.55,down:pad.buttons[13]?.pressed||pad.axes[1]>.55,left:pad.buttons[14]?.pressed||pad.axes[0]<-.55,right:pad.buttons[15]?.pressed||pad.axes[0]>.55,activate:pad.buttons[0]?.pressed,back:pad.buttons[1]?.pressed};for(const action of Object.keys(pressed)){const repeatable=["up","down","left","right"].includes(action),canRepeat=repeatable&&pressed[action]&&gamepadState[action]&&now-gamepadRepeat>190;if(pressed[action]&&(!gamepadState[action]||canRepeat)){if(repeatable){moveControllerFocus(action);gamepadRepeat=now}else if(action==="activate")controllerActivate();else if(action==="back")controllerBack()}}gamepadState=pressed}else gamepadState={};startGamepadPolling()}
+window.addEventListener("gamepadconnected", startGamepadPolling);
+document.addEventListener("visibilitychange", startGamepadPolling);
+startGamepadPolling();
 

@@ -18,7 +18,9 @@ sub load()
     end for
     m.top.notes = notes
   end if
-  installedVersion = CreateObject("roAppInfo").GetVersion()
+  appInfo = CreateObject("roAppInfo")
+  installedVersion = appInfo.GetValue("channelforge_version")
+  if installedVersion = "" then installedVersion = appInfo.GetVersion()
   installed = installedVersion.Tokenize(".")
   candidate = Mid(release.tag_name, 2).Tokenize(".")
   for index = 0 to 2
@@ -49,6 +51,9 @@ function requestRelease(address as string) as object
   if response.GetResponseCode() <> 200 then return invalid
   release = ParseJson(response.GetString())
   pattern = CreateObject("roRegex", "^v[0-9]+\.[0-9]+\.[0-9]+$", "")
-  if release = invalid or release.tag_name = invalid or not pattern.IsMatch(release.tag_name) then return invalid
+  if type(release) <> "roAssociativeArray" then return invalid
+  if type(release.tag_name) <> "String" and type(release.tag_name) <> "roString" then return invalid
+  if not pattern.IsMatch(release.tag_name) then return invalid
+  if type(release.body) <> "String" and type(release.body) <> "roString" then release.body = invalid
   return release
 end function

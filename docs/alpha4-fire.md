@@ -44,6 +44,21 @@ A minimal native libVLC 3.6.5 QA activity and the Media3 candidate played the sa
 - The final OK-key interception compiled. A second emulator check intended to verify this specific key dispatch could not finish because UI Automator returned a null root and then exited. Direct remote OK after the terminal prompt remains a manual confirmation.
 - No signing, store publication, production install, production route change or production directory write is required for these checks.
 
+## Fire TV checks for the 4.0.0 release
+
+The viewer uses the available HLS renditions on each route. The first tune estimates 1 Mbit/s until Media3 measures transfers. A sustained post-start stall can temporarily limit video to the next lower supported rendition. Thirty seconds of uninterrupted playback clears that limit. A transient failure retries the current route first. An expired route goes straight to discovery, with an eight-second limit on waiting for the directory. Three application retries precede the manual prompt.
+
+An isolated QA application on a physical AFTSS played two synthetic programs alternating every eight seconds. The three-variant loopback fixture served 270p, 480p and 720p. These single trials exercised device decoding, bandwidth adaptation and a route change. Internet delivery, release signing and installation over an existing production app were outside this test.
+
+| Fault | Observation | First presented frame | Total counted frames | Total presentation gaps | Longest gap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Segment throughput limited to about 480 kbit/s from 12–50 s, then restored | 82.06 s | 2.16 s | 1,837 | 2.59 s | 1.99 s |
+| Studio moved to a new path at 7 s | 60.02 s | 2.07 s | 1,335 | 2.15 s | 1.37 s |
+
+Segment requests moved from HD to economy under the bandwidth limit and returned to HD when the limit lifted. The route-change trial resumed segment requests on the new path and decoded through the end of observation. Totals use SurfaceFlinger intervals above 250 ms, subtracting one 24 fps frame interval per gap. They can include gaps at program boundaries. The release APK was rebuilt and linted after final callback guards and the version bump to 4.0.0, version code 385.
+
+To repeat these cases, start the fixture below with `--adaptive` and run the measurement helper once with `--shape` and once with `--rotate`.
+
 ## Reproduce
 
 Use a Java/Gradle installation compatible with the repository build, Android SDK 35, FFmpeg with libx264, Python 3, an authorized Fire TV, and a writable scratch directory.

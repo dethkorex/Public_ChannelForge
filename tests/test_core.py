@@ -26,6 +26,30 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(value["plex_token"], "")
         self.assertTrue(value["token_saved"])
 
+    def test_guide_settings_save_while_the_existing_plex_connection_is_down(self):
+        with (app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler) as local,
+              mock.patch.object(app, "plex_request", side_effect=ValueError("Plex is offline")) as plex):
+            threading.Thread(target=local.serve_forever, daemon=True).start()
+            client = http.client.HTTPConnection("127.0.0.1", local.server_port, timeout=5)
+            try:
+                def save(payload):
+                    client.request("POST", "/api/setup", json.dumps(payload), {"Content-Type": "application/json"})
+                    response = client.getresponse()
+                    return response.status, json.loads(response.read())
+
+                status, result = save({"guide_hours": 36, "plex_token": ""})
+                self.assertEqual(status, 200)
+                self.assertEqual(result["config"]["guide_hours"], 36)
+                plex.assert_not_called()
+                status, result = save({"guide_hours": 48, "plex_token": "new-token"})
+                self.assertEqual((status, result["error"]), (400, "Plex is offline"))
+                plex.assert_called_once()
+                self.assertEqual(app.config()["guide_hours"], 36)
+                self.assertEqual(app.config()["plex_token"], "test")
+            finally:
+                client.close()
+                local.shutdown()
+
     def test_atomic_json_retries_a_windows_sharing_violation(self):
         target = app.DATA_DIR / "retry.json"
         replace = Path.replace
@@ -336,7 +360,7 @@ class CoreTests(unittest.TestCase):
 
     def test_tv_library_returns_playable_episodes(self):
         libraries = [{"key": "2", "title": "TV", "type": "show"}]
-        shows = app.ET.fromstring('<MediaContainer><Directory ratingKey="10" type="show" title="Example Show" year="1999" contentRating="TV-14" thumb="/library/metadata/10/thumb/1"><Genre tag="Anime"/><Genre tag="Adventure"/></Directory></MediaContainer>')
+        shows = app.ET.fromstring('<MediaContainer><Directory ratingKey="10" type="show" title="Example Show" year="1999" contentRating="TV-14" thumb="/library/metadata/10/thumb/1"><Genre tag="Anime"/><Genre tag="Adventure"/><Role tag="Lead Performer"/><Director tag="Series Director"/></Directory></MediaContainer>')
         episodes = app.ET.fromstring('<MediaContainer><Video ratingKey="99" type="episode" title="Pilot" grandparentRatingKey="10" grandparentTitle="Example Show" grandparentThumb="/library/metadata/10/thumb/1" parentIndex="1" index="1" duration="1800000" key="/library/metadata/99"><Media container="mkv" videoCodec="hevc" audioCodec="aac"><Part key="/library/parts/99/file.mkv"><Stream id="11" streamType="2" language="Japanese" languageCode="jpn"/><Stream id="12" streamType="2" language="English" languageCode="eng"/></Part></Media></Video></MediaContainer>')
         with mock.patch.object(app, "plex_libraries", return_value=libraries), mock.patch.object(app, "plex_server_request", side_effect=[shows, episodes]) as request:
             items = app.plex_items("2")
@@ -345,6 +369,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(items[0]["series"], "Example Show")
         self.assertEqual(items[0]["series_thumb"], "/library/metadata/10/thumb/1")
         self.assertEqual(items[0]["genres"], ["Adventure", "Anime"])
+        self.assertEqual(items[0]["actors"], ["Lead Performer"])
+        self.assertEqual(items[0]["directors"], ["Series Director"])
         self.assertEqual(items[0]["year"], "1999")
         self.assertEqual(items[0]["content_rating"], "TV-14")
         self.assertEqual(items[0]["audio_language"], "eng")
@@ -395,18 +421,6 @@ class CoreTests(unittest.TestCase):
         handler.client_address = ("192.0.2.10", 12345)
         with self.assertRaisesRegex(ValueError, "only from"):
             app.upload_local_media(handler, "local:missing", "movie.mp4")
-
-    def test_live_url_uses_plex_hls_at_current_offset(self):
-        channel = app.clean_channel({"name": "Live", "number": "3", "schedule_anchor": "2026-01-01T00:00:00+00:00", "items": [
-            {"id": "44", "title": "Show", "duration_ms": 3600000, "key": "/library/metadata/44"},
-        ]})
-        url = app.plex_live_url(channel, app.datetime(2026, 1, 1, 0, 5, tzinfo=app.timezone.utc))
-        self.assertIn("/video/:/transcode/universal/start.m3u8?", url)
-        self.assertIn("offset=300.000", url)
-        self.assertIn("path=%2Flibrary%2Fmetadata%2F44", url)
-        self.assertIn("directPlay=0", url)
-        self.assertIn("videoCodec=h264", url)
-        self.assertIn("audioCodec=aac", url)
 
     def test_hls_manifest_urls_are_rewritten_to_same_origin_proxy(self):
         app.HLS_PROXY.clear()
@@ -547,6 +561,18 @@ class CoreTests(unittest.TestCase):
         app.ensure_files()
         tools = app.plugin_tools()
         self.assertTrue(any(tool["id"] == "example_summary" for tool in tools))
+
+    def test_edit_burst_preserves_daily_and_user_named_backups(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(app, "BACKUP_DIR", Path(folder)):
+            earlier_day = Path(folder) / "20260101T120000000000Z.json"
+            manual_copy = Path(folder) / "studio-recovery.json"
+            for path in (earlier_day, manual_copy):
+                path.write_text('{"channels":["original"]}', encoding="utf-8")
+            for _ in range(25):
+                app.backup_state("edit channel")
+            self.assertTrue(earlier_day.exists())
+            self.assertTrue(manual_copy.exists())
+            self.assertLessEqual(len(list(Path(folder).glob("*.json"))), 23)
 
     def test_generates_original_channel_asset(self):
         asset = app.generate_asset({"name": "My Station", "kind": "logo", "primary": "#112233", "secondary": "#abcdef"})
@@ -928,7 +954,7 @@ class CoreTests(unittest.TestCase):
     def test_encoder_capacity_reserves_live_handoff_and_reuses_existing_stream(self):
         channel = {"id": "live", "items": [{"id": "one", "duration_ms": 60000}]}
         position = app.schedule_position(channel)
-        key = app.hashlib.sha256(f'live:one:{position["start"].isoformat()}:standard'.encode()).hexdigest()[:20]
+        key = app.hashlib.sha256(repr(("live", app.media_source_identity(position["item"]), position["start"].isoformat(), "standard")).encode()).hexdigest()[:20]
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(app, "STREAM_DIR", Path(temporary)), \
                 mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "ENCODER_STARTING", {}):
             directory = Path(temporary)

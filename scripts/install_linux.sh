@@ -65,7 +65,7 @@ BIN_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$SYSTEMD_DIR"
-/usr/bin/python3 -Es - "$ROOT" "$APP_DIR" <<'PY'
+/usr/bin/python3 -EsB - "$ROOT" "$APP_DIR" <<'PY'
 import fcntl
 import sys
 from pathlib import Path
@@ -80,18 +80,18 @@ with (destination.parent / ".channelforge-install.lock").open("a") as lock:
 PY
 cat > "$BIN_DIR/public-channelforge" <<EOF
 #!/usr/bin/env bash
-exec /usr/bin/python3 -Es "$APP_DIR/Public_ChannelForge.py" "\$@"
+exec /usr/bin/python3 -EsB "$APP_DIR/Public_ChannelForge.py" "\$@"
 EOF
 chmod +x "$BIN_DIR/public-channelforge"
 cat > "$BIN_DIR/channelforge-tv" <<EOF
 #!/usr/bin/env bash
-exec /usr/bin/python3 -Es "$APP_DIR/ChannelForge_TV.py" "\$@"
+exec /usr/bin/python3 -EsB "$APP_DIR/ChannelForge_TV.py" "\$@"
 EOF
 chmod +x "$BIN_DIR/channelforge-tv"
 cat > "$DESKTOP_DIR/public-channelforge.desktop" <<EOF
 [Desktop Entry]
 Name=ChannelForge Creator
-Comment=Build personal channels from local folders or Plex
+Comment=Build personal channels from local folders, Plex, or Jellyfin
 Exec="$BIN_DIR/public-channelforge"
 Icon=$APP_DIR/assets/channel-forge-creator.png
 Terminal=false

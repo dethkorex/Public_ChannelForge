@@ -1,11 +1,17 @@
-# ChannelForge 4.0 alpha 1
+# ChannelForge 4.0
 
-- Fire TV can reconnect when a studio changes its public address during a show. It also remembers the guide when a studio temporarily loses its connection.
-- Windows and Linux viewers retain previously loaded guide entries during outages. Studios that explicitly unpublish are removed when the directory confirms it.
-- Creator shares a live broadcast across viewers, recovers from an interrupted encoder, and can deliver compatible movies without re-encoding the video. Resource limits help busy studios stay responsive.
-- Closing the Windows Creator window stops its preview audio. Choosing **Exit and stop channels** in the tray also shuts down its local server, encoder and WebView2 processes.
-- Desktop playback diagnostics are available from Creator’s System page and the TV app’s Updates page. Use **Copy report** to share a troubleshooting snapshot.
-- Windows and Linux TV viewers can select VLC under Updates when the VLC runtime is installed. The built-in player remains the default.
-- Roku retains channels during a directory interruption and retries a stalled stream using the studio’s current address. The included Roku ZIP is for developer sideloading. Store signing and physical Roku playback are pending.
+## What’s new
 
-On a physical Fire TV Stick, both trials recovered when the studio address changed. Stall time in that specific test fell from 40.9 to 1.8 seconds per minute. On a healthy test connection, median startup improved from 2.03 to 1.76 seconds. Brief stalls on that connection persisted.
+- **A redesigned ChannelForge TV.** Home, Live TV, and Rewind Cinema share the new look. The live guide shows artwork for the program airing now, and Rewind Cinema keeps its searchable VHS shelf.
+- **More ways to build channels.** Mix Plex, multiple Jellyfin connections, and folders on your computer in a single lineup. Creator’s poster grid, search, and filters help you find movies and full shows.
+- **Sharper Live TV.** Capable connections can play at up to 720p. The player can switch to 480p or 270p as bandwidth changes.
+
+## Playback and maintenance
+
+- **Better recovery.** Channels stay visible through brief studio outages. Players can retry a studio’s current address, and Creator can replace a stopped encoder during a show.
+- **Less work for Creator.** Viewers share one broadcast, Creator reuses unchanged playlists and folder durations, and idle screens do less polling.
+- **Cleaner updates.** Windows replaces the Creator and TV binaries together and rolls back if replacement fails. Linux replaces the bundled files and clears obsolete app bytecode while keeping personal files.
+- **Viewer options.** Continue Watching resumes movies on Windows, Linux, and Fire TV. Windows and Linux also offer optional VLC playback in Updates.
+- **Creator controls.** Sources, sharing, and advanced settings are grouped. Settings still save during Plex outages. Windows Creator stops preview audio when closed, and Exit and stop channels shuts down the server.
+- **Backup history.** Creator keeps older restore points during frequent lineup edits.
+- **Roku developer build.** The sideload ZIP includes the new Home screen, guide artwork, adaptive quality, and recovery.

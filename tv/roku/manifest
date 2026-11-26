@@ -1,7 +1,8 @@
-title=ChannelForge TV Alpha
+title=ChannelForge TV
 major_version=4
 minor_version=0
-build_version=0
+build_version=1
+channelforge_version=4.0.0
 ui_resolutions=fhd
 mm_icon_focus_fhd=pkg:/images/channel-icon-fhd.png
 mm_icon_focus_hd=pkg:/images/channel-icon-hd.png

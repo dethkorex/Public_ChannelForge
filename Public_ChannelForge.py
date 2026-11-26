@@ -43,7 +43,7 @@ from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "4.0.0-alpha.1"
+VERSION = "4.0.0"
 DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -72,6 +72,7 @@ def app_dir() -> Path:
 
 DATA_DIR = app_dir()
 CONFIG_FILE = DATA_DIR / "config.json"
+JELLYFIN_FILE = DATA_DIR / "jellyfin-connections.json"
 CHANNELS_FILE = DATA_DIR / "channels.json"
 VAULT_CATALOG_FILE = DATA_DIR / "rewind-cinema.json"
 EXPORT_DIR = DATA_DIR / "exports"
@@ -119,6 +120,7 @@ LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
 AUDIO_SELECTION_CACHE: dict[str, tuple[int, bool]] = {}
 ENCODER_FILE = r"(?:index(?:_(?:economy|balanced|hd))?\.m3u8|segment(?:(?:economy|balanced|hd)_)?\d+\.ts)"
 DEINTERLACE_VIDEO = "bwdif=mode=send_frame:parity=auto:deint=interlaced"
+LIVE_HD_SCALE = "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
 AAC_FORMAT = ["-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-ar", "48000", "-b:a", "64k"]
 PLEX_RESOURCE_CACHE: dict[str, object] = {"expires": 0.0, "servers": {}}
 STREAM_DIR = DATA_DIR / "streams"
@@ -373,6 +375,7 @@ def config(public: bool = False) -> dict:
         "auto_publish_channels": bool(value.get("auto_publish_channels", True)),
     }
     if public:
+        result["jellyfin_connections"] = jellyfin_connections(public=True)
         result["publishing_pending"] = bool(result.pop("pending_creator_profile"))
         result["plex_token"] = ""
         result["token_saved"] = bool(value.get("plex_token"))
@@ -683,11 +686,21 @@ def update_channel_run(channel_id, action):
 
 def backup_state(reason: str) -> None:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    snapshot = {"created_at": datetime.now(timezone.utc).isoformat(), "reason": reason, "channels": channels(), "assets": asset_manifest()}
+    settings = config()
+    snapshot = {"created_at": datetime.now(timezone.utc).isoformat(), "reason": reason, "channels": channels(), "assets": asset_manifest(),
+                "studio_settings": {"name": settings["creator_profile"].get("name", ""),
+                                    **{k: settings[k] for k in ("guide_hours", "port", "auto_publish_channels", "public_tunnel")}}}
     name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json"
     atomic_json(BACKUP_DIR / name, snapshot)
-    for stale in sorted(BACKUP_DIR.glob("*.json"))[:-20]:
-        stale.unlink(missing_ok=True)
+    # A burst of edits must not discard every restore point from earlier days.
+    owned = sorted(p for p in BACKUP_DIR.glob("*.json") if re.fullmatch(r"\d{8}T\d{12}Z\.json", p.name))
+    first_per_day = {}
+    for path in owned:
+        first_per_day.setdefault(path.name[:8], path)
+    keep = set(owned[-20:]) | set(list(first_per_day.values())[-30:])
+    for stale in owned:
+        if stale not in keep:
+            stale.unlink(missing_ok=True)
 
 
 def asset_manifest() -> list[dict]:
@@ -993,7 +1006,7 @@ def plex_binary(path: str, server_id: str = "", size: str = "") -> tuple[bytes, 
     if not path.startswith("/") or path.startswith("//"):
         raise ValueError("Invalid Plex image path.")
     cache_key = hashlib.sha256(f"{server_id}:{path}".encode()).hexdigest()
-    width = {"mini": 128, "poster": 384}.get(size)
+    width = {"mini": 128, "poster": 384, "backdrop": 960}.get(size)
     with POSTER_CACHE_LOCKS[int(cache_key[:2], 16) % len(POSTER_CACHE_LOCKS)]:
         thumbnail = POSTER_CACHE_DIR / f"{cache_key}-{width}.jpg"
         if width and thumbnail.is_file():
@@ -1195,6 +1208,10 @@ def plex_items(section: str) -> list[dict]:
     library = next((item for item in libraries if item["key"] == section), None)
     if not library:
         raise ValueError("Plex library was not found.")
+
+    def credit_names(node, tag):
+        return [entry.get("tag", "").strip()[:120] for entry in node.findall(tag)[:24] if entry.get("tag", "").strip()]
+
     # TV libraries must expose playable episodes, but Plex normally keeps genres,
     # the premiere year, and the content rating on the non-playable show folder.
     # Load both views and inherit that metadata so Smart Channels can filter whole
@@ -1211,6 +1228,8 @@ def plex_items(section: str) -> list[dict]:
                 "content_rating": show.get("contentRating", ""),
                 "rating": show.get("rating", ""),
                 "genres": sorted({genre.get("tag", "").strip() for genre in show.findall("Genre") if genre.get("tag", "").strip()}),
+                "actors": credit_names(show, "Role"),
+                "directors": credit_names(show, "Director"),
                 "summary": show.get("summary", "")[:600],
                 "thumb": show.get("thumb", ""),
                 "art": show.get("art", ""),
@@ -1245,11 +1264,14 @@ def plex_items(section: str) -> list[dict]:
             "key": node.get("key", f"/library/metadata/{rating_key}"),
             "thumb": node.get("thumb", ""),
             "series_thumb": node.get("grandparentThumb", "") or parent_metadata.get("thumb", ""),
+            "series_art": node.get("grandparentArt", "") or parent_metadata.get("art", ""),
             "art": node.get("art", "") or node.get("grandparentArt", "") or parent_metadata.get("art", ""),
             "summary": (node.get("summary", "") or parent_metadata.get("summary", ""))[:600],
             "content_rating": node.get("contentRating", "") or parent_metadata.get("content_rating", ""),
             "rating": node.get("rating", "") or parent_metadata.get("rating", ""),
             "genres": episode_genres or list(parent_metadata.get("genres", [])),
+            "actors": list(dict.fromkeys(credit_names(node, "Role") + parent_metadata.get("actors", []))),
+            "directors": list(dict.fromkeys(credit_names(node, "Director") + parent_metadata.get("directors", []))),
             "series": series_title,
             "season": int(node.get("parentIndex", "0") or 0),
             "episode": int(node.get("index", "0") or 0),
@@ -1279,7 +1301,7 @@ def scan_plex_movies() -> dict:
     offline shared server is skipped without hiding movies from healthy
     servers, and its credentials are never exposed in the public vault feed.
     """
-    libraries = [library for library in all_libraries() if library.get("source") != "local" and library.get("type") == "movie"]
+    libraries = [library for library in all_libraries(include_jellyfin=False) if library.get("source") != "local" and library.get("type") == "movie"]
     movies, failed, failed_sections = [], [], set()
 
     def load_library(library: dict) -> tuple[dict, list[dict]]:
@@ -1348,7 +1370,152 @@ def sync_plex_movies_async() -> None:
     threading.Thread(target=worker, daemon=True, name="channel-forge-rewind-sync").start()
 
 
-def all_libraries(*, include_shared: bool = True) -> list[dict]:
+JELLYFIN_ID = re.compile(r"[a-f0-9]{32}")
+JELLYFIN_HEADERS = 'MediaBrowser Client="ChannelForge", Device="Creator", DeviceId="' + hashlib.sha256(str(DATA_DIR).encode()).hexdigest()[:32] + f'", Version="{VERSION}"'
+
+
+def jellyfin_id(value) -> str:
+    value = str(value or "").replace("-", "").lower()
+    return value if JELLYFIN_ID.fullmatch(value) else ""
+
+
+def jellyfin_connections(*, public=False) -> list[dict]:
+    values = load_json(JELLYFIN_FILE, [])
+    if not isinstance(values, list):
+        return []
+    fields = ("id", "url", "name", "username", "user_id", "token")
+    return [({key: row[key] for key in fields[:4]} if public else row) for row in values
+            if isinstance(row, dict) and all(isinstance(row.get(key), str) for key in fields)]
+
+
+def jellyfin_connection(connection_id: str) -> dict:
+    match = next((row for row in jellyfin_connections() if row["id"] == connection_id), None)
+    if match is None:
+        raise ValueError("This Jellyfin connection is unavailable. Reconnect it in Sources & sharing.")
+    return match
+
+
+def jellyfin_authorization(connection: dict) -> str:
+    return f'{JELLYFIN_HEADERS}, Token="{connection["token"]}"' if connection.get("token") else JELLYFIN_HEADERS
+
+
+def jellyfin_request(connection, path, *, payload=None, image=False, missing_ok=False):
+    request = urllib.request.Request(connection["url"] + path, data=None if payload is None else json.dumps(payload).encode(),
+                                     headers={"Accept": "image/*" if image else "application/json", "Content-Type": "application/json"})
+    # A reverse proxy redirect must not carry this server's token to another origin.
+    request.add_unredirected_header("Authorization", jellyfin_authorization(connection))
+    try:
+        with urllib.request.urlopen(request, timeout=7) as response:
+            limit = 12_000_000 if image else 6 * 1024**2
+            data = response.read(limit + 1)
+            if len(data) > limit:
+                raise ValueError("Jellyfin returned too much data.")
+            if image:
+                content_type = response.headers.get_content_type()
+                if content_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+                    raise ValueError("Jellyfin did not return a supported image.")
+                return data, content_type
+            result = json.loads(data)
+            if not isinstance(result, dict):
+                raise ValueError("Expected a Jellyfin JSON object.")
+            return result
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        if exc.code == 404 and missing_ok:
+            return None
+        if exc.code in (401, 403):
+            raise ValueError("Jellyfin rejected the sign-in. Check the account or reconnect it.") from None
+        raise ValueError(f"Jellyfin returned HTTP {exc.code}.") from None
+    except (OSError, ValueError) as exc:
+        raise ValueError("Jellyfin did not return a usable response. Check the server address and try again.") from exc
+
+
+def connect_jellyfin(payload: dict) -> dict:
+    url = str(payload.get("url", "")).strip().rstrip("/")
+    address = urllib.parse.urlsplit(url)
+    if address.scheme not in {"http", "https"} or not address.hostname or address.username or address.password or address.query or address.fragment or re.search(r"[\x00-\x20]", url):
+        raise ValueError("Enter a Jellyfin server address such as http://192.168.1.20:8096.")
+    username = str(payload.get("username", "")).strip()
+    if not username:
+        raise ValueError("Enter your Jellyfin username.")
+    response = jellyfin_request({"url": url}, "/Users/AuthenticateByName", payload={"Username": username, "Pw": str(payload.get("password", ""))})
+    user = response.get("User")
+    user = user if isinstance(user, dict) else {}
+    user_id = jellyfin_id(user.get("Id"))
+    token = str(response.get("AccessToken", ""))
+    if not user_id or not re.fullmatch(r"[A-Za-z0-9_.~-]{1,256}", token):
+        raise ValueError("Jellyfin did not provide a usable user session.")
+    server = jellyfin_id(response.get("ServerId")) or url
+    identity = hashlib.sha256(f"{server}:{user_id}".encode()).hexdigest()[:24]
+    connection = {"id": identity, "url": url, "name": str(payload.get("name", "")).strip()[:100] or address.hostname,
+                  "username": username, "user_id": user_id, "token": token}
+    with LOCK:
+        values = {row["id"]: row for row in jellyfin_connections()}
+        values[identity] = connection
+        atomic_json(JELLYFIN_FILE, list(values.values()))
+    return {key: connection[key] for key in ("id", "url", "name", "username")}
+
+
+def jellyfin_libraries(connection):
+    result = jellyfin_request(connection, "/UserViews?" + urllib.parse.urlencode({"userId": connection["user_id"]}), missing_ok=True)
+    if result is None and jellyfin_id(connection["user_id"]):
+        result = jellyfin_request(connection, f'/Users/{connection["user_id"]}/Views')
+    return [{"key": f'jellyfin:{connection["id"]}:{identity}', "title": f'{row.get("Name", "Library")} · {connection["name"]}',
+             "type": {"movies": "movie", "tvshows": "show"}.get(row.get("CollectionType"), "mixed"), "source": "jellyfin"}
+            for row in (result or {}).get("Items", []) or [] if isinstance(row, dict) and (identity := jellyfin_id(row.get("Id")))
+            and row.get("CollectionType") in (None, "movies", "tvshows", "homevideos", "mixed", "boxsets")]
+
+
+def jellyfin_section(section: str) -> tuple[dict, str]:
+    parts = section.split(":")
+    if len(parts) != 3 or parts[0] != "jellyfin" or not (parent_id := jellyfin_id(parts[2])):
+        raise ValueError("Jellyfin library was not found.")
+    return jellyfin_connection(parts[1]), parent_id
+
+
+def jellyfin_items(section):
+    connection, parent_id = jellyfin_section(section)
+    query = {"userId": connection["user_id"], "parentId": parent_id, "recursive": "true", "includeItemTypes": "Movie,Episode,Video",
+             "fields": "Overview,Genres,People,MediaStreams", "limit": 200, "sortBy": "SortName"}
+    result = []
+    offset = 0
+    while True:
+        page = jellyfin_request(connection, "/Items?" + urllib.parse.urlencode({**query, "startIndex": offset}))
+        rows = page.get("Items") or []
+        if not isinstance(rows, list):
+            raise ValueError("Jellyfin returned an invalid media catalog.")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            identity = jellyfin_id(row.get("Id"))
+            duration = int(row.get("RunTimeTicks") or 0) // 10000
+            if not identity or not duration:
+                continue
+            kind = str(row.get("Type", "Video")).lower()
+            art = row.get("ImageTags") or {}
+            series_id = jellyfin_id(row.get("SeriesId"))
+            series = row.get("SeriesName") or ""
+            video = next((stream for stream in (row.get("MediaStreams") or []) if stream.get("Type") == "Video"), {})
+            title = row.get("Name") or "Untitled"
+            season, episode = int(row.get("ParentIndexNumber") or 0), int(row.get("IndexNumber") or 0)
+            if kind == "episode" and series:
+                title = f"{series} · S{season:02d}E{episode:02d} · {title}"
+            result.append({"id": identity, "title": title, "section": section, "source": "jellyfin",
+                           "type": kind, "duration_ms": duration, "year": row.get("ProductionYear") or "", "summary": row.get("Overview") or "",
+                           "thumb": identity if art.get("Primary") else "", "series_thumb": series_id if row.get("SeriesPrimaryImageTag") else "",
+                           "art": identity if row.get("BackdropImageTags") else "",
+                           "series_art": jellyfin_id(row.get("ParentBackdropItemId")) if row.get("ParentBackdropImageTags") else "",
+                           "series": series, "series_id": series_id, "season": season,
+                           "episode": episode, "genres": row.get("Genres") or [], "content_rating": row.get("OfficialRating") or "",
+                           "actors": [person["Name"] for person in (row.get("People") or []) if person.get("Type") == "Actor" and person.get("Name")],
+                           "directors": [person["Name"] for person in (row.get("People") or []) if person.get("Type") == "Director" and person.get("Name")],
+                           "video_codec": video.get("Codec") or "", "height": video.get("Height") or 0})
+        offset += len(rows)
+        if not rows or offset >= int(page.get("TotalRecordCount") or offset):
+            return result
+
+
+def all_libraries(*, include_shared: bool = True, include_jellyfin: bool = True) -> list[dict]:
     local = [{"key": item["key"], "title": item["title"], "type": "local", "source": "local"} for item in local_libraries()]
     result = []
     if config()["plex_token"]:
@@ -1370,8 +1537,17 @@ def all_libraries(*, include_shared: bool = True) -> list[dict]:
                         result.extend({**item, "source": "plex-shared"} for item in job.result())
                     except ValueError:
                         continue
-        if not result and not local:
-            raise ValueError("No accessible Plex or local libraries were found.")
+    connections = jellyfin_connections() if include_jellyfin else []
+    if connections:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(connections))) as pool:
+            jobs = [pool.submit(jellyfin_libraries, connection) for connection in connections]
+            for job in jobs:
+                try:
+                    result.extend(job.result())
+                except (OSError, ValueError):
+                    continue
+    if config()["plex_token"] and not result and not local:
+        raise ValueError("No connected media libraries could be reached.")
     return result + local
 
 
@@ -1419,6 +1595,11 @@ def local_duration_ms(path: Path) -> int:
         return 1_800_000
 
 
+@lru_cache(maxsize=20_000)
+def cached_local_duration(path: Path, modified_ns: int, size: int) -> int:
+    return local_duration_ms(path)
+
+
 def local_items(section: str) -> list[dict]:
     cached = LOCAL_LIBRARY_CACHE.get(section)
     if cached and cached[0] > time.time() - 60:
@@ -1434,14 +1615,15 @@ def local_items(section: str) -> list[dict]:
         resolved = path.resolve()
         try:
             relative = resolved.relative_to(root)
-        except ValueError:
+            info = resolved.stat()
+        except (OSError, ValueError):
             continue
         identity = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:24]
         poster = local_poster(resolved, root)
         title = resolved.stem.replace("_", " ").replace(".", " ").strip()
         result.append({
             "id": f"local-{identity}", "title": title, "year": "", "type": "video",
-            "duration_ms": local_duration_ms(resolved), "key": f"local:{identity}",
+            "duration_ms": cached_local_duration(resolved, info.st_mtime_ns, info.st_size), "key": f"local:{identity}",
             "thumb": f"local:{identity}" if poster else "", "summary": str(relative.parent) if relative.parent != Path(".") else "Local media",
             "art": f"local:{identity}" if poster else "",
             "content_rating": "", "rating": "", "genres": [], "series": relative.parts[0] if len(relative.parts) > 1 else "",
@@ -1456,6 +1638,8 @@ def local_items(section: str) -> list[dict]:
 def library_items(section: str, *, prefer_index: bool = False) -> list[dict]:
     if section.startswith("local:"):
         return local_items(section)
+    if section.startswith("jellyfin:"):
+        return jellyfin_items(section)
     if prefer_index and config().get("plex_token"):
         indexed = [item for item in cached_plex_movies() if item.get("section") == section]
         if indexed:
@@ -1534,17 +1718,18 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "duration_ms": max(1000, min(86400000, int(item.get("duration_ms", 1800000)))),
             "key": str(item.get("key", f"/library/metadata/{item['id']}"))[:500],
             "thumb": str(item.get("thumb", ""))[:500], "series_thumb": str(item.get("series_thumb", ""))[:500],
+            "series_art": str(item.get("series_art", ""))[:500],
             "art": str(item.get("art", ""))[:500], "summary": str(item.get("summary", ""))[:600],
             "content_rating": str(item.get("content_rating", ""))[:40], "rating": str(item.get("rating", ""))[:20],
             "genres": [str(value)[:80] for value in item.get("genres", []) if str(value).strip()][:20],
-            "series": str(item.get("series", ""))[:200],
+            "series": str(item.get("series", ""))[:200], "series_id": jellyfin_id(item.get("series_id")),
             "season": max(0, int(item.get("season", 0) or 0)), "episode": max(0, int(item.get("episode", 0) or 0)),
             "part_key": str(item.get("part_key", ""))[:500], "container": str(item.get("container", ""))[:30],
             "video_codec": str(item.get("video_codec", ""))[:30], "audio_codec": str(item.get("audio_codec", ""))[:30],
             "height": min(16384, max(0, int(item.get("height") or 0))),
             "audio_stream_index": max(0, int(item.get("audio_stream_index", 0) or 0)),
             "audio_stream_id": str(item.get("audio_stream_id", ""))[:40], "audio_language": str(item.get("audio_language", ""))[:40],
-            "source": "local" if item.get("source") == "local" else "plex",
+            "source": item["source"] if item.get("source") in {"local", "jellyfin"} else "plex",
             "file_path": str(item.get("file_path", ""))[:4000] if item.get("source") == "local" else "",
             "plex_server_id": str(item.get("plex_server_id", ""))[:300] if item.get("source") != "local" else "",
         })
@@ -1593,7 +1778,7 @@ def save_channel(payload: dict, channel_id: str = "") -> dict:
             values.append(item)
         atomic_json(CHANNELS_FILE, values)
         generate_exports(values)
-        plex_posters = [(str(media.get("thumb", "")), str(media.get("plex_server_id", ""))) for media in item["items"] if media.get("source") != "local" and media.get("thumb")]
+        plex_posters = {(str(media.get("thumb", "")), str(media.get("plex_server_id", ""))) for media in item["items"] if media["source"] == "plex" and media.get("thumb")}
         if plex_posters:
             def cache_posters() -> None:
                 for path, server_id in plex_posters:
@@ -1642,10 +1827,15 @@ def parse_timestamp(value: str) -> datetime:
 
 
 def scheduled_slot(items, index, start, stop, offset_ms, availability):
-    """Keep the channel clock anchored when a selected local file goes missing."""
+    """Keep the channel clock anchored when selected media becomes unavailable."""
     def present(item):
         if SOURCE_FAILURES.get(media_source_identity(item), 0) > time.monotonic():
             return False
+        if item.get("source") == "jellyfin":
+            if "jellyfin_connections" not in availability:
+                availability["jellyfin_connections"] = {row["id"] for row in jellyfin_connections()}
+            parts = str(item.get("section", "")).split(":")
+            return len(parts) == 3 and parts[0] == "jellyfin" and parts[1] in availability["jellyfin_connections"]
         if item.get("source") != "local":
             return True
         path = item.get("file_path", "")
@@ -1680,7 +1870,7 @@ def scheduled_slot(items, index, start, stop, offset_ms, availability):
 
 
 def media_source_identity(item):
-    return (item.get("plex_server_id", ""), item.get("section", ""), item.get("file_path", ""), item.get("id", ""))
+    return (item.get("source") or "plex", item.get("plex_server_id", ""), item.get("section", ""), item.get("file_path", ""), item.get("id", ""))
 
 
 def quarantine_unplayable_source(item):
@@ -2010,34 +2200,6 @@ def stop_public_tunnel() -> None:
         TUNNEL_URL = ""
 
 
-def plex_live_url(channel: dict, moment: datetime | None = None) -> str:
-    """Create a Plex universal-transcoder HLS session for the live schedule point."""
-    position = schedule_position(channel, moment)
-    item = position["item"]
-    credentials = plex_credentials(str(item.get("plex_server_id", "")))
-    metadata_path = str(item.get("key") or f"/library/metadata/{item['id']}")
-    if not metadata_path.startswith("/library/metadata/"):
-        metadata_path = f"/library/metadata/{item['id']}"
-    parameters = {
-        "path": metadata_path,
-        "mediaIndex": "0", "partIndex": "0", "protocol": "hls",
-        "offset": f"{position['offset_ms'] / 1000:.3f}", "fastSeek": "1",
-        # Force a browser-safe H.264/AAC rendition instead of exposing Linux Chrome
-        # to an original codec/container it may not support.
-        "directPlay": "0", "directStream": "0", "videoCodec": "h264", "audioCodec": "aac",
-        "videoQuality": "100", "videoResolution": "1920x1080", "maxVideoBitrate": "20000", "subtitleSize": "100",
-        "audioBoost": "100", "location": "lan", "context": "streaming", "copyts": "1", "session": secrets.token_hex(12),
-        "X-Plex-Token": credentials["token"], "X-Plex-Product": APP_NAME,
-        "X-Plex-Version": VERSION, "X-Plex-Client-Identifier": persistent_client_identifier(),
-        "X-Plex-Platform": "Chrome", "X-Plex-Platform-Version": "120.0", "X-Plex-Device": "Linux",
-        "X-Plex-Device-Name": APP_NAME, "X-Plex-Model": "hosted",
-        "X-Plex-Client-Profile-Extra": "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
-    }
-    if item.get("audio_stream_id"):
-        parameters["audioStreamID"] = str(item["audio_stream_id"])
-    return credentials["url"] + "/video/:/transcode/universal/start.m3u8?" + urllib.parse.urlencode(parameters)
-
-
 def ffmpeg_path() -> str:
     executable = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
     roots = [
@@ -2110,7 +2272,7 @@ def copyable_local_video(path, modified_ns, size):
         return False
 
 
-def playback_audio_track(item: dict, media_input: str) -> tuple[int, bool | None]:
+def playback_audio_track(item: dict, media_input: str, input_options=()) -> tuple[int, bool | None]:
     """Resolve the preferred audio track and whether the source has audio."""
     recorded_language = str(item.get("audio_language", "")).casefold()
     recorded_index = max(0, int(item.get("audio_stream_index", 0) or 0))
@@ -2123,7 +2285,7 @@ def playback_audio_track(item: dict, media_input: str) -> tuple[int, bool | None
         return cached
     try:
         completed = subprocess.run(
-            [ffprobe_path(), "-v", "error", "-select_streams", "a", "-show_entries", "stream=index:stream_tags=language:stream_disposition=default", "-of", "json", media_input],
+            [ffprobe_path(), "-v", "error", "-select_streams", "a", "-show_entries", "stream=index:stream_tags=language:stream_disposition=default", "-of", "json", *input_options, media_input],
             capture_output=True, text=True, timeout=6, creationflags=0x08000000 if sys.platform == "win32" else 0,
         )
         if completed.returncode != 0:
@@ -2321,16 +2483,29 @@ def start_ffmpeg_session(channel: dict, *, public_delivery: bool = False, constr
         return start_or_reuse_encoder(channel, public_delivery=public_delivery, constrained_live=constrained_live, position=position)
 
 
-def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool, video_limit_kbps: int | None = None) -> tuple[list[str], list[str]]:
-    renditions = [("economy", 480, 270, 128, 165, 1), ("balanced", 854, 480, 430, 540, 1),
-                  ("hd", 1280, 720, 1150, 1450, 2)]
+def relay_renditions(constrained=False, *, on_demand=False):
+    # name, max dimensions, video target/peak (kbit/s), threads, advertised peak including audio and TS.
+    economy = ("economy", 480, 270, 104, 124, 1, 224000) if constrained else ("economy", 480, 270, 128, 165, 1, 270000)
+    balanced = ("balanced", 854, 480, 430, 540, 1, 690000)
+    hd = (("hd", 1280, 720, 1150, 1450, 2, 1750000) if constrained or on_demand
+          else ("hd", 1280, 720, 3000, 3400, 2, 4000000))
+    return economy, balanced, hd
+
+
+def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool, video_limit_kbps: int | None = None,
+                           *, constrained=False, on_demand=False) -> tuple[list[str], list[str], dict[str, int]]:
+    renditions = relay_renditions(constrained, on_demand=on_demand)
     inputs = "".join(f"[{name}_in]" for name, *_ in renditions)
     filters = [f"[0:v:0]{DEINTERLACE_VIDEO},split={len(renditions)}{inputs}"]
-    maps, variants = [], []
-    for index, (name, width, height, bitrate, maximum, threads) in enumerate(renditions):
+    maps, variants, peaks = [], [], {}
+    for index, (name, width, height, bitrate, maximum, threads, peak) in enumerate(renditions):
+        unscaled_max = maximum
         if video_limit_kbps is not None:
             scale = min(1, video_limit_kbps / sum(row[4] for row in renditions))
             bitrate, maximum = max(1, int(bitrate * scale)), max(1, int(maximum * scale))
+        # FFmpeg advertises its average video target; ABR needs room for the
+        # peak video rate, audio and MPEG-TS overhead on difficult scenes.
+        peaks[name] = peak - (unscaled_max - maximum) * 1000
         filters.append(
             f"[{name}_in]scale=w='min({width},iw)':h='min({height},ih)':"
             f"force_original_aspect_ratio=decrease:force_divisible_by=2[{name}]"
@@ -2346,7 +2521,7 @@ def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool, v
     maps = ["-filter_complex_threads", "2", "-filter_complex", ";".join(filters), *maps]
     output = ["-master_pl_name", "index.m3u8", "-var_stream_map", " ".join(variants),
               "-hls_segment_filename", str(directory / "segment%v_%06d.ts"), str(directory / "index_%v.m3u8")]
-    return maps, output
+    return maps, output, peaks
 
 
 def stream_audio_options(has_audio: bool | None, on_demand: bool, remaining: float) -> list[str]:
@@ -2370,7 +2545,7 @@ def start_or_reuse_encoder(channel: dict, *, public_delivery: bool = False, cons
     if position.get("recovery_key"):
         start_key += ":" + position["recovery_key"]
     profile = "constrained" if constrained_live else "public" if public_delivery else "standard"
-    identity = hashlib.sha256(f'{channel["id"]}:{item["id"]}:{start_key}:{profile}'.encode()).hexdigest()[:20]
+    identity = hashlib.sha256(repr((channel["id"], media_source_identity(item), start_key, profile)).encode()).hexdigest()[:20]
     with LOCK:
         generation = ENCODER_GENERATION
         existing = FFMPEG_SESSIONS.get(identity)
@@ -2424,8 +2599,18 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
     on_demand = bool(channel.get("on_demand"))
     public_delivery = profile != "standard"
     constrained_live = profile == "constrained"
+    source_options = []
+    jellyfin_token = ""
     if item.get("source") == "local":
         media_input = str(local_media_path(item))
+    elif item.get("source") == "jellyfin":
+        connection, _ = jellyfin_section(item.get("section", ""))
+        identity_id = jellyfin_id(item.get("id"))
+        if not identity_id:
+            raise ValueError("The selected Jellyfin title is invalid.")
+        media_input = f'{connection["url"]}/Videos/{identity_id}/stream?static=true'
+        jellyfin_token = connection["token"]
+        source_options = ["-headers", f"Authorization: {jellyfin_authorization(connection)}\r\n"]
     else:
         credentials = plex_credentials(str(item.get("plex_server_id", "")))
         if not credentials["token"]:
@@ -2437,10 +2622,15 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
     directory = STREAM_DIR / f"{identity}-{secrets.token_hex(6)}"
     remaining = max(0.1, (position["stop"] - position["start"]).total_seconds() - position["offset_ms"] / 1000)
     input_timing = ["-re"] if on_demand else ["-re", "-ss", f'{position["offset_ms"] / 1000:.3f}']
+    if on_demand and public_delivery:
+        # Rebuild headroom after a congested interval. Keep disk reservations
+        # and idle eviction identical to the realtime producer.
+        input_timing = ["-readrate", "1.25"]
     if item.get("source") != "local":
         # Plex media parts support byte ranges. Resume an interrupted read at
         # the missing byte while leaving normal end-of-file handling intact.
         input_timing += ["-rw_timeout", "7000000", "-reconnect", "1", "-reconnect_delay_max", "2"]
+    input_timing += source_options
     executable = ffmpeg_path()
     if public_delivery and ffmpeg_supports_read_burst(executable):
         # Fill the viewer's startup buffer, then pace the encoder at normal speed.
@@ -2450,11 +2640,13 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
     hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments"] if on_demand else
                    ["-hls_list_size", "12" if relay else "5", "-hls_delete_threshold", "45" if constrained_live else "90",
                     "-hls_flags", "independent_segments+temp_file+delete_segments"])
-    audio_index, has_audio = playback_audio_track(item, media_input)
+    audio_index, has_audio = (playback_audio_track(item, media_input, source_options) if source_options
+                              else playback_audio_track(item, media_input))
     duration = (position["stop"] - position["start"]).total_seconds()
     media_rate = int((budget - 8 * 1024**2) * 8 / max(1, duration) / 1000 * 0.82) if on_demand else None
     audio_rate = 64 if has_audio is not False else 0
-    if constrained_live:
+    peaks = {}
+    if constrained_live and has_audio is None:
         encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?", "-threads:v", "2",
                     "-vf", f"{DEINTERLACE_VIDEO},scale=w='min(480,iw)':h='min(270,ih)':"
                     "force_original_aspect_ratio=decrease:force_divisible_by=2",
@@ -2462,17 +2654,18 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
         output = ["-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8")]
     elif relay and has_audio is not None and (media_rate is None or media_rate >= 750):
         video_limit = media_rate - 3 * audio_rate if media_rate is not None else None
-        encoding, output = adaptive_relay_options(directory, audio_index, has_audio, video_limit)
+        encoding, output, peaks = adaptive_relay_options(directory, audio_index, has_audio, video_limit,
+                                                         constrained=constrained_live, on_demand=on_demand)
     else:
         encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?"]
         if relay:
             maximum = min(1000, media_rate - audio_rate) if media_rate is not None else 1000
-            encoding += ["-vf", f"{DEINTERLACE_VIDEO},scale=w='min(1280,iw)':h='min(720,ih)':"
-                         "force_original_aspect_ratio=decrease:force_divisible_by=2",
+            encoding += ["-vf", f"{DEINTERLACE_VIDEO},{LIVE_HD_SCALE}",
                          "-b:v", f"{min(800, maximum)}k", "-maxrate", f"{maximum}k", "-bufsize", f"{maximum}k"]
         else:
             maximum = min(6000, media_rate - audio_rate) if media_rate is not None else 6000
-            encoding += ["-vf", DEINTERLACE_VIDEO, "-crf", "19", "-maxrate", f"{maximum}k", "-bufsize", f"{maximum * 2}k"]
+            filters = DEINTERLACE_VIDEO if on_demand else f"{DEINTERLACE_VIDEO},{LIVE_HD_SCALE}"
+            encoding += ["-vf", filters, "-crf", "19", "-maxrate", f"{maximum}k", "-bufsize", f"{maximum * 2}k"]
         output = ["-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8")]
     policy = os.environ.get("CHANNELFORGE_VIDEO_ENCODER", "auto").lower()
     codec = "libx264"
@@ -2487,10 +2680,10 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
             if policy == "hardware" or busy or int(item.get("height") or 0) >= 1080 or item.get("video_codec") in ("hevc", "av1"):
                 codec = probed_hardware_encoder(executable) or "libx264"
     latency = [] if on_demand else ["-tune", "zerolatency"]
-    segment_duration = "2" if constrained_live else "1"
+    segment_duration = "2" if constrained_live or (on_demand and public_delivery) else "1"
     audio = stream_audio_options(has_audio, on_demand, remaining)
     if constrained_live and audio:
-        audio += ["-b:a", "48k"]
+        audio += ["-b:a:0", "48k"]
     video = ["-c:v", codec]
     if codec == "copy":
         encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?"]
@@ -2517,7 +2710,7 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
     session = {"directory": directory, "channel_id": channel["id"], "created": time.time(),
                "last_access": time.time(), "on_demand": on_demand, "budget": budget,
                "program": item.get("title", ""), "video_encoder": codec, "profile": profile,
-               "audio_codec": "aac" if audio else "none", "segment_seconds": int(segment_duration),
+               "audio_codec": "aac" if audio else "none", "segment_seconds": int(segment_duration), "variant_peaks": peaks,
                "media_start": position["start"] + timedelta(milliseconds=position["offset_ms"])}
     try:
         with LOCK:
@@ -2565,6 +2758,8 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
                 reader.join()
                 error = b"".join(errors).decode("utf-8", "replace").strip()
                 error = re.sub(r"(?i)(X-Plex-Token=)[^&\s']+", r"\1[redacted]", error)
+                if jellyfin_token:
+                    error = error.replace(jellyfin_token, "[redacted]")
                 raise ValueError(f"Local FFmpeg playback failed: {error or 'the media could not be decoded.'}")
             time.sleep(0.05)
         raise ValueError("Local FFmpeg playback did not start within 25 seconds.")
@@ -2651,6 +2846,21 @@ def read_encoder_playlist(path):
             time.sleep(.025 * (attempt + 1))
 
 
+def viewer_encoder_playlist(session, name):
+    content = read_encoder_playlist(session["directory"] / name)
+    peaks = session.get("variant_peaks", {})
+    if name != "index.m3u8" or not peaks:
+        return content
+    lines = content.splitlines(keepends=True)
+    for index, line in enumerate(lines[:-1]):
+        if not line.startswith(b"#EXT-X-STREAM-INF:"):
+            continue
+        variant = re.fullmatch(rb"index_(economy|balanced|hd)\.m3u8", lines[index+1].strip())
+        if variant and (peak := peaks.get(variant[1].decode("ascii"))):
+            lines[index] = re.sub(rb"(?<=[,:])BANDWIDTH=\d+", f"BANDWIDTH={peak}".encode(), line)
+    return b"".join(lines)
+
+
 class LivePlayout:
     def __init__(self, open_program, run_anchor=None, channel_id=None, prepare_program=None):
         self.run_anchor = run_anchor
@@ -2666,6 +2876,7 @@ class LivePlayout:
         self.finished = False
         self.stopped = False
         self.sequence = 0
+        self.playlist_cache = {}
         self.channel_id = channel_id
         self.recovery_key = ""
         self.source = None
@@ -2695,7 +2906,11 @@ class LivePlayout:
         threading.Thread(target=prepare, daemon=True, name="channel-next-program").start()
 
     def active(self):
-        return not self.stopped and self.error is None and time.monotonic() - self.last_request < 30
+        return not self.stopped and self.error is None and time.monotonic() - self.last_request < 60
+
+    def session_keys(self):
+        with self.condition:
+            return {renditions["economy"][1].split("/")[2] for _, _, renditions in self.segments}
 
     def playlist(self, variant):
         with self.condition:
@@ -2705,6 +2920,10 @@ class LivePlayout:
                 raise EncoderCapacityError(self.capacity_error)
             if self.error or not self.segments:
                 raise ValueError("The channel could not prepare its next program.")
+            version = (self.segments[0][0], self.segments[-1][0], self.finished)
+            cached = self.playlist_cache.get(variant)
+            if cached and cached[0] == version:
+                return cached[1]
             first, discontinuity, _ = self.segments[0]
             lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-INDEPENDENT-SEGMENTS",
                      "#EXT-X-TARGETDURATION:2", f"#EXT-X-MEDIA-SEQUENCE:{first}",
@@ -2716,7 +2935,9 @@ class LivePlayout:
                 lines.extend(renditions[variant])
             if self.finished:
                 lines.append("#EXT-X-ENDLIST")
-            return "\n".join(lines) + "\n"
+            content = "\n".join(lines) + "\n"
+            self.playlist_cache[variant] = (version, content)
+            return content
 
     def run(self):
         boundary = None
@@ -2790,26 +3011,38 @@ class LivePlayout:
         last = -1
         media_cursor = self.media_start
         progressed_at = time.monotonic()
+        names = ("economy", "balanced", "hd") if adaptive else ("economy",)
+        paths = {name: directory / (f"index_{name}.m3u8" if adaptive else "index.m3u8") for name in names}
+        fingerprints, snapshots, final_playlist = {}, {}, {}
+        common = []
         while self.active():
             self.prepare_upcoming()
             returncode = process.poll() if process is not None else 0
-            snapshots = {}
-            ended = True
-            for name in (("economy", "balanced", "hd") if adaptive else ("economy",)):
-                playlist = directory / (f"index_{name}.m3u8" if adaptive else "index.m3u8")
+            changed = False
+            for name, playlist in paths.items():
+                try:
+                    info = playlist.stat()
+                    fingerprint = (info.st_mtime_ns, info.st_size, info.st_ino)
+                except FileNotFoundError:
+                    fingerprint = None
+                if name in fingerprints and fingerprints[name] == fingerprint and returncode is None:
+                    continue
                 content = read_encoder_playlist(playlist).decode()
-                ended = ended and "#EXT-X-ENDLIST" in content
+                fingerprints[name] = fingerprint
+                final_playlist[name] = "#EXT-X-ENDLIST" in content
                 snapshots[name] = {
                     int(number): (duration, f"/ffmpeg-stream/{session}/{filename}")
                     for duration, filename, number in re.findall(
                         r"(?m)^(#EXTINF:[^\r\n]+)\r?\n(segment(?:[a-z]+_)?(\d+)\.ts)\r?$", content)
                 }
-            if not adaptive:
-                snapshots.update(balanced=snapshots["economy"], hd=snapshots["economy"])
-            common = sorted(set.intersection(*(set(items) for items in snapshots.values())))
-            with self.condition:
-                for number in common:
-                    if number > last:
+                changed = True
+            if changed:
+                if not adaptive:
+                    snapshots.update(balanced=snapshots["economy"], hd=snapshots["economy"])
+                common = sorted(set.intersection(*(set(items) for items in snapshots.values())))
+            if common and common[-1] > last:
+                with self.condition:
+                    for number in (value for value in common if value > last):
                         progressed_at = time.monotonic()
                         self.recovering = False
                         variants = {name: rows[number] for name, rows in snapshots.items()}
@@ -2822,9 +3055,8 @@ class LivePlayout:
                             self.resume_at = min(media_cursor, self.next_boundary)
                         self.sequence += 1
                         last = number
-                if common:
                     self.condition.notify_all()
-            if ended and common:
+            if all(final_playlist.values()) and common:
                 return
             if returncode is not None:
                 raise ValueError("The channel encoder stopped without a final playlist.")
@@ -2877,6 +3109,11 @@ def reap_idle_sessions_once(now: float | None = None) -> int:
             # Cached, finished movies can resume without starting Plex again.
             # An active movie encoder times out like live TV when viewers leave.
             last_access = value.get("last_access", value.get("created", moment))
+            feed = value.get("feed")
+            if feed and feed.active() and key in feed.session_keys():
+                # The player may be reading its pre-buffered segments. Playlist
+                # requests still lease the files referenced by that playlist.
+                value["last_access"] = last_access = max(last_access, moment - (time.monotonic() - feed.last_request))
             retention = 600 if value.get("on_demand") and value["process"].poll() == 0 else 60
             if moment - last_access > retention:
                 expired.append((key, value))
@@ -3180,6 +3417,20 @@ def search_public_vault(base: str, query: dict, offset: int, limit: int) -> dict
     return result
 
 
+def published_jellyfin_art(channel_id, image_id, image_type, section):
+    channel = next((entry for entry in channels() if entry.get("id") == channel_id), None)
+    if not channel or run_finished(channel):
+        raise FileNotFoundError("Channel artwork was not found.")
+    fields = ("art", "series_art") if image_type == "Backdrop" else ("thumb", "series_thumb")
+    for item in channel.get("items", ()):
+        if item.get("source") == "jellyfin" and item.get("section", channel.get("section")) == section:
+            if any(item.get(field) == image_id for field in fields):
+                connection, _ = jellyfin_section(section)
+                width = 960 if image_type == "Backdrop" else 480
+                return jellyfin_request(connection, f"/Items/{image_id}/Images/{image_type}?maxWidth={width}", image=True)
+    raise FileNotFoundError("Channel artwork was not found.")
+
+
 def public_channel_catalog(base: str | None = None, *, extended: bool = False, brief: bool = False, continuous: bool = False) -> dict:
     """Return lightweight guide/status data without starting a media session."""
     base = base or server_base()
@@ -3189,14 +3440,21 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
     assets = {item.get("id"): item for item in asset_manifest()}
     result = []
     settings = config()
-    def image_url(item: dict, section: str, *fields: str) -> str:
-        image_path = next((str(item[field]) for field in fields if item.get(field)), "")
-        if not image_path:
+    jellyfin_sources = {row["id"] for row in jellyfin_connections()}
+    def image_url(item: dict, channel: dict, *fields: str) -> str:
+        field = next((field for field in fields if item.get(field)), "")
+        if not field:
             return ""
+        image_path = str(item[field])
+        media_section = str(item.get("section") or channel.get("section", ""))
         if item.get("source") == "local":
-            media_section = str(item.get("section") or section)
             return f"{base}/api/local/image?section={urllib.parse.quote(media_section, safe='')}&id={urllib.parse.quote(str(item.get('id', '')), safe='')}"
-        return f"{base}/api/plex/image?path={urllib.parse.quote(image_path, safe='')}&server={urllib.parse.quote(str(item.get('plex_server_id', '')), safe='')}&size=poster"
+        if item.get("source") == "jellyfin":
+            query = urllib.parse.urlencode({"channel": channel["id"], "section": media_section, "id": image_path,
+                                            "type": "Backdrop" if field in {"art", "series_art"} else "Primary"})
+            return f"{base}/api/public/program-art?{query}"
+        size = "backdrop" if field in {"art", "series_art"} else "poster"
+        return f"{base}/api/plex/image?path={urllib.parse.quote(image_path, safe='')}&server={urllib.parse.quote(str(item.get('plex_server_id', '')), safe='')}&size={size}"
     for channel in channels():
         if run_finished(channel, moment):
             continue
@@ -3217,6 +3475,9 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
         try:
             if current.get("source") == "local":
                 online = Path(str(current.get("file_path", ""))).is_file()
+            elif current.get("source") == "jellyfin":
+                parts = str(current.get("section", "")).split(":")
+                online = len(parts) == 3 and parts[0] == "jellyfin" and parts[1] in jellyfin_sources
             else:
                 server_id = str(current.get("plex_server_id", ""))
                 credentials = plex_credentials(server_id) if server_id else {"token": settings["plex_token"], "url": settings["plex_url"]}
@@ -3246,9 +3507,9 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
                 "genres": (slot["item"].get("genres") or [])[:2],
                 "content_rating": str(slot["item"].get("content_rating", "")),
                 "summary": str(slot["item"].get("summary", ""))[:600],
-                "poster_url": image_url(slot["item"], str(channel.get("section", "")), "thumb", "series_thumb", "art"),
-                "series_poster_url": image_url(slot["item"], str(channel.get("section", "")), "series_thumb"),
-                "backdrop_url": image_url(slot["item"], str(channel.get("section", "")), "art", "series_thumb", "thumb"),
+                "poster_url": image_url(slot["item"], channel, "thumb", "series_thumb", "art"),
+                "series_poster_url": image_url(slot["item"], channel, "series_thumb"),
+                "backdrop_url": image_url(slot["item"], channel, "series_art", "art", "series_thumb", "thumb"),
                 "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat(),
                 "start_epoch_ms": int(slot["start"].timestamp() * 1000),
                 "stop_epoch_ms": int(slot["stop"].timestamp() * 1000),
@@ -3316,6 +3577,7 @@ def run_plugin(tool_id: str, payload: dict) -> object:
 
 
 class Handler(BaseHTTPRequestHandler):
+    disable_nagle_algorithm = True
     server_version = f"{APP_NAME}/{VERSION}"
     protocol_version = "HTTP/1.1"
 
@@ -3415,6 +3677,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not warm:
                         feed.media_start = session["media_start"]
                         feed.segment_seconds = session["segment_seconds"]
+                        session["feed"] = feed
                     return identity, session["directory"], session["process"], position["stop"]
 
             with LOCK:
@@ -3427,7 +3690,7 @@ class Handler(BaseHTTPRequestHandler):
                     threading.Thread(target=feed.run, daemon=True, name="channel-playout").start()
                 feed.last_request = time.monotonic()
             lines = ["#EXTM3U"]
-            variants = (("economy", 224000),) if constrained else (("economy", 270000), ("balanced", 690000), ("hd", 1750000))
+            variants = [(name, peak) for name, *_, peak in relay_renditions(constrained)]
             if playlist == "firetv" and not constrained:
                 # A TV begins with the 480p track and can move down to 270p
                 # or up to 720p without starting another compatibility encoder.
@@ -3458,16 +3721,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_bytes(200, manifest.encode(), "application/vnd.apple.mpegurl")
 
     def send_playback_manifest(self, route: str, *, constrained_live: bool = False) -> None:
-        if constrained_live:
-            master = f"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=224000\n{route}\n".encode()
-            return self.send_bytes(200, master, "application/vnd.apple.mpegurl")
         match = re.fullmatch(r"(/ffmpeg-stream/([a-zA-Z0-9_-]+)/)index\.m3u8", route)
         if match:
             with LOCK:
                 session = FFMPEG_SESSIONS.get(match[2])
             if session:
                 try:
-                    manifest = read_encoder_playlist(session["directory"] / "index.m3u8")
+                    manifest = viewer_encoder_playlist(session, "index.m3u8")
                 except OSError:
                     manifest = b""
                 if b"#EXT-X-STREAM-INF:" in manifest:
@@ -3476,6 +3736,9 @@ class Handler(BaseHTTPRequestHandler):
                     manifest = re.sub(rb"(?m)^index_(economy|balanced|hd)\.m3u8$",
                                       lambda line: match[1].encode() + line[0], manifest)
                     return self.send_bytes(200, manifest, "application/vnd.apple.mpegurl")
+        if constrained_live:
+            master = f"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=224000\n{route}\n".encode()
+            return self.send_bytes(200, master, "application/vnd.apple.mpegurl")
         self.redirect(route)
 
     def body(self) -> dict:
@@ -3538,6 +3801,22 @@ class Handler(BaseHTTPRequestHandler):
                 query = urllib.parse.parse_qs(parsed.query)
                 data, content_type = local_image(query.get("section", [""])[0], query.get("id", [""])[0])
                 self.send_bytes(200, data, content_type)
+            elif parsed.path == "/api/jellyfin/image":
+                query = urllib.parse.parse_qs(parsed.query)
+                connection, _ = jellyfin_section(query.get("section", [""])[0])
+                image_id = jellyfin_id(query.get("id", [""])[0])
+                if not image_id:
+                    raise FileNotFoundError
+                data, content_type = jellyfin_request(connection, f"/Items/{image_id}/Images/Primary?maxWidth=384", image=True)
+                self.send_bytes(200, data, content_type, {"Cache-Control": "private, max-age=300"})
+            elif parsed.path == "/api/public/program-art":
+                query = urllib.parse.parse_qs(parsed.query)
+                image_id = jellyfin_id(query.get("id", [""])[0])
+                image_type = query.get("type", [""])[0]
+                if not image_id or image_type not in {"Backdrop", "Primary"}:
+                    raise FileNotFoundError("Channel artwork was not found.")
+                data, content_type = published_jellyfin_art(query.get("channel", [""])[0], image_id, image_type, query.get("section", [""])[0])
+                self.send_bytes(200, data, content_type, {"Cache-Control": "public, max-age=300"})
             elif parsed.path == "/api/plex/image":
                 query = urllib.parse.parse_qs(parsed.query)
                 image_path = query.get("path", [""])[0]
@@ -3635,11 +3914,13 @@ class Handler(BaseHTTPRequestHandler):
                         raise EncoderCapacityError(session["capacity_error"])
                     if session:
                         session["last_access"] = time.time()
+                        if (feed := session.get("feed")) and not feed.stopped:
+                            feed.last_request = time.monotonic()
                 if not session:
                     raise FileNotFoundError
                 path = session["directory"] / parts[2]
                 if path.suffix == ".m3u8":
-                    self.send_bytes(200, read_encoder_playlist(path), "application/vnd.apple.mpegurl")
+                    self.send_bytes(200, viewer_encoder_playlist(session, parts[2]), "application/vnd.apple.mpegurl")
                 else:
                     self.send_bytes(200, path.read_bytes(), "video/mp2t")
             elif parsed.path.startswith("/hls-proxy/"):
@@ -3666,7 +3947,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/tasks.css", "/studio.css", "/desk.css", "/guide.css", "/wizard.css", "/tv-theme.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/tasks.css", "/studio.css", "/desk.css", "/guide.css", "/wizard.css", "/tv-theme.css", "/hls.min.js", "/HLSJS_LICENSE.txt", "/creator-sidebar.png"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
@@ -3691,28 +3972,24 @@ class Handler(BaseHTTPRequestHandler):
                 old = config()
                 plex_url, pasted_token = normalize_plex_connection(str(payload.get("plex_url", old["plex_url"])), str(payload.get("plex_token", "")))
                 token = pasted_token or old["plex_token"]
-                updated = {
-                    "plex_url": plex_url,
-                    "plex_token": token,
-                    "guide_hours": max(1, min(168, int(payload.get("guide_hours", old["guide_hours"])))),
-                    "port": old["port"],
-                    "bind_host": str(payload.get("bind_host", old["bind_host"])).strip() or HOST,
-                    "public_url": str(payload.get("public_url", old["public_url"])).strip().rstrip("/"),
-                    "public_tunnel": old.get("public_tunnel", False),
-                    "client_identifier": old["client_identifier"],
-                    "local_libraries": old["local_libraries"],
-                    "directory_url": str(payload.get("directory_url", old["directory_url"])).strip().rstrip("/"),
-                    "creator_id": old["creator_id"], "creator_key": old["creator_key"], "creator_profile": old["creator_profile"],
-                    "auto_publish_channels": old["auto_publish_channels"], "pending_creator_profile": old["pending_creator_profile"],
-                }
-                if token:
-                    root = plex_request("/", updated)
-                    updated["plex_profile"] = plex_profile(root)
-                else:
-                    updated["plex_profile"] = {}
-                atomic_json(CONFIG_FILE, updated)
+                plex_settings = {}
+                if (plex_url, token) != (old["plex_url"], old["plex_token"]):
+                    plex_settings = {"plex_url": plex_url, "plex_token": token, "plex_profile": {}}
+                    if token:
+                        plex_settings["plex_profile"] = plex_profile(plex_request("/", {**old, **plex_settings}))
+                with LOCK:
+                    current = config()
+                    updated = {
+                        **current, **plex_settings,
+                        "guide_hours": max(1, min(168, int(payload.get("guide_hours", current["guide_hours"])))),
+                        "bind_host": str(payload.get("bind_host", current["bind_host"])).strip() or HOST,
+                        "public_url": str(payload.get("public_url", current["public_url"])).strip().rstrip("/"),
+                        "directory_url": str(payload.get("directory_url", current["directory_url"])).strip().rstrip("/"),
+                    }
+                    atomic_json(CONFIG_FILE, updated)
                 generate_exports()
-                sync_plex_movies_async()
+                if plex_settings:
+                    sync_plex_movies_async()
                 self.send_json(200, {"ok": True, "config": config(True)})
             elif parsed.path == "/api/directory/resume":
                 with PUBLISH_LOCK, LOCK:
@@ -3742,6 +4019,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, result)
             elif parsed.path == "/api/local/libraries":
                 self.send_json(200, {"library": save_local_library(str(payload.get("name", "")), str(payload.get("path", "")))})
+            elif parsed.path == "/api/jellyfin/connections":
+                self.send_json(200, {"connection": connect_jellyfin(payload)})
             elif parsed.path == "/api/directory/publish":
                 self.send_json(200, {"creator": publish_studio(payload)})
             elif parsed.path == "/api/channels":
@@ -3801,6 +4080,11 @@ class Handler(BaseHTTPRequestHandler):
                 delete_local_library(self.path.rsplit("/", 1)[-1])
                 LOCAL_LIBRARY_CACHE.clear()
                 return self.send_json(200, {"ok": True})
+            if self.path.startswith("/api/jellyfin/connections/"):
+                connection_id = self.path.rsplit("/", 1)[-1]
+                with LOCK:
+                    atomic_json(JELLYFIN_FILE, [row for row in jellyfin_connections() if row["id"] != connection_id])
+                return self.send_json(200, {"ok": True})
             if self.path.startswith("/api/assets/"):
                 delete_asset(self.path.rsplit("/", 1)[-1])
                 return self.send_json(200, {"ok": True})
@@ -3837,7 +4121,7 @@ class PublicMediaHandler(Handler):
             if not re.fullmatch(r"/library/metadata/\d+/(?:thumb|art)(?:/\d+)?", image):
                 return self.send_json(404, {"error": "Not found"})
         elif path not in {
-            "/api/public/channels", "/api/public/vault", "/api/public/origin", "/api/local/image",
+            "/api/public/channels", "/api/public/vault", "/api/public/origin", "/api/public/program-art", "/api/local/image",
             "/exports/guide.xml", "/exports/channels.m3u",
         } and not re.fullmatch(
             r"/(?:live|vault)/[a-zA-Z0-9_-]+\.m3u8|"

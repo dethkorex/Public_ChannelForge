@@ -1,12 +1,25 @@
 sub init()
   m.guide = m.top.findNode("guide") : m.video = m.top.findNode("video") : m.creators = m.top.findNode("creators") : m.channels = m.top.findNode("channels") : m.vault = m.top.findNode("vault") : m.pair = m.top.findNode("pair") : m.updates = m.top.findNode("updates") : m.status = m.top.findNode("status") : m.directoryTimer = m.top.findNode("directoryTimer")
   m.creators.observeField("itemSelected", "creatorSelected") : m.channels.observeField("itemSelected", "channelSelected") : m.vault.observeField("itemSelected", "vaultSelected") : m.pair.observeField("buttonSelected", "showPairing") : m.updates.observeField("buttonSelected", "checkUpdates")
+  m.home = m.top.findNode("home")
+  m.homeLive = m.top.findNode("homeLive")
+  m.homeCinema = m.top.findNode("homeCinema")
+  m.homeUpdate = m.top.findNode("homeUpdate")
+  m.homeMenu = m.top.findNode("homeMenu")
+  m.homeLive.observeField("buttonSelected", "openLiveGuide")
+  m.homeCinema.observeField("buttonSelected", "openCinema")
+  m.homeUpdate.observeField("buttonSelected", "checkUpdates")
+  m.homeMenu.observeField("buttonSelected", "showHome")
+  m.programArt = m.top.findNode("programArt")
+  m.channels.observeField("itemFocused", "updateGuideArtwork")
+  m.homeLive.SetFocus(true)
   m.directoryTimer.observeField("fire", "refreshCatalog") : m.directoryTimer.control = "start"
   m.liveRetryTimer = m.top.findNode("liveRetryTimer")
   m.liveRetryTimer.observeField("fire", "resumePlayback")
-  m.playbackDeadline = m.top.findNode("playbackDeadline")
-  m.playbackDeadline.observeField("fire", "playbackTimedOut")
-  m.updates.text = "UPDATES  •  v" + CreateObject("roAppInfo").GetVersion()
+  appInfo = CreateObject("roAppInfo")
+  installedVersion = appInfo.GetValue("channelforge_version")
+  if installedVersion = "" then installedVersion = appInfo.GetVersion()
+  m.updates.text = "UPDATES  •  v" + installedVersion
   m.progressTimer = m.top.findNode("progressTimer")
   m.progressTimer.observeField("fire", "checkPlaybackProgress")
   m.upcomingTimer = m.top.findNode("upcomingTimer")
@@ -46,8 +59,46 @@ sub init()
   refreshCatalog()
 end sub
 sub refreshCatalog()
+  if m.guide.visible and not m.home.visible then updateGuideArtwork()
   if m.guide.visible then m.status.text = "Refreshing public creator studios…"
   requestCatalog()
+end sub
+sub showHome()
+  m.home.visible = true
+  m.homeLive.SetFocus(true)
+end sub
+sub openLiveGuide()
+  m.home.visible = false
+  m.channels.SetFocus(true)
+  updateGuideArtwork()
+end sub
+sub openCinema()
+  m.home.visible = false
+  m.vault.SetFocus(true)
+end sub
+sub updateGuideArtwork()
+  if m.home.visible or not m.guide.visible or m.channels.content = invalid then return
+  index = m.channels.itemFocused
+  if index < 0 then index = 0
+  if index >= m.channels.content.GetChildCount() then return
+  channel = m.channels.content.GetChild(index)
+  title = channel.title
+  artwork = ""
+  now = CreateObject("roDateTime").AsSeconds()
+  for each program in channel.programs
+    if program.start_epoch_ms <> invalid and program.stop_epoch_ms <> invalid
+      if program.start_epoch_ms / 1000# <= now and now < program.stop_epoch_ms / 1000#
+        if program.title <> invalid then title = program.title
+        if program.backdrop_url <> invalid then artwork = program.backdrop_url
+        if artwork = "" and program.series_poster_url <> invalid then artwork = program.series_poster_url
+        if artwork = "" and program.poster_url <> invalid then artwork = program.poster_url
+        exit for
+      end if
+    end if
+  end for
+  m.top.findNode("programTitle").text = title
+  m.top.findNode("programChannel").text = "CH " + channel.shortDescriptionLine1 + "  •  " + channel.title
+  if m.programArt.uri <> artwork then m.programArt.uri = artwork
 end sub
 sub requestCatalog()
   if m.catalogLoading then return
@@ -271,7 +322,7 @@ sub vaultLoaded(event as object)
         entry.shortDescriptionLine1 = movie.shortDescriptionLine1
       end if
     end for
-    if m.guide.visible then m.vault.SetFocus(true)
+    if m.guide.visible and not m.home.visible then m.vault.SetFocus(true)
   end if
   m.moreMovies.visible = m.vaultTask.nextOffset > 0
   m.moreMovies.text = "MORE MOVIES"
@@ -302,7 +353,8 @@ sub playlistLoaded(event as object)
   m.status.text = m.playlistTask.content.GetChildCount().ToStr() + " channels ready"
   if m.catalogTask <> invalid and m.catalogTask.stale then m.status.text += " • Directory incomplete"
   if m.playlistTask.stale then m.status.text = "Studio unavailable. Reconnecting..."
-  if firstGuide and m.guide.visible and not m.insertMovie.HasFocus() and not m.moreMovies.HasFocus() then m.channels.SetFocus(true)
+  if firstGuide and m.guide.visible and not m.home.visible and not m.vault.HasFocus() and not m.insertMovie.HasFocus() and not m.moreMovies.HasFocus() then m.channels.SetFocus(true)
+  updateGuideArtwork()
 end sub
 sub vaultSelected()
   if m.vault.content = invalid then return
@@ -319,7 +371,6 @@ sub insertSelectedMovie()
   if item = invalid then return
   m.activeMovie = item
   m.moviePosition = 0
-  m.movieRetryPosition = 0
   m.movieRetries = 0
   m.retryPending = false
   m.resolvingLive = false
@@ -331,7 +382,7 @@ sub insertSelectedMovie()
   m.programBoundaryTimer.control = "stop"
   hideChannelBanner()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
-  item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
+  configureHls(item, false, false)
   m.video.content = item : m.video.visible = true : m.guide.visible = false : m.video.SetFocus(true)
   animateTape(true)
 end sub
@@ -413,7 +464,6 @@ sub playChannel(index as integer)
   m.retryPending = false
   cancelContentTask(m.onAirGuideTask)
   m.onAirGuideTask = invalid
-  m.liveStableTime = invalid
   if item.availability = "offline"
     closeRemovedStudio()
     m.status.text = item.title + " is currently offline."
@@ -427,8 +477,7 @@ sub playChannel(index as integer)
   m.liveProgramStop = 0
   updateLiveProgramStop()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
-  item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
-  item.live = item.continuous = true
+  configureHls(item, false, item.continuous = true)
   m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
   startPlaybackDeadline()
   showChannelBanner(item)
@@ -437,32 +486,25 @@ sub videoStateChanged()
   if m.guide.visible or m.ejectingMovie or m.resolvingLive or m.resolvingMovie or m.retryPending then return
   state = m.video.state
   if state = "playing"
-    if m.crtWaiting = true and m.activeMovie <> invalid
-      m.crtWaiting = false
-      m.crtLit = true
-      m.top.findNode("crtLight").opacity = 0.65
-      m.tapeTimer.duration = 0.35
-      m.tapeTimer.control = "start"
-    end if
-    clearPlaybackDeadline()
-    m.lastProgress = CreateObject("roTimespan")
-    m.lastPosition = m.video.position
-    m.progressTimer.control = "start"
-    m.bufferPanel.visible = false
-    if m.liveItem <> invalid and m.liveRetries > 0 then m.liveStableTime = CreateObject("roTimespan")
-    if m.liveItem <> invalid then showChannelBanner(m.liveItem)
-    if m.upcomingDue then showUpcomingBanner()
-  else if state = "buffering"
-    m.progressTimer.control = "stop"
-    m.liveStableTime = invalid
     startPlaybackDeadline()
+    m.inBuffer = false
+  else if state = "buffering"
+    startPlaybackDeadline()
+    if not m.inBuffer then m.rebufferCount++
+    m.inBuffer = true
+    m.stableSeconds = 0
+    m.waitingForVideo = true
     if m.video.content <> invalid then showBuffering("BUFFERING VIDEO", m.video.content.title)
   else if state = "finished" and m.liveItem <> invalid
     clearPlaybackDeadline()
     if m.liveItem.continuous = true
-      clearPlaybackDeadline()
-      m.programBoundaryTimer.control = "stop"
-      showBuffering("BROADCAST FINISHED", "Press Back to return to the guide.")
+      endAt = m.liveItem.airUntil
+      if endAt <> invalid and endAt > 0 and endAt <= CreateObject("roDateTime").AsSeconds()
+        m.programBoundaryTimer.control = "stop"
+        showBuffering("BROADCAST FINISHED", "Press Back to return to the guide.")
+      else
+        playbackTimedOut()
+      end if
     else
       scheduleNextProgram()
     end if
@@ -475,18 +517,37 @@ sub videoStateChanged()
   end if
 end sub
 sub startPlaybackDeadline()
-  if m.waitingForVideo then return
+  if m.lastProgress <> invalid then return
+  m.lastProgress = CreateObject("roTimespan")
+  m.windowStarted = CreateObject("roTimespan")
+  m.windowMedia = 0
+  m.stableSeconds = 0
+  m.rebufferCount = 0
+  m.inBuffer = false
+  m.lastPosition = m.video.position
   m.waitingForVideo = true
-  m.playbackDeadline.control = "start"
+  m.progressTimer.control = "start"
 end sub
 sub clearPlaybackDeadline()
-  m.playbackDeadline.control = "stop"
   m.progressTimer.control = "stop"
+  m.lastProgress = invalid
   m.waitingForVideo = false
 end sub
 sub checkPlaybackProgress()
-  if not m.guide.visible and not m.ejectingMovie and m.video.state = "playing" and m.lastProgress <> invalid
-    if m.lastProgress.TotalSeconds() >= 20 then playbackTimedOut()
+  if m.guide.visible or m.ejectingMovie or m.lastProgress = invalid then return
+  if m.lastProgress.TotalSeconds() >= 20
+    playbackTimedOut()
+    return
+  end if
+  elapsed = m.windowStarted.TotalSeconds()
+  if elapsed >= 20
+    if m.rebufferCount >= 2 and m.windowMedia < elapsed / 2
+      playbackTimedOut()
+      return
+    end if
+    m.windowStarted.Mark()
+    m.windowMedia = 0
+    m.rebufferCount = 0
   end if
 end sub
 sub playbackTimedOut()
@@ -514,21 +575,42 @@ sub playbackTimedOut()
   end if
 end sub
 sub trackPlaybackPosition()
-  if m.video.state <> "playing" or m.guide.visible or m.ejectingMovie then return
-  if m.video.position = m.lastPosition then return
-  m.lastPosition = m.video.position
-  if m.lastProgress <> invalid then m.lastProgress.Mark()
-  if m.liveItem <> invalid and m.liveRetries > 0 and m.video.state = "playing"
-    if m.liveStableTime <> invalid and m.liveStableTime.TotalSeconds() >= 8 then m.liveRetries = 0
+  if m.video.state <> "playing" or m.guide.visible or m.ejectingMovie or m.lastProgress = invalid then return
+  position = m.video.position
+  delta = position - m.lastPosition
+  if delta < -1 or delta > m.lastProgress.TotalSeconds() + 3
+    ' Seeking or an HLS timestamp discontinuity establishes a new baseline.
+    m.lastPosition = position
+    m.stableSeconds = 0
+    return
   end if
-  if m.activeMovie = invalid or m.ejectingMovie or m.video.state <> "playing" then return
-  m.moviePosition = m.video.position
-  if m.movieRetries > 0 and m.moviePosition >= m.movieRetryPosition + 30 then m.movieRetries = 0
+  if delta < 0.25 then return
+  m.lastPosition = position
+  m.lastProgress.Mark()
+  m.windowMedia += delta
+  m.stableSeconds += delta
+  if m.activeMovie <> invalid then m.moviePosition = position
+  if m.stableSeconds >= 30
+    m.liveRetries = 0
+    m.movieRetries = 0
+  end if
+  if m.waitingForVideo
+    m.waitingForVideo = false
+    m.bufferPanel.visible = false
+    if m.liveItem <> invalid then showChannelBanner(m.liveItem)
+    if m.upcomingDue then showUpcomingBanner()
+    if m.crtWaiting = true and m.activeMovie <> invalid
+      m.crtWaiting = false
+      m.crtLit = true
+      m.top.findNode("crtLight").opacity = 0.65
+      m.tapeTimer.duration = 0.35
+      m.tapeTimer.control = "start"
+    end if
+  end if
 end sub
 function scheduleMovieRetry() as boolean
   if m.activeMovie = invalid or m.guide.visible or m.ejectingMovie then return false
   if m.movieRetries >= 2 then return false
-  m.movieRetryPosition = m.moviePosition
   m.movieRetries = m.movieRetries + 1
   m.retryPending = true
   showBuffering("RECONNECTING TO THE MOVIE", m.activeMovie.title)
@@ -558,12 +640,13 @@ sub resumePlayback()
 end sub
 sub restartMovie()
   if m.activeMovie = invalid or m.guide.visible or m.ejectingMovie then return
+  clearPlaybackDeadline()
   item = CreateObject("roSGNode", "ContentNode")
   item.url = m.activeMovie.url
   item.streamFormat = m.activeMovie.streamFormat
   item.title = m.activeMovie.title
   item.playStart = m.moviePosition
-  item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
+  configureHls(item, true, false)
   m.video.content = item
   m.video.control = "play"
   startPlaybackDeadline()
@@ -721,19 +804,36 @@ sub continueLive()
 end sub
 sub restartLive()
   if m.liveItem = invalid or m.guide.visible then return
+  clearPlaybackDeadline()
   item = CreateObject("roSGNode", "ContentNode")
   item.url = m.liveItem.url
   item.title = m.liveItem.title
   item.streamFormat = m.liveItem.streamFormat
-  item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
-  item.live = m.liveItem.continuous = true
+  configureHls(item, m.liveRetries > 0, m.liveItem.continuous = true)
   m.video.control = "stop"
   m.video.content = item
   m.video.control = "play"
   startPlaybackDeadline()
 end sub
+sub configureHls(item as object, recovering as boolean, live as boolean)
+  item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
+  item.live = live
+  if live or Instr(1, item.url, "/vault/") > 0
+    ' Roku measures bandwidth after startup and may use every advertised variant.
+    initialKibps = 800
+    if recovering then initialKibps = 320
+    item.AdaptiveMaxStartBitrate = initialKibps
+  end if
+end sub
 function onKeyEvent(key as string, press as boolean) as boolean
   if not press then return false
+  if m.home <> invalid and m.home.visible
+    if key = "right" and m.homeLive.HasFocus() then m.homeCinema.SetFocus(true) : return true
+    if key = "left" and m.homeCinema.HasFocus() then m.homeLive.SetFocus(true) : return true
+    if key = "down" and not m.homeUpdate.HasFocus() then m.homeUpdate.SetFocus(true) : return true
+    if key = "up" and m.homeUpdate.HasFocus() then m.homeLive.SetFocus(true) : return true
+    return false
+  end if
   if m.guide.visible = false
     if key = "OK" and m.bufferPanel.visible and (m.retryPending or m.resolvingLive or m.resolvingMovie) then return true
     if key = "OK" and m.bufferPanel.visible and not m.waitingForVideo and m.activeMovie <> invalid and not m.ejectingMovie and not m.top.findNode("tapeMotion").visible
@@ -774,6 +874,9 @@ function onKeyEvent(key as string, press as boolean) as boolean
       if key = "down" then playChannel(m.channels.itemFocused - 1) : return true
     end if
   end if
+  if key = "back" and m.guide.visible and m.home <> invalid then showHome() : return true
+  if key = "right" and m.guide.visible and m.homeMenu <> invalid and m.homeMenu.HasFocus() then m.pair.SetFocus(true) : return true
+  if key = "left" and m.guide.visible and m.pair.HasFocus() and m.homeMenu <> invalid then m.homeMenu.SetFocus(true) : return true
   if m.guide.visible and m.insertMovie.HasFocus() and key = "left" then m.vault.SetFocus(true) : return true
   if m.guide.visible and m.moreMovies.HasFocus() and key = "up" then m.vault.SetFocus(true) : return true
   if m.guide.visible and m.vault.HasFocus() and key = "down" and m.moreMovies.visible

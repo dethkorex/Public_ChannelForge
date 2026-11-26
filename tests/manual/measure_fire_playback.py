@@ -16,7 +16,7 @@ PACKAGE = "tv.channelforge.viewer.alpha4qa"
 ACTIVITY = PACKAGE + "/tv.channelforge.viewer.MainActivity"
 
 
-def trial(adb, serial, flags, rotate):
+def trial(adb, serial, flags, rotate, shape=False):
     def shell(command):
         return subprocess.check_output([adb, "-s", serial, "shell", command], text=True,
                                        encoding="utf8", errors="replace", timeout=25)
@@ -52,7 +52,8 @@ def trial(adb, serial, flags, rotate):
     first_seen = None
     surface = None
     rotated = False
-    duration = 60 if rotate else 29
+    duration = 82 if shape else 60 if rotate else 29
+    slowed = False
     try:
         while time.monotonic() - start < duration:
             if surface is None:
@@ -69,6 +70,9 @@ def trial(adb, serial, flags, rotate):
             if rotate and elapsed >= 7 and not rotated:
                 flags.write_text("rotate")
                 rotated = True
+            if shape and slowed != (12 <= elapsed < 50):
+                slowed = not slowed
+                flags.write_text("slow" if slowed else "")
             if elapsed > 10 + 8 * len(pss):
                 memory = shell("dumpsys meminfo " + PACKAGE)
                 match = re.search(r"TOTAL:\s+(\d+)\s+TOTAL SWAP", memory)
@@ -82,7 +86,7 @@ def trial(adb, serial, flags, rotate):
         gaps = [(b - a) / 1e9 for a, b in zip(points, points[1:])]
         if points:
             gaps.append(max(0, device_time - points[-1] / 1e9))
-        return dict(rotate=rotate, duration=elapsed, first_seen_seconds=first_seen, frames=len(points),
+        return dict(rotate=rotate, shape=shape, duration=elapsed, first_seen_seconds=first_seen, frames=len(points),
                     gaps_over_250ms=sum(gap > .25 for gap in gaps), worst_gap_seconds=max(gaps, default=0),
                     stalled_seconds=sum(gap - 1 / 24 for gap in gaps if gap > .25), pss_kib=pss,
                     process_cpu_ticks=None if None in (cpu_start, cpu_end) else cpu_end - cpu_start)
@@ -96,8 +100,10 @@ if __name__ == "__main__":
     parser.add_argument("--adb", default="adb")
     parser.add_argument("--serial", required=True)
     parser.add_argument("--flags", type=Path, required=True)
-    parser.add_argument("--rotate", action="store_true")
+    faults = parser.add_mutually_exclusive_group()
+    faults.add_argument("--rotate", action="store_true")
+    faults.add_argument("--shape", action="store_true", help="Limit each segment transfer to about 480 kbit/s from 12–50 seconds.")
     parser.add_argument("--trials", type=int, default=1)
     args = parser.parse_args()
     for _ in range(args.trials):
-        print(json.dumps(trial(args.adb, args.serial, args.flags, args.rotate)), flush=True)
+        print(json.dumps(trial(args.adb, args.serial, args.flags, args.rotate, args.shape)), flush=True)

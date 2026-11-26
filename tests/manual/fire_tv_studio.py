@@ -10,16 +10,20 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
-def serve(port, flags):
+def serve(port, flags, adaptive=False):
     base = f"http://127.0.0.1:{port}"
     with tempfile.TemporaryDirectory() as tmp:
-        for index, frequency in enumerate((440, 880)):
-            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
-                            f"testsrc2=s=640x360:r=24,drawbox=x=0:y=0:w=80:h=80:color={'red' if index else 'blue'}:t=fill",
-                            "-f", "lavfi", "-i", f"sine=frequency={frequency}", "-t", "8",
-                            "-c:v", "libx264", "-preset", "veryfast", "-g", "48", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
-                            "-c:a", "aac", "-ac", "2", "-ar", "48000", "-f", "hls", "-hls_time", "2",
-                            "-hls_flags", "independent_segments", f"{index}.m3u8"], cwd=tmp, check=True)
+        variants = {"economy": ("480x270", 160, 280000), "balanced": ("854x480", 470, 750000),
+                    "hd": ("1280x720", 1200, 1800000)} if adaptive else {"default": ("640x360", None, 0)}
+        for name, (size, kbps, peak) in variants.items():
+            for index, frequency in enumerate((440, 880)):
+                rate = ["-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-bufsize", f"{kbps}k"] if kbps else []
+                subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                                f"testsrc2=s={size}:r=24,drawbox=x=0:y=0:w=80:h=80:color={'red' if index else 'blue'}:t=fill",
+                                "-f", "lavfi", "-i", f"sine=frequency={frequency}", "-t", "8",
+                                "-c:v", "libx264", "-preset", "veryfast", "-g", "48", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
+                                *rate, "-c:a", "aac", "-b:a", "64k", "-ac", "2", "-ar", "48000", "-f", "hls", "-hls_time", "2",
+                                "-hls_flags", "independent_segments", f"{name}-{index}.m3u8"], cwd=tmp, check=True)
         class Studio(BaseHTTPRequestHandler):
             def do_GET(self):
                 path = urlsplit(self.path).path
@@ -49,6 +53,14 @@ def serve(port, flags):
                 elif path.endswith(".m3u8"):
                     if "stream" in problems:
                         return self.send_error(503)
+                    if adaptive and path.endswith(("/master.m3u8", "/movie.m3u8")):
+                        leaf = path.rsplit("/", 1)[1]
+                        lines = ["#EXTM3U", "#EXT-X-INDEPENDENT-SEGMENTS"]
+                        for name in ("balanced", "economy", "hd"):
+                            size, _, peak = variants[name]
+                            lines.extend([f"#EXT-X-STREAM-INF:BANDWIDTH={peak},RESOLUTION={size}",
+                                          f"{name}/index-{leaf}"])
+                        return self.reply(("\n".join(lines)+"\n").encode(), "application/vnd.apple.mpegurl")
                     movie = path.endswith("movie.m3u8")
                     first = 0 if movie else now//2-16
                     lines=["#EXTM3U","#EXT-X-VERSION:3","#EXT-X-TARGETDURATION:2",f"#EXT-X-MEDIA-SEQUENCE:{first}",
@@ -61,15 +73,24 @@ def serve(port, flags):
                 elif path.endswith(".ts"):
                     if "stream" in problems:return self.send_error(503)
                     n=int(path.split("/")[-1][:-3])
-                    return self.reply((Path(tmp)/f"{n//4%2}{n%4}.ts").read_bytes(),"video/mp2t")
+                    name = path.rsplit("/", 2)[-2] if adaptive else "default"
+                    if name not in variants: return self.send_error(404)
+                    data = (Path(tmp)/f"{name}-{n//4%2}{n%4}.ts").read_bytes()
+                    return self.reply(data, "video/mp2t", slow="slow" in problems)
                 else:return self.send_error(404)
                 self.reply(json.dumps(payload).encode(),"application/json")
 
-            def reply(self, data, mime):
+            def reply(self, data, mime, slow=False):
                 self.send_response(200)
                 self.send_header("Content-Type",mime); self.send_header("Content-Length",str(len(data)))
                 self.end_headers()
-                try:self.wfile.write(data)
+                try:
+                    if slow:
+                        for start in range(0, len(data), 6000):
+                            self.wfile.write(data[start:start + 6000])
+                            time.sleep(.1)
+                    else:
+                        self.wfile.write(data)
                 except (ConnectionResetError,BrokenPipeError):pass
         ThreadingHTTPServer(("127.0.0.1",port),Studio).serve_forever()
 
@@ -78,5 +99,6 @@ if __name__=="__main__":
     parser=argparse.ArgumentParser()
     parser.add_argument("--port",type=int,default=19753)
     parser.add_argument("--flags",type=Path,required=True)
+    parser.add_argument("--adaptive",action="store_true")
     args=parser.parse_args()
-    serve(args.port,args.flags)
+    serve(args.port,args.flags,args.adaptive)

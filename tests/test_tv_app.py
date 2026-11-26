@@ -3,6 +3,8 @@ import http.client
 import http.server
 import io
 import json
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -51,11 +53,16 @@ class TvAppTests(unittest.TestCase):
                     (source / name).write_text("new")
                     (installed / name).write_text("old")
             (installed / "personal.txt").write_text("keep")
+            cache = installed / "__pycache__"
+            cache.mkdir()
+            (cache / "linux_runtime.cpython-311.pyc").touch()
+            (cache / "personal.cpython-311.pyc").touch()
             linux_runtime.install_linux_files(source, installed)
             self.assertEqual((installed / "ChannelForge_TV.py").read_text(), "new")
             self.assertEqual((installed / "Public_ChannelForge.py").read_text(), "new")
             self.assertEqual((installed / "personal.txt").read_text(), "keep")
             self.assertFalse((installed / "web" / "obsolete.txt").exists())
+            self.assertEqual([entry.name for entry in cache.iterdir()], ["personal.cpython-311.pyc"])
             self.assertEqual(sorted(path.name for path in root.iterdir()), ["my ChannelForge", "new"])
             command = linux_runtime.linux_install_command(root / "update.tar.gz", installed)
             self.assertIn("--replace", command)
@@ -211,6 +218,71 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("backBufferLength:2", tv.HTML)
         self.assertIn(".tv-guide::-webkit-scrollbar{display:none}", tv.GUIDE_STAGE_CSS)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise desktop player events")
+    def test_desktop_player_recovers_continuous_end_and_repeated_stalls(self):
+        start = tv.HTML.index("{\n    const video=$('#player');")
+        end = tv.HTML.index("$('#scan-channels').onclick", start)
+        refresh_start = tv.HTML.index("async function refreshTunedChannel(")
+        refresh_end = tv.HTML.index("function advanceLive(", refresh_start)
+        setup = '''
+const assert = require('node:assert/strict');
+const handlers = {}, retries = [], messages = [];
+const video = {currentTime: 10, addEventListener: (event, fn) => handlers[event] = fn};
+const $ = () => video, programAt = () => null, setBuffering = () => {}, armPlaybackDeadline = () => {};
+const advanceLive = failed => retries.push(failed), setPlayerState = message => messages.push(message);
+let now = 100, playingSince = 0, lastPlaybackTime = -1, playbackTimer, liveBoundaryTimer, playbackGeneration = 1;
+let liveRetries = 2, movieRetries = 2, liveMode = true, activeStreamUrl = 'fixture', liveChannels = [];
+let liveStallStarted = 0, recentLiveStalls = [], hls = {};
+let activeMedia = {channel:{continuous_url:'stream'}};
+const performance = {now: () => now};
+const allCreators = [{id: 'studio', playlist_url: 'old'}, {id: 'other', playlist_url: 'other'}];
+const requested = [];
+let directoryFailed = false;
+const discoverDirectory = async () => {
+    if (directoryFailed) throw Error('offline');
+    return {creators:[{id:'studio', playlist_url:'new'}]};
+};
+const scanStudio = async creator => {
+    requested.push(creator.playlist_url);
+    return [{id:'channel', stream_url:creator.playlist_url}];
+};
+'''
+        checks = '''
+handlers.ended();
+assert.deepEqual(retries, [true]);
+activeMedia.channel.air_until = new Date(0).toISOString();
+handlers.ended();
+assert.equal(messages[0], 'Broadcast finished. Return to the guide.');
+activeMedia.channel = {};
+handlers.ended();
+assert.deepEqual(retries, [true, false]);
+handlers.timeupdate();
+now += 5000; video.currentTime += 5; handlers.timeupdate();
+assert.equal(liveRetries, 2);
+now += 25000; video.currentTime += 25; handlers.timeupdate();
+assert.equal(liveRetries, 0);
+liveMode = false; video.currentTime = 3; handlers.seeked(); handlers.timeupdate();
+assert.equal(activeMedia.resumeAt, 3);
+assert.equal(movieRetries, 2);
+liveMode = true;
+for (const [duration, expectedRetries] of [[100, 2], [2100, 2], [2400, 2], [2900, 3]]) {
+    now += 1000; handlers.waiting();
+    now += duration; video.currentTime += 1; handlers.timeupdate();
+    assert.equal(retries.length, expectedRetries);
+}
+assert.equal(retries.at(-1), true);
+(async () => {
+    const channel = {id:'channel', studio_id:'studio'};
+    assert.equal((await refreshTunedChannel(channel)).stream_url, 'new');
+    directoryFailed = true;
+    assert.equal((await refreshTunedChannel(channel)).stream_url, 'old');
+    assert.deepEqual(requested, ['new', 'old']);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+        checked = subprocess.run(["node", "-"], input=setup + tv.HTML[refresh_start:refresh_end] + tv.HTML[start:end] + checks,
+                                 encoding="utf-8", capture_output=True, timeout=10)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+
     def test_tv_scans_online_channels_into_guide_and_keeps_home_focused(self):
         self.assertIn('id="scan-channels"', tv.HTML)
         self.assertIn('id="tv-guide"', tv.HTML)
@@ -322,8 +394,8 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("video.mini", tv.TV_OVERHAUL_CSS)
         self.assertIn('id="movie-search"', tv.HTML)
         self.assertIn('data-movie-filter="80s"', tv.HTML)
-        self.assertIn("poster=current?.poster_url", tv.HTML)
-        self.assertIn("--guide-backdrop", tv.HTML)
+        self.assertIn("current?.backdrop_url,current?.series_poster_url,current?.poster_url", tv.HTML)
+        self.assertIn('class="guide-backdrop"', tv.HTML)
         self.assertIn("program-poster", tv.HTML)
 
     def test_local_creator_is_discovered_on_default_port(self):

@@ -9,5 +9,5 @@ sub itemChanged()
   m.top.findNode("now").text = label
 end sub
 sub focusChanged()
-  if m.top.focusPercent > 0.5 then m.top.findNode("background").color = "0x225b5aff" else m.top.findNode("background").color = "0x0d1724ff"
+  if m.top.focusPercent > 0.5 then m.top.findNode("background").color = "0x50206cff" else m.top.findNode("background").color = "0x0d1724ff"
 end sub

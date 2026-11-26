@@ -40,12 +40,12 @@ Description: Local-first personal channel guide builder
 EOF
 cat > "$DEB/usr/bin/public-channelforge" <<'EOF'
 #!/usr/bin/env bash
-exec /usr/bin/python3 -Es /opt/public-channelforge/Public_ChannelForge.py "$@"
+exec /usr/bin/python3 -EsB /opt/public-channelforge/Public_ChannelForge.py "$@"
 EOF
 chmod 755 "$DEB/usr/bin/public-channelforge"
 cat > "$DEB/usr/bin/channelforge-tv" <<'EOF'
 #!/usr/bin/env bash
-exec /usr/bin/python3 -Es /opt/public-channelforge/ChannelForge_TV.py "$@"
+exec /usr/bin/python3 -EsB /opt/public-channelforge/ChannelForge_TV.py "$@"
 EOF
 chmod 755 "$DEB/usr/bin/channelforge-tv"
 cat > "$DEB/usr/share/applications/public-channelforge.desktop" <<'EOF'

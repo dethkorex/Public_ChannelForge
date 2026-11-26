@@ -64,7 +64,10 @@
                     run.progressed = performance.now();
                 }
                 if (performance.now() - run.progressed > (run.ready ? 15000 : 23000)) { fallback(); return; }
-                if (!liveMode && result.time > 0) media.resumeAt = result.time;
+                if (!liveMode && result.time > 0) {
+                    media.resumeAt = result.time;
+                    rememberMovie(media);
+                }
                 if (liveMode && run.ready) {
                     const channel = liveChannels.find(item => item.stream_url === activeStreamUrl) || media.channel;
                     const current = programAt(channel), remaining = Date.parse(current?.stop) - Date.now();

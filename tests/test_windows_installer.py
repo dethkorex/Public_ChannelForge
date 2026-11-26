@@ -94,6 +94,37 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(creator.read_bytes(), b"new-creator")
         self.assertEqual(tv.read_bytes(), b"new-tv")
 
+    def test_failed_suite_update_rolls_back_both_apps_and_cleans_temporary_files(self):
+        folder = self.root / "installed"
+        folder.mkdir()
+        creator = folder / "ChannelForge_Creator.exe"
+        tv = folder / "ChannelForge_TV.exe"
+        creator.write_bytes(b"old-creator")
+        tv.write_bytes(b"old-tv")
+        icon = folder / "channel-forge-creator.ico"
+        icon.write_bytes(b"old-icon")
+        profile = folder / "personal.json"
+        profile.write_bytes(b"keep")
+        payload = self.root / "payload.exe"
+        payload.write_bytes(b"new")
+        original_replace = os.replace
+
+        def replace(source, target):
+            if target == tv and source.suffix == ".updating":
+                raise OSError("simulated replacement failure")
+            return original_replace(source, target)
+
+        with mock.patch.object(windows_installer, "payload_for", return_value=payload), \
+             mock.patch.object(windows_installer, "icon_for", return_value=payload), \
+             mock.patch.object(windows_installer.os, "replace", side_effect=replace):
+            with self.assertRaisesRegex(OSError, "simulated replacement failure"):
+                windows_installer.install_binaries(folder, ("creator", "tv"))
+        self.assertEqual(creator.read_bytes(), b"old-creator")
+        self.assertEqual(tv.read_bytes(), b"old-tv")
+        self.assertEqual(icon.read_bytes(), b"old-icon")
+        self.assertEqual(profile.read_bytes(), b"keep")
+        self.assertEqual(set(folder.iterdir()), {creator, tv, icon, profile})
+
     def test_desktop_update_migrates_both_apps_and_reuses_shortcuts(self):
         desktop = self.root / "Desktop"
         desktop.mkdir()

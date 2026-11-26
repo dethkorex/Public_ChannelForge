@@ -158,6 +158,19 @@ def install_linux_files(source: Path, destination: Path) -> None:
                 cleanup = False
                 raise OSError(f"Could not restore the update. Original files are in {backups}.") from restore_error
             raise
+        cache = destination / "__pycache__"
+        if cache.is_dir() and not cache.is_symlink():
+            for name in LINUX_APP_FILES:
+                if name.endswith(".py"):
+                    for bytecode in cache.glob(Path(name).stem + ".*.pyc"):
+                        try:
+                            bytecode.unlink(missing_ok=True)
+                        except OSError:
+                            continue
+            try:
+                cache.rmdir()
+            except OSError:
+                pass
     finally:
         if cleanup:
             shutil.rmtree(staging)

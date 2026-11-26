@@ -48,6 +48,8 @@ sub load()
         if type(channel) = "roAssociativeArray" and channel.stream_url <> invalid and channel.stream_url <> ""
           node = root.CreateChild("ContentNode")
           node.AddFields({channelId: "", availability: "standby", programs: [], continuous: false})
+          node.AddField("airUntil", "double", false)
+          if channel.air_until_epoch_ms <> invalid then node.airUntil = channel.air_until_epoch_ms / 1000#
           if channel.id <> invalid then node.channelId = channel.id
           if channel.state <> invalid then node.availability = channel.state
           if channel.name <> invalid then node.title = channel.name

@@ -12,9 +12,6 @@ h1,h2,h3{letter-spacing:.2px}.page-heading h2,.section-title h2{color:#fff}.prim
 .primary:hover,button.primary:hover{background:linear-gradient(135deg,#fff22d,#ff9d2e);border-color:#fff22d}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--signal);outline-offset:2px}
 input,select,textarea{border-color:#34466c;background:#090e1d;color:#fff}.media-item{background:#0e162a}.media-item.smart-match{border-color:#35eaff;box-shadow:inset 3px 0 #35eaff}.media-item.smart-match::before{content:"SMART MATCH";position:absolute;right:8px;top:7px;color:#56f4ff;font:9px Consolas,monospace}
-#channel-dialog{border:1px solid #27e2ff;box-shadow:0 28px 100px #000}.builder-steps span.active,.builder-steps span.done{background:linear-gradient(135deg,var(--accent),#875aff)}
-.smart-channel-box{border-color:var(--accent-2);background:radial-gradient(circle at 90% 0,#d92a8e24,transparent 35%),linear-gradient(135deg,#0d1c34,#11122b)}
-.smart-channel-box .channel-number{color:var(--signal)}
 .status-card,.connection-result{border-color:#354a70;background:#0c1327}.setup-check.done,.system-check-grid article.ok{border-color:var(--success);box-shadow:inset 3px 0 var(--success)}
 ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-track{background:#090d1b}::-webkit-scrollbar-thumb{border:2px solid #090d1b;border-radius:10px;background:linear-gradient(var(--accent),var(--accent-2))}
 .copy-field{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}.copy-field button{white-space:nowrap}

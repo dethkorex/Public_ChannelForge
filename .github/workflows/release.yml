@@ -37,6 +37,8 @@ jobs:
               ("tv/firetv/app/build.gradle", r"^\s*versionName '([^']+)'"),
           ]:
               assert re.search(pattern, Path(path).read_text(encoding="utf-8"), re.M)[1] == tag[1:], path
+          roku = dict(line.split("=", 1) for line in Path("tv/roku/manifest").read_text(encoding="utf-8").splitlines() if "=" in line)
+          assert roku["channelforge_version"] == tag[1:], "Roku version does not match the release tag"
       - run: python -m unittest discover -s tests -v
 
   windows-installer:
@@ -157,6 +159,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate Roku components
         run: npx --yes brighterscript@0.70.3 --root-dir tv/roku --create-package=false --copy-to-staging=false
+      - name: Test Roku discovery and playback recovery
+        run: |
+          result=$(npx --yes brs@0.45.0 tv/roku/components/CatalogState.brs tv/roku/components/MainScene.brs tests/roku/recovery.brs)
+          printf '%s\n' "$result"
+          grep -Fxq 'PASS Roku discovery and recovery' <<< "$result"
       - name: Package Roku channel
         run: |
           python3 scripts/package_roku.py tv-release/ChannelForgeTV-Roku.zip
@@ -217,4 +224,18 @@ jobs:
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: release-assets/*
           body_path: RELEASE_NOTES.md
+  announce-release:
+    needs: publish-release
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: discord-release-${{ github.ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Post release notes to Discord
+        env:
+          RELEASE_WEBHOOK: ${{ secrets.CHANNELFORGE_DISCORD_WEBHOOK }}
+        run: python scripts/announce_release.py
 

@@ -10,12 +10,50 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tests.creator_fixture import app
 
 
 class BroadcastTests(unittest.TestCase):
+    def test_public_hd_live_has_separate_bitrate_from_the_relay_and_movie_profiles(self):
+        direct = app.relay_renditions()
+        constrained = app.relay_renditions(constrained=True)
+        movie = app.relay_renditions(on_demand=True)
+        self.assertEqual(direct[-1][1:5], (1280, 720, 3000, 3400))
+        self.assertEqual(constrained[-1], movie[-1])
+        self.assertEqual(direct[1], constrained[1])
+        self.assertEqual([row[0] for row in direct], ["economy", "balanced", "hd"])
+
+    def test_active_playlist_leases_segments_until_last_viewer_leaves(self):
+        feed = app.LivePlayout(lambda _: None)
+        feed.last_request = time.monotonic() - 35
+        feed.segments.append((0, 0, {"economy": ("#EXTINF:2,", "/ffmpeg-stream/shared/segment000001.ts")}))
+        now = time.time()
+        session = {"feed": feed, "last_access": now - 100, "process": Mock()}
+        with (tempfile.TemporaryDirectory() as temp,
+              patch.object(app, "STREAM_DIR", Path(temp) / "empty"),
+              patch.dict(app.LIVE_PLAYOUT, {("channel", True, True): feed}, clear=True),
+              patch.dict(app.FFMPEG_SESSIONS, {"shared": session}, clear=True),
+              patch.object(app, "dispose_encoder") as dispose):
+            self.assertEqual(app.reap_idle_sessions_once(now), 0)
+            self.assertLess(now - session["last_access"], 40)
+            dispose.assert_not_called()
+            feed.last_request = time.monotonic() - 80
+            self.assertEqual(app.reap_idle_sessions_once(now + 70), 1)
+            dispose.assert_called_once_with(session)
+            self.assertFalse(app.LIVE_PLAYOUT)
+
+    def test_movie_master_reports_peak_bandwidth_and_keeps_ffmpeg_codec_and_resolution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            master = directory / "index.m3u8"
+            master.write_bytes(b'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=570000,AVERAGE-BANDWIDTH=506000,'
+                               b'RESOLUTION=854x480,CODECS="avc1.640029,mp4a.40.2"\nindex_balanced.m3u8\n')
+            result = app.viewer_encoder_playlist({"directory": directory, "variant_peaks": {"balanced": 690000}},
+                                                 "index.m3u8")
+            self.assertEqual(result, master.read_bytes().replace(b":BANDWIDTH=570000", b":BANDWIDTH=690000"))
+
     def test_shutdown_reaps_child_during_first_playlist_wait(self):
         popen = subprocess.Popen
         children = []
@@ -187,6 +225,7 @@ class BroadcastTests(unittest.TestCase):
                     with concurrent.futures.ThreadPoolExecutor(2) as pool:
                         masters = list(pool.map(viewer, [app.Handler, app.PublicMediaHandler]))
                     self.assertEqual(masters[0], masters[1])
+                    self.assertIn(b"#EXT-X-STREAM-INF:BANDWIDTH=4000000\n", masters[0])
                     self.assertEqual(len(app.LIVE_PLAYOUT), 1)
                     feed = next(iter(app.LIVE_PLAYOUT.values()))
                     self.assertIn("#EXTINF:", feed.playlist("balanced"))
