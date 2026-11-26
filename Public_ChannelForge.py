@@ -49,7 +49,7 @@ DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
 RELAY_HOST_KEY = "localhost.run ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9"
 RELAY_INSTANCE = secrets.token_hex(20)
-BROADCAST_ROUTE = re.compile(r"/broadcast/([a-zA-Z0-9_-]+)/(?:([a-f0-9]{24})/(economy|balanced|hd)|(master))\.m3u8")
+BROADCAST_ROUTE = re.compile(r"/broadcast/([a-zA-Z0-9_-]+)/(?:([a-f0-9]{24})/(economy|balanced|hd)|(master|firetv))\.m3u8")
 LIVE_PLAYOUT = {}
 EXPORT_CHANNEL_IDS = None
 DEFAULT_DIRECTORY_URL = "https://channelforge-directory.fresh-anorak.workers.dev"
@@ -83,6 +83,7 @@ CREATOR_ICON = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) /
 LOCK = threading.RLock()
 # Bound the lock pool while allowing different channels to start in parallel.
 ENCODER_START_LOCKS = tuple(threading.Lock() for _ in range(32))
+NEXT_PROGRAM_SLOT = threading.BoundedSemaphore(1)
 POSTER_CACHE_LOCKS = tuple(threading.Lock() for _ in range(32))
 HLS_PROXY: dict[str, tuple[str, float]] = {}
 HLS_PROXY_CHANNELS: dict[str, str] = {}
@@ -90,9 +91,20 @@ UPDATE_JOBS: dict[str, dict] = {}
 PLAYBACK_ERRORS: dict[str, tuple[float, str]] = {}
 PLAYBACK_ERROR_COOLDOWN = 30
 FFMPEG_SESSIONS: dict[str, dict] = {}
+BROADCAST_EVENTS = deque(maxlen=100)
+SOURCE_FAILURES = {}
 ENCODER_STARTING: dict[str, int] = {}
-MAX_ENCODERS = min(6, max(4, 1 + (os.cpu_count() or 2) // 2))
-STREAM_CACHE_LIMIT = 3 * 1024**3
+ENCODER_GENERATION = 0
+ENCODER_LAUNCHES = {}
+def bounded_environment_int(name, default, low, high):
+    try:
+        return max(low, min(high, int(os.environ.get(name, default))))
+    except ValueError:
+        return default
+
+
+MAX_ENCODERS = bounded_environment_int("CHANNELFORGE_MAX_ENCODERS", min(6, max(2, 1 + (os.cpu_count() or 2) // 2)), 1, 16)
+STREAM_CACHE_LIMIT = bounded_environment_int("CHANNELFORGE_CACHE_MIB", 3072, 256, 8192) * 1024**2
 STREAM_FREE_RESERVE = 1024**3
 STREAM_ROLLING_BUDGET = 128 * 1024**2
 STREAM_PRESSURE_SINCE = None
@@ -114,9 +126,11 @@ TUNNEL_PROCESS: subprocess.Popen | None = None
 TUNNEL_URL = ""
 TUNNEL_URLS: queue.Queue[str] = queue.Queue()
 PUBLISH_LOCK = threading.RLock()
+SHUTTING_DOWN = threading.Event()
 PUBLISH_CHANGED = threading.Event()
 SHARING_STATUS = "idle"
 REGISTERED_ORIGIN = ""
+HEARTBEAT_STATUS = {"last_success": 0, "last_attempt": 0, "failures": 0}
 MOVIE_SCAN_STATUS = {"state": "idle"}
 MOVIE_SCAN_LOCK = threading.RLock()
 PUBLIC_MEDIA_SERVER: ThreadingHTTPServer | None = None
@@ -374,6 +388,7 @@ def config(public: bool = False) -> dict:
         result["creator_key"] = ""
         result["tunnel_active"] = bool(TUNNEL_URL and (TUNNEL_PROCESS is None or TUNNEL_PROCESS.poll() is None))
         result["sharing_status"] = SHARING_STATUS
+        result["directory_heartbeat"] = HEARTBEAT_STATUS.copy()
         result["movie_scan"] = MOVIE_SCAN_STATUS
         result.pop("client_identifier", None)
     return result
@@ -436,21 +451,42 @@ def directory_request(method: str, path: str, payload: dict | None = None, key: 
         raise ValueError("The Creator Directory must use HTTPS.")
     data = json.dumps(payload).encode() if payload is not None else None
     headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": f"{APP_NAME}/{VERSION}"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
     request = urllib.request.Request(base + path, data=data, method=method, headers=headers)
+    if key:
+        request.add_unredirected_header("Authorization", f"Bearer {key}")
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            value = json.loads(response.read())
+            data = response.read(65537)
+            if len(data) > 65536:
+                raise ValueError("Directory response exceeded the limit.")
+            value = json.loads(data)
             return value if isinstance(value, dict) else {}
     except urllib.error.HTTPError as exc:
         try:
-            detail = json.loads(exc.read()).get("error", "")
+            detail = json.loads(exc.read(65536)).get("error", "")
         except Exception:
             detail = ""
         raise ValueError(detail or f"Creator Directory returned HTTP {exc.code}.") from exc
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise ValueError("Could not reach the hosted Creator Directory.") from exc
+
+
+def registration_key(directory_url: str) -> str:
+    """Keep a lost first registration response from stranding a published slug."""
+    namespace = hashlib.sha256(directory_url.encode()).hexdigest()[:24]
+    path = DATA_DIR / f"directory-registration-{namespace}.json"
+    with LOCK:
+        key = load_json(path, {})
+        if not isinstance(key, dict) or key.get("directory") != directory_url or not re.fullmatch(r"[a-f0-9]{64}", str(key.get("secret", ""))):
+            key = {"directory": directory_url, "secret": secrets.token_hex(32)}
+            temporary = path.with_suffix(f".{secrets.token_hex(8)}.tmp")
+            try:
+                with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as secret:
+                    json.dump(key, secret)
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return key["secret"]
 
 
 def publish_creator(payload: dict) -> dict:
@@ -482,29 +518,32 @@ def publish_creator(payload: dict) -> dict:
         result = directory_request("PUT", f'/v1/creators/{settings["creator_id"]}', profile, settings["creator_key"])
         creator_id, creator_key = settings["creator_id"], settings["creator_key"]
     else:
-        result = directory_request("POST", "/v1/creators", profile)
+        result = directory_request("POST", "/v1/creators", profile, registration_key(settings["directory_url"]))
         creator_id, creator_key = str(result.get("creator", {}).get("id", "")), str(result.get("api_key", ""))
         if not creator_id or not creator_key:
             raise ValueError("The Creator Directory did not return publishing credentials.")
-    raw = load_json(CONFIG_FILE, {})
-    if not isinstance(raw, dict):
-        raw = {}
-    raw.update({"directory_url": settings["directory_url"], "creator_id": creator_id,
-                "creator_key": creator_key, "creator_profile": profile, "pending_creator_profile": {}})
-    atomic_json(CONFIG_FILE, raw)
+    profile["heartbeat_supported"] = bool(result.get("heartbeat_supported"))
+    with LOCK:
+        raw = load_json(CONFIG_FILE, {})
+        if not isinstance(raw, dict):
+            raw = {}
+        raw.update({"directory_url": settings["directory_url"], "creator_id": creator_id,
+                    "creator_key": creator_key, "creator_profile": profile, "pending_creator_profile": {}})
+        atomic_json(CONFIG_FILE, raw)
     return result.get("creator", {"id": creator_id, **profile})
 
 
 def unpublish_creator() -> None:
-    with PUBLISH_LOCK, LOCK:
+    with PUBLISH_LOCK:
         settings = config()
         if settings["creator_id"] and settings["creator_key"]:
             directory_request("DELETE", f'/v1/creators/{settings["creator_id"]}', None, settings["creator_key"])
-        raw = load_json(CONFIG_FILE, {})
-        if isinstance(raw, dict):
-            raw.update({"creator_id": "", "creator_key": "", "creator_profile": {},
-                        "pending_creator_profile": {}, "auto_publish_channels": False})
-            atomic_json(CONFIG_FILE, raw)
+        with LOCK:
+            raw = load_json(CONFIG_FILE, {})
+            if isinstance(raw, dict):
+                raw.update({"creator_id": "", "creator_key": "", "creator_profile": {},
+                            "pending_creator_profile": {}, "auto_publish_channels": False})
+                atomic_json(CONFIG_FILE, raw)
     PUBLISH_CHANGED.set()
 
 
@@ -516,24 +555,34 @@ def publish_studio(payload: dict) -> dict:
         previous = load_json(CONFIG_FILE, {})
         if not isinstance(previous, dict):
             previous = {}
-        raw = previous.copy()
+        changes = {}
         if payload.get("directory_url"):
             new_directory = str(payload["directory_url"]).strip().rstrip("/")
             if new_directory != str(previous.get("directory_url", DEFAULT_DIRECTORY_URL)).rstrip("/"):
-                raw.update({"creator_id": "", "creator_key": ""})
-            raw["directory_url"] = new_directory
+                changes.update({"creator_id": "", "creator_key": ""})
+            changes["directory_url"] = new_directory
         manual_origin = str(payload.get("public_url", "")).strip().rstrip("/")
         already_serving = PUBLIC_MEDIA_SERVER is not None
         already_relaying = TUNNEL_PROCESS is not None
         start_public_media_server(automatic=not manual_origin)
         try:
             origin = manual_origin or start_public_tunnel()
-            raw.update({"public_url": origin, "public_tunnel": not manual_origin, "auto_publish_channels": True})
-            atomic_json(CONFIG_FILE, raw)
+            changes.update({"public_url": origin, "public_tunnel": not manual_origin, "auto_publish_channels": True})
+            with LOCK:
+                previous = load_json(CONFIG_FILE, {})
+                atomic_json(CONFIG_FILE, {**previous, **changes})
             generate_exports()
             creator = publish_creator(payload)
         except Exception:
-            atomic_json(CONFIG_FILE, previous)
+            with LOCK:
+                current = load_json(CONFIG_FILE, {})
+                for field, attempted in changes.items():
+                    if current.get(field) == attempted:
+                        if field in previous:
+                            current[field] = previous[field]
+                        else:
+                            current.pop(field, None)
+                atomic_json(CONFIG_FILE, current)
             generate_exports()
             if not already_relaying:
                 stop_public_tunnel()
@@ -589,10 +638,14 @@ def channels() -> list[dict]:
         value = load_json(CHANNELS_FILE, [])
         if not isinstance(value, list):
             return []
+        missing_ids = [channel for channel in value if not channel.get("id")]
+        for channel in missing_ids:
+            channel["id"] = secrets.token_hex(8)
         legacy = [channel for channel in value if channel.get("items") and not channel.get("air_until")]
         if legacy:
             for channel in legacy:
                 channel["air_until"] = current_run_end(channel).isoformat()
+        if legacy or missing_ids:
             atomic_json(CHANNELS_FILE, value)
         return value
 
@@ -1211,6 +1264,7 @@ def plex_items(section: str) -> list[dict]:
             "part_key": part_node.get("key", "") if part_node is not None else "",
             "container": media_node.get("container", "") if media_node is not None else "",
             "video_codec": media_node.get("videoCodec", "") if media_node is not None else "",
+            "height": int(media_node.get("height") or 0) if media_node is not None else 0,
             "audio_codec": media_node.get("audioCodec", "") if media_node is not None else "",
             "audio_stream_index": audio_streams.index(preferred_audio) if preferred_audio is not None else 0,
             "audio_stream_id": preferred_audio.get("id", "") if preferred_audio is not None else "",
@@ -1495,6 +1549,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "season": max(0, int(item.get("season", 0) or 0)), "episode": max(0, int(item.get("episode", 0) or 0)),
             "part_key": str(item.get("part_key", ""))[:500], "container": str(item.get("container", ""))[:30],
             "video_codec": str(item.get("video_codec", ""))[:30], "audio_codec": str(item.get("audio_codec", ""))[:30],
+            "height": min(16384, max(0, int(item.get("height") or 0))),
             "audio_stream_index": max(0, int(item.get("audio_stream_index", 0) or 0)),
             "audio_stream_id": str(item.get("audio_stream_id", ""))[:40], "audio_language": str(item.get("audio_language", ""))[:40],
             "source": "local" if item.get("source") == "local" else "plex",
@@ -1594,6 +1649,55 @@ def parse_timestamp(value: str) -> datetime:
         return datetime.now(timezone.utc).replace(second=0, microsecond=0)
 
 
+def scheduled_slot(items, index, start, stop, offset_ms, availability):
+    """Keep the channel clock anchored when a selected local file goes missing."""
+    def present(item):
+        if SOURCE_FAILURES.get(media_source_identity(item), 0) > time.monotonic():
+            return False
+        if item.get("source") != "local":
+            return True
+        path = item.get("file_path", "")
+        if path not in availability:
+            availability[path] = bool(path) and Path(path).is_file()
+        return availability[path]
+
+    item = items[index]
+    if not present(item):
+        # Fill only the missing slot with the upcoming playable media. A viewer
+        # joining halfway uses the same UTC offsets as one already watching.
+        replacements = []
+        cycle_ms = 0
+        for step in range(1, len(items)):
+            candidate = items[(index + step) % len(items)]
+            if present(candidate):
+                duration = max(1000, int(candidate.get("duration_ms", 1800000)))
+                replacements.append((candidate, duration))
+                cycle_ms += duration
+                if cycle_ms > offset_ms:
+                    break
+        elapsed = offset_ms % cycle_ms if cycle_ms else 0
+        cursor = start + timedelta(milliseconds=offset_ms - elapsed)
+        for candidate, duration in replacements:
+            if elapsed < duration:
+                return {"item": candidate, "substitute_for": item.get("title", ""),
+                        "index": index, "slot_start": start, "start": cursor,
+                        "stop": min(stop, cursor + timedelta(milliseconds=duration)), "offset_ms": elapsed}
+            cursor += timedelta(milliseconds=duration)
+            elapsed -= duration
+    return {"item": item, "index": index, "start": start, "stop": stop, "offset_ms": offset_ms}
+
+
+def media_source_identity(item):
+    return (item.get("plex_server_id", ""), item.get("section", ""), item.get("file_path", ""), item.get("id", ""))
+
+
+def quarantine_unplayable_source(item):
+    with LOCK:
+        if len(SOURCE_FAILURES) >= 256:
+            SOURCE_FAILURES.pop(next(iter(SOURCE_FAILURES)))
+        SOURCE_FAILURES[media_source_identity(item)] = time.monotonic() + 300
+
+
 def schedule_position(channel: dict, moment: datetime | None = None, *, items: list[dict] | None = None) -> dict:
     """Resolve a deterministic 24/7 channel position for any UTC moment."""
     moment = (moment or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -1611,7 +1715,7 @@ def schedule_position(channel: dict, moment: datetime | None = None, *, items: l
         if within < duration:
             start = cursor
             stop = start + timedelta(milliseconds=duration)
-            return {"item": items[index], "index": index, "start": start, "stop": stop, "offset_ms": within}
+            return scheduled_slot(items, index, start, stop, within, {})
         within -= duration
         cursor += timedelta(milliseconds=duration)
     raise RuntimeError("Could not resolve channel schedule.")
@@ -1627,13 +1731,19 @@ def schedule_window(channel: dict, start: datetime, end: datetime, *, items: lis
         if start >= end:
             return []
     position = schedule_position(channel, start, items=items)
-    cursor = position["start"]
+    cursor = position.get("slot_start", position["start"])
     index = position["index"]
     result = []
+    availability = {}
     while cursor < end:
         item = items[index]
         stop = cursor + timedelta(milliseconds=max(1000, int(item.get("duration_ms", 1_800_000))))
-        result.append({"item": item, "start": cursor, "stop": stop})
+        sub_start = max(start, cursor)
+        while sub_start < min(stop, end):
+            offset = (sub_start - cursor) // timedelta(milliseconds=1)
+            slot = scheduled_slot(items, index, cursor, stop, offset, availability)
+            result.append(slot)
+            sub_start = slot["stop"]
         cursor, index = stop, (index + 1) % len(items)
     return result
 
@@ -1834,6 +1944,8 @@ def constrained_public_relay(settings=None):
 def start_public_tunnel() -> str:
     global TUNNEL_PROCESS, TUNNEL_URL, TUNNEL_URLS
     with TUNNEL_LOCK:
+        if SHUTTING_DOWN.is_set():
+            raise InterruptedError("Creator is shutting down.")
         if PUBLIC_MEDIA_SERVER is None:
             raise ValueError("The read-only media server is not running.")
         if TUNNEL_URL and TUNNEL_PROCESS is None:
@@ -1876,7 +1988,7 @@ def start_public_tunnel() -> str:
             threading.Thread(target=read_output, daemon=True, name="channel-forge-relay-output").start()
         deadline = time.monotonic() + 25
         candidate = ""
-        while TUNNEL_PROCESS.poll() is None:
+        while not SHUTTING_DOWN.is_set() and TUNNEL_PROCESS.poll() is None:
             try:
                 candidate = TUNNEL_URLS.get_nowait()
             except queue.Empty:
@@ -1897,6 +2009,11 @@ def stop_public_tunnel() -> None:
     with TUNNEL_LOCK:
         if TUNNEL_PROCESS and TUNNEL_PROCESS.poll() is None:
             TUNNEL_PROCESS.terminate()
+            try:
+                TUNNEL_PROCESS.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                TUNNEL_PROCESS.kill()
+                TUNNEL_PROCESS.wait()
         TUNNEL_PROCESS = None
         TUNNEL_URL = ""
 
@@ -1963,6 +2080,44 @@ def ffmpeg_supports_read_burst(executable: str) -> bool:
     return b"-readrate_initial_burst" in help_text
 
 
+@lru_cache(maxsize=4)
+def probed_hardware_encoder(executable: str) -> str:
+    """An encoder listed by an FFmpeg build may still have no usable device."""
+    for name in ("h264_nvenc", "h264_qsv", "h264_amf"):
+        try:
+            result = subprocess.run([executable, "-v", "error", "-nostdin", "-f", "lavfi", "-i",
+                                     "color=size=320x180:rate=25", "-frames:v", "2", "-c:v", name,
+                                     "-b:v", "256k", "-bf", "0", "-f", "null", "-"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+                                    creationflags=0x08000000 if sys.platform == "win32" else 0)
+            if result.returncode == 0:
+                return name
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return ""
+
+
+@lru_cache(maxsize=128)
+def copyable_local_video(path, modified_ns, size):
+    """Check pixel format, H.264 limits and initial sync-sample cadence before remuxing VOD."""
+    try:
+        probe = subprocess.run([ffprobe_path(), "-v", "error", "-select_streams", "v:0", "-read_intervals",
+                                "%+#180", "-show_entries", "stream=codec_name,field_order,profile,level,width,height,pix_fmt:packet=flags,pts_time",
+                                "-of", "json", path], capture_output=True, text=True, timeout=4, check=True,
+                               creationflags=0x08000000 if sys.platform == "win32" else 0)
+        data = json.loads(probe.stdout)
+        stream = data["streams"][0]
+        sync = [float(pkt["pts_time"]) for pkt in data["packets"] if "K" in pkt.get("flags", "")]
+        return (stream.get("codec_name") == "h264" and stream.get("pix_fmt") == "yuv420p" and
+                stream.get("profile") in ("Main", "High", "Baseline", "Constrained Baseline") and
+                0 < stream["level"] <= 41 and stream.get("field_order") == "progressive" and
+                stream["width"] <= 1920 and stream["height"] <= 1080 and
+                len(sync) >= 2 and abs(sync[0]) <= .15 and
+                all(0 < b - a <= 2.1 for a, b in zip(sync, sync[1:])))
+    except (OSError, ValueError, IndexError, KeyError, TypeError, subprocess.SubprocessError):
+        return False
+
+
 def playback_audio_track(item: dict, media_input: str) -> tuple[int, bool | None]:
     """Resolve the preferred audio track and whether the source has audio."""
     recorded_language = str(item.get("audio_language", "")).casefold()
@@ -1970,8 +2125,10 @@ def playback_audio_track(item: dict, media_input: str) -> tuple[int, bool | None
     if recorded_language in {"en", "eng"} or recorded_language.startswith("english"):
         return recorded_index, True
     identity = hashlib.sha256(f'{item.get("source")}:{item.get("id")}:{media_input}'.encode()).hexdigest()
-    if identity in AUDIO_SELECTION_CACHE:
-        return AUDIO_SELECTION_CACHE[identity]
+    with LOCK:
+        cached = AUDIO_SELECTION_CACHE.get(identity)
+    if cached is not None:
+        return cached
     try:
         completed = subprocess.run(
             [ffprobe_path(), "-v", "error", "-select_streams", "a", "-show_entries", "stream=index:stream_tags=language:stream_disposition=default", "-of", "json", media_input],
@@ -1987,7 +2144,10 @@ def playback_audio_track(item: dict, media_input: str) -> tuple[int, bool | None
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         return recorded_index, True if item.get("audio_stream_id") else None
     selection = (recorded_index, bool(streams))
-    AUDIO_SELECTION_CACHE[identity] = selection
+    with LOCK:
+        if len(AUDIO_SELECTION_CACHE) >= 1024:
+            AUDIO_SELECTION_CACHE.pop(next(iter(AUDIO_SELECTION_CACHE)))
+        AUDIO_SELECTION_CACHE[identity] = selection
     return selection
 
 
@@ -2013,6 +2173,125 @@ def sanitized_playback_error(error: object) -> str:
         if server.get("token"):
             message = message.replace(str(server["token"]), "REDACTED")
     return message[:800]
+
+
+def record_broadcast_event(channel_id, event, detail):
+    with LOCK:
+        BROADCAST_EVENTS.append({"time": datetime.now(timezone.utc).isoformat(),
+                                 "channel": channel_id, "event": event, "detail": detail})
+
+
+def broadcast_failure_reason(error):
+    message = str(error).casefold()
+    if isinstance(error, EncoderCapacityError):
+        return "resource_limit"
+    if "missing or unsupported" in message or "outside the configured" in message:
+        return "local_source_missing"
+    if any(marker in message for marker in ("invalid data found", "does not contain any stream",
+                                             "matches no streams", "before its scheduled boundary")):
+        return "invalid_program"
+    if "404" in message or "did not provide a playable media part" in message:
+        return "media_part_missing"
+    if "plex" in message or "http" in message:
+        return "plex_source_error"
+    if "segments" in message or "playlist" in message:
+        return "playlist_stalled"
+    return "encoder_error"
+
+
+def public_playback_message(reason):
+    return {"resource_limit": "This studio is busy. Try again shortly.",
+            "local_source_missing": "The scheduled file is unavailable at the studio.",
+            "media_part_missing": "The studio's media server could not find this program.",
+            "invalid_program": "The scheduled program could not be decoded.",
+            "plex_source_error": "The studio lost its media server connection.",
+            "playlist_stalled": "The studio stopped receiving new video segments."}.get(
+                reason, "The studio could not start the video encoder.")
+
+
+def broadcast_health(channel_id=None):
+    with LOCK:
+        feeds = [feed for key, feed in LIVE_PLAYOUT.items() if channel_id is None or key[0] == channel_id]
+        if any(feed.capacity_error for feed in feeds):
+            return "overloaded"
+        if any(feed.error or feed.recovering for feed in feeds):
+            return "reconnecting"
+        if any(feed.active() and feed.segments for feed in feeds) or any(
+                session["process"].poll() is None and (channel_id is None or session.get("channel_id") == channel_id)
+                for session in FFMPEG_SESSIONS.values()):
+            return "broadcasting"
+        if any(feed.active() and not feed.finished for feed in feeds) or (channel_id is None and ENCODER_STARTING):
+            return "starting"
+    return "reconnecting" if channel_id and playback_error(channel_id) else "standby"
+
+
+def encoder_usage(process):
+    """Sample a running child without another monitoring daemon."""
+    pid = process.pid
+    if process.poll() is not None:
+        return None, None
+    try:
+        if sys.platform.startswith("linux"):
+            # The executable name in parentheses can contain spaces or ')'.
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            return ((int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK"),
+                    int(fields[21]) * os.sysconf("SC_PAGE_SIZE"))
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+            class Counters(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("faults", wintypes.DWORD),
+                            ("peak_rss", ctypes.c_size_t), ("rss", ctypes.c_size_t),
+                            ("additional", ctypes.c_size_t * 6)]
+            handle = wintypes.HANDLE(int(process._handle))
+            times = [ctypes.c_ulonglong() for _ in range(4)]
+            memory = Counters()
+            memory.cb = ctypes.sizeof(memory)
+            timed = ctypes.windll.kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times))
+            sized = ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(memory), memory.cb)
+            return ((times[2].value + times[3].value) / 10**7 if timed else None, memory.rss if sized else None)
+    except (AttributeError, OSError, ValueError, IndexError):
+        pass
+    return None, None
+
+
+@lru_cache(maxsize=1)
+def gpu_load(sample_bucket):
+    utility = shutil.which("nvidia-smi")
+    if utility:
+        try:
+            result = subprocess.run([utility, "--query-gpu=utilization.gpu,utilization.encoder",
+                                     "--format=csv,noheader,nounits"], capture_output=True, text=True,
+                                    check=True, timeout=1.5, creationflags=0x08000000 if sys.platform == "win32" else 0)
+            return [dict(gpu_percent=int(a), encoder_percent=int(b)) for a, b in
+                    re.findall(r"(?m)^(\d+),\s*(\d+)\s*$", result.stdout)] or None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return None
+
+
+def creator_broadcast_diagnostics():
+    with LOCK:
+        sessions = list(FFMPEG_SESSIONS.values())
+        report = {"state": broadcast_health(), "starting": len(ENCODER_STARTING), "encoder_limit": MAX_ENCODERS,
+                  "cache_limit_bytes": STREAM_CACHE_LIMIT, "events": list(BROADCAST_EVENTS), "encoders": []}
+    for s in sessions:
+        cpu, rss = encoder_usage(s["process"])
+        now = time.monotonic()
+        with LOCK:
+            old = s.get("usage_sample")
+            if cpu is not None and (not old or now - old[0] >= .5):
+                if old:
+                    s["cpu_percent"] = round(max(0, cpu - old[1]) / (now - old[0]) * 100, 1)
+                s["usage_sample"] = (now, cpu)
+        report["encoders"].append({"channel": s["channel_id"], "program": s.get("program", ""),
+                                   "active": s["process"].poll() is None, "pid": s["process"].pid,
+                                   "video_encoder": s.get("video_encoder"), "audio_codec": s.get("audio_codec"),
+                                   "profile": s.get("profile"), "cache_bytes": s.get("cache_bytes"),
+                                   "budget_bytes": s.get("budget"), "cpu_seconds": cpu, "cpu_percent": s.get("cpu_percent"),
+                                   "rss_bytes": rss, **s.get("progress", {})})
+    report["gpu"] = gpu_load(int(time.monotonic() // 5)) if sessions else None
+    return report
 
 
 def plex_part_key(item: dict) -> str:
@@ -2045,6 +2324,8 @@ def start_ffmpeg_session(channel: dict, *, public_delivery: bool = False, constr
     channel_id = str(channel["id"])
     lock_index = zlib.crc32(channel_id.encode()) % len(ENCODER_START_LOCKS)
     with ENCODER_START_LOCKS[lock_index]:
+        if SHUTTING_DOWN.is_set():
+            raise InterruptedError("The studio is shutting down.")
         return start_or_reuse_encoder(channel, public_delivery=public_delivery, constrained_live=constrained_live, position=position)
 
 
@@ -2094,9 +2375,12 @@ def start_or_reuse_encoder(channel: dict, *, public_delivery: bool = False, cons
     item = position["item"]
     on_demand = bool(channel.get("on_demand"))
     start_key = "on-demand" if on_demand else position["start"].isoformat()
+    if position.get("recovery_key"):
+        start_key += ":" + position["recovery_key"]
     profile = "constrained" if constrained_live else "public" if public_delivery else "standard"
     identity = hashlib.sha256(f'{channel["id"]}:{item["id"]}:{start_key}:{profile}'.encode()).hexdigest()[:20]
     with LOCK:
+        generation = ENCODER_GENERATION
         existing = FFMPEG_SESSIONS.get(identity)
         if existing and not existing.get("capacity_error") and existing["process"].poll() in (None, 0) and (existing["directory"] / "index.m3u8").exists():
             existing["last_access"] = time.time()
@@ -2111,7 +2395,7 @@ def start_or_reuse_encoder(channel: dict, *, public_delivery: bool = False, cons
     minimum = int(seconds * 40_000) + 8 * 1024**2 if on_demand else budget
     budget = reserve_encoder(identity, channel, budget, minimum)
     try:
-        return launch_encoder(identity, channel, position, profile, relay, budget)
+        return launch_encoder(identity, channel, position, profile, relay, budget, generation=generation)
     finally:
         with LOCK:
             ENCODER_STARTING.pop(identity, None)
@@ -2123,7 +2407,7 @@ def reserve_encoder(identity, channel, budget, minimum=None):
         active = [session for session in FFMPEG_SESSIONS.values() if session["process"].poll() is None]
         handoff = not channel.get("on_demand") and any(
             session.get("channel_id") == channel["id"] for session in FFMPEG_SESSIONS.values())
-        if len(active) + len(ENCODER_STARTING) >= (MAX_ENCODERS if handoff else MAX_ENCODERS - 1):
+        if len(active) + len(ENCODER_STARTING) >= (MAX_ENCODERS if handoff else max(1, MAX_ENCODERS - 1)):
             raise EncoderCapacityError("This studio is serving other streams. Please try again shortly.")
         committed = sum(ENCODER_STARTING.values())
         future = committed
@@ -2143,7 +2427,7 @@ def reserve_encoder(identity, channel, budget, minimum=None):
         return granted
 
 
-def launch_encoder(identity, channel, position, profile, relay, budget):
+def launch_encoder(identity, channel, position, profile, relay, budget, *, software_retry=False, generation=None):
     item = position["item"]
     on_demand = bool(channel.get("on_demand"))
     public_delivery = profile != "standard"
@@ -2198,27 +2482,70 @@ def launch_encoder(identity, channel, position, profile, relay, budget):
             maximum = min(6000, media_rate - audio_rate) if media_rate is not None else 6000
             encoding += ["-vf", DEINTERLACE_VIDEO, "-crf", "19", "-maxrate", f"{maximum}k", "-bufsize", f"{maximum * 2}k"]
         output = ["-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8")]
+    policy = os.environ.get("CHANNELFORGE_VIDEO_ENCODER", "auto").lower()
+    codec = "libx264"
+    if policy != "software" and not software_retry:
+        if on_demand and not relay and item.get("source") == "local" and Path(media_input).suffix.lower() in (".mp4", ".m4v", ".mov"):
+            info = Path(media_input).stat()
+            if info.st_size * 1.25 + 8 * 1024**2 <= budget and copyable_local_video(media_input, info.st_mtime_ns, info.st_size):
+                codec = "copy"
+        if codec != "copy" and relay and policy not in ("remux", "software"):
+            with LOCK:
+                busy = len(ENCODER_STARTING) > 1 or any(s["process"].poll() is None for s in FFMPEG_SESSIONS.values())
+            if policy == "hardware" or busy or int(item.get("height") or 0) >= 1080 or item.get("video_codec") in ("hevc", "av1"):
+                codec = probed_hardware_encoder(executable) or "libx264"
     latency = [] if on_demand else ["-tune", "zerolatency"]
     segment_duration = "2" if constrained_live else "1"
     audio = stream_audio_options(has_audio, on_demand, remaining)
     if constrained_live and audio:
         audio += ["-b:a", "48k"]
+    video = ["-c:v", codec]
+    if codec == "copy":
+        encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?"]
+    else:
+        if codec == "libx264":
+            video += ["-preset", "superfast" if constrained_live else "veryfast", *latency]
+        elif codec == "h264_nvenc":
+            video += ["-preset", "p4", "-tune", "ll", "-bf", "0", "-forced-idr", "1",
+                      "-surfaces", "4", "-rc-lookahead", "0", "-delay", "0"]
+        else:
+            video += ["-bf", "0"]
+        video += ["-pix_fmt", "yuv420p", "-force_key_frames", f"expr:gte(t,n_forced*{segment_duration})"]
+        if relay:
+            video += ["-level:v", "4.1", "-fpsmax:v", "60"]
     command = [
-        executable, "-hide_banner", "-loglevel", "error", "-nostdin",
+        executable, "-hide_banner", "-loglevel", "error", "-nostdin", "-nostats", "-progress", "pipe:1",
         *input_timing, "-i", media_input, *output_timing,
-        *encoding, "-c:v", "libx264", "-preset", "superfast" if constrained_live else "veryfast", *latency,
-        "-pix_fmt", "yuv420p", "-force_key_frames", f"expr:gte(t,n_forced*{segment_duration})",
+        *encoding, *video,
         *audio,
         "-f", "hls", "-hls_time", segment_duration, *hls_options,
         *output,
     ]
     directory.mkdir(parents=True, exist_ok=True)
     session = {"directory": directory, "channel_id": channel["id"], "created": time.time(),
-               "last_access": time.time(), "on_demand": on_demand, "budget": budget}
+               "last_access": time.time(), "on_demand": on_demand, "budget": budget,
+               "program": item.get("title", ""), "video_encoder": codec, "profile": profile,
+               "audio_codec": "aac" if audio else "none", "segment_seconds": int(segment_duration),
+               "media_start": position["start"] + timedelta(milliseconds=position["offset_ms"])}
     try:
-        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                   creationflags=0x08000000 if sys.platform == "win32" else 0)
-        session["process"] = process
+        with LOCK:
+            if SHUTTING_DOWN.is_set() or (generation is not None and generation != ENCODER_GENERATION):
+                raise InterruptedError("The studio is shutting down.")
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       creationflags=0x08000000 if sys.platform == "win32" else 0)
+            session["process"] = process
+            ENCODER_LAUNCHES[identity] = process
+        def read_progress():
+            counters = {}
+            for line in process.stdout:
+                key, _, value = line.decode("ascii", "replace").strip().partition("=")
+                if key in ("frame", "dup_frames", "drop_frames", "out_time_us") and value.isdigit():
+                    counters[key] = int(value)
+                if key == "progress":
+                    session["progress"] = counters.copy()
+        progress = threading.Thread(target=read_progress, daemon=True, name="channel-encoder-stats")
+        progress.start()
+        session["progress_reader"] = progress
         # A damaged source may keep logging after startup. A full stderr pipe
         # would otherwise block FFmpeg and leave all viewers buffering.
         errors = deque(maxlen=4)
@@ -2233,8 +2560,11 @@ def launch_encoder(identity, channel, position, profile, relay, budget):
         while time.monotonic() < deadline:
             if playlist.exists() and playlist.stat().st_size:
                 with LOCK:
+                    if SHUTTING_DOWN.is_set() or (generation is not None and generation != ENCODER_GENERATION):
+                        raise InterruptedError("Studio playback was stopped during startup.")
                     previous = FFMPEG_SESSIONS.get(identity)
                     FFMPEG_SESSIONS[identity] = session
+                    ENCODER_LAUNCHES.pop(identity, None)
                     ENCODER_STARTING.pop(identity, None)
                 if previous:
                     dispose_encoder(previous)
@@ -2244,10 +2574,16 @@ def launch_encoder(identity, channel, position, profile, relay, budget):
                 error = b"".join(errors).decode("utf-8", "replace").strip()
                 error = re.sub(r"(?i)(X-Plex-Token=)[^&\s']+", r"\1[redacted]", error)
                 raise ValueError(f"Local FFmpeg playback failed: {error or 'the media could not be decoded.'}")
-            time.sleep(0.2)
+            time.sleep(0.05)
         raise ValueError("Local FFmpeg playback did not start within 25 seconds.")
-    except Exception:
+    except Exception as exc:
+        with LOCK:
+            ENCODER_LAUNCHES.pop(identity, None)
         dispose_encoder(session)
+        if (codec != "libx264" and isinstance(exc, ValueError) and not SHUTTING_DOWN.is_set() and
+                (generation is None or generation == ENCODER_GENERATION)):
+            record_broadcast_event(channel["id"], "encoder_fallback", codec)
+            return launch_encoder(identity, channel, position, profile, relay, budget, software_retry=True, generation=generation)
         raise
 
 
@@ -2266,6 +2602,9 @@ def stop_encoder(session):
             session["error_reader"].join()
         if process.stderr:
             process.stderr.close()
+        if session.get("progress_reader"):
+            session["progress_reader"].join()
+            process.stdout.close()
 
 
 def dispose_encoder(session):
@@ -2321,7 +2660,7 @@ def read_encoder_playlist(path):
 
 
 class LivePlayout:
-    def __init__(self, open_program, run_anchor=None):
+    def __init__(self, open_program, run_anchor=None, channel_id=None, prepare_program=None):
         self.run_anchor = run_anchor
         self.token = secrets.token_hex(12)
         self.open_program = open_program
@@ -2335,6 +2674,33 @@ class LivePlayout:
         self.finished = False
         self.stopped = False
         self.sequence = 0
+        self.channel_id = channel_id
+        self.recovery_key = ""
+        self.source = None
+        self.recovering = False
+        self.prepare_program = prepare_program
+        self.next_boundary = None
+        self.prepared_boundary = None
+        self.resume_at = None
+        self.media_start = None
+        self.segment_seconds = 1
+
+    def prepare_upcoming(self):
+        boundary = self.next_boundary
+        if (not self.prepare_program or boundary is None or self.prepared_boundary == boundary or
+                not 0 < boundary.timestamp() - time.time() <= 4 or not self.active() or
+                time.monotonic() - self.last_request > 10 or not NEXT_PROGRAM_SLOT.acquire(blocking=False)):
+            return
+        self.prepared_boundary = boundary
+        def prepare():
+            try:
+                if self.active():
+                    self.prepare_program(boundary)
+            except (OSError, ValueError) as exc:
+                record_broadcast_event(self.channel_id, "preparation_deferred", broadcast_failure_reason(exc))
+            finally:
+                NEXT_PROGRAM_SLOT.release()
+        threading.Thread(target=prepare, daemon=True, name="channel-next-program").start()
 
     def active(self):
         return not self.stopped and self.error is None and time.monotonic() - self.last_request < 30
@@ -2363,21 +2729,59 @@ class LivePlayout:
     def run(self):
         boundary = None
         epoch = 0
+        retries = 0
         try:
             while self.active():
-                program = self.open_program(boundary)
-                if program is None:
-                    with self.condition:
-                        self.finished = True
-                        self.condition.notify_all()
-                    return
-                session, directory, process, boundary = program
-                self.read_program(session, directory, process, epoch)
+                program = None
+                try:
+                    program = self.open_program(boundary)
+                    if program is None:
+                        with self.condition:
+                            self.finished = True
+                            self.condition.notify_all()
+                        return
+                    session, directory, process, boundary = program
+                    self.next_boundary = boundary
+                    self.read_program(session, directory, process, epoch)
+                    self.recovering = False
+                    if self.source and self.active() and boundary.timestamp() - time.time() > 12:
+                        quarantine_unplayable_source(self.source)
+                        raise ValueError("Media ended substantially before its scheduled boundary.")
+                except EncoderCapacityError:
+                    raise
+                except (OSError, ValueError) as exc:
+                    if not self.channel_id or not self.active():
+                        raise
+                    self.recovering = True
+                    cause = broadcast_failure_reason(exc)
+                    record_broadcast_event(self.channel_id, "program_failure", cause)
+                    if program and process and process.poll() is None:
+                        with LOCK:
+                            broken = FFMPEG_SESSIONS.get(session)
+                        if broken:
+                            stop_encoder(broken)
+                    if retries >= 3:
+                        raise
+                    self.recovery_key = secrets.token_hex(6)
+                    # Advance from the channel's current UTC position. Already
+                    # published segments keep their old ID and remain fetchable.
+                    now = datetime.now(timezone.utc)
+                    boundary = max(now, self.resume_at) if self.resume_at else now
+                    time.sleep(.5 * 2**retries)
+                    retries += 1
+                    epoch += 1
+                    continue
+                retries = 0
+                self.recovery_key = ""
                 # Bound the lookahead even when programs are very short.
                 while self.active() and time.time() < boundary.timestamp() - 4:
                     time.sleep(.15)
                 epoch += 1
         except Exception as exc:
+            if self.channel_id:
+                record_broadcast_event(self.channel_id, "broadcast_stopped", broadcast_failure_reason(exc))
+                with LOCK:
+                    PLAYBACK_ERRORS[self.channel_id] = (time.monotonic(), sanitized_playback_error(exc))
             with self.condition:
                 self.error = str(exc)
                 if isinstance(exc, EncoderCapacityError):
@@ -2392,7 +2796,10 @@ class LivePlayout:
         master = read_encoder_playlist(directory / "index.m3u8").decode()
         adaptive = "#EXT-X-STREAM-INF" in master
         last = -1
+        media_cursor = self.media_start
+        progressed_at = time.monotonic()
         while self.active():
+            self.prepare_upcoming()
             returncode = process.poll() if process is not None else 0
             snapshots = {}
             ended = True
@@ -2411,8 +2818,16 @@ class LivePlayout:
             with self.condition:
                 for number in common:
                     if number > last:
+                        progressed_at = time.monotonic()
+                        self.recovering = False
                         variants = {name: rows[number] for name, rows in snapshots.items()}
                         self.segments.append((self.sequence, epoch, variants))
+                        if media_cursor is not None:
+                            if last < 0 and number:
+                                media_cursor += timedelta(seconds=number * self.segment_seconds)
+                            duration = float(variants["economy"][0].split(":", 1)[1].split(",", 1)[0])
+                            media_cursor += timedelta(seconds=duration)
+                            self.resume_at = min(media_cursor, self.next_boundary)
                         self.sequence += 1
                         last = number
                 if common:
@@ -2421,7 +2836,9 @@ class LivePlayout:
                 return
             if returncode is not None:
                 raise ValueError("The channel encoder stopped without a final playlist.")
-            time.sleep(.12)
+            if time.monotonic() - progressed_at > 12:
+                raise ValueError("The encoder stopped producing HLS segments.")
+            time.sleep(.05 if last < 3 else .12)
 
 
 def start_playback_route(channel: dict, *, public_delivery: bool = False, constrained_live: bool = False) -> str:
@@ -2431,12 +2848,26 @@ def start_playback_route(channel: dict, *, public_delivery: bool = False, constr
 
 
 def stop_ffmpeg_sessions() -> None:
+    global ENCODER_GENERATION
     with LOCK:
+        ENCODER_GENERATION += 1
         for feed in LIVE_PLAYOUT.values():
-            feed.last_request = float("-inf")
+            with feed.condition:
+                feed.stopped = True
+                feed.last_request = float("-inf")
+                feed.condition.notify_all()
         LIVE_PLAYOUT.clear()
         sessions = list(FFMPEG_SESSIONS.values())
+        launches = list(ENCODER_LAUNCHES.values())
         FFMPEG_SESSIONS.clear()
+    for process in launches:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
     for session in sessions:
         dispose_encoder(session)
 
@@ -2549,8 +2980,7 @@ def prune_live_segments(directory: Path, cutoff: float) -> None:
 
 
 def reap_idle_sessions() -> None:
-    while True:
-        time.sleep(15)
+    while not SHUTTING_DOWN.wait(15):
         try:
             reap_idle_sessions_once()
         except OSError as exc:
@@ -2628,7 +3058,7 @@ def generate_exports(values: list[dict] | None = None) -> dict:
     for channel in values:
         node = ET.SubElement(tv, "channel", {"id": f"public-channelforge.{channel['id']}"})
         ET.SubElement(node, "display-name").text = channel["name"]
-        ET.SubElement(node, "display-name").text = channel["number"]
+        ET.SubElement(node, "display-name").text = str(channel["number"])
         logo = next((item for item in asset_manifest() if item.get("id") == channel.get("logo_asset_id")), None)
         if logo:
             ET.SubElement(node, "icon", {"src": f"{server_base(settings)}/user-assets/{logo['filename']}"})
@@ -2655,7 +3085,7 @@ def generate_exports(values: list[dict] | None = None) -> dict:
         logo = next((item for item in asset_manifest() if item.get("id") == channel.get("logo_asset_id")), None)
         logo_attribute = f' tvg-logo="{base}/user-assets/{logo["filename"]}"' if logo else ""
         lines.extend([
-            f'#EXTINF:-1 tvg-id="public-channelforge.{channel["id"]}" tvg-chno="{html.escape(channel["number"])}"{logo_attribute},{channel["name"]}',
+            f'#EXTINF:-1 tvg-id="public-channelforge.{channel["id"]}" tvg-chno="{html.escape(str(channel["number"]))}"{logo_attribute},{channel["name"]}',
             stream,
         ])
     playlist_path = EXPORT_DIR / "channels.m3u"
@@ -2778,6 +3208,7 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
     for channel in channels():
         if run_finished(channel, moment):
             continue
+        current = {}
         try:
             items = scheduled_items(channel)
             position = schedule_position(channel, moment, items=items)
@@ -2788,24 +3219,29 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
                     slots.append(schedule_position(channel, position["stop"], items=items))
             else:
                 slots = schedule_window(channel, start, end, items=items)
+        except (OSError, ValueError, TypeError):
+            slots = []
+        status = broadcast_health(channel.get("id"))
+        try:
             if current.get("source") == "local":
                 online = Path(str(current.get("file_path", ""))).is_file()
             else:
                 server_id = str(current.get("plex_server_id", ""))
                 credentials = plex_credentials(server_id) if server_id else {"token": settings["plex_token"], "url": settings["plex_url"]}
-                online = bool(credentials.get("token") and credentials.get("url"))
-            if playback_error(str(channel.get("id", ""))):
-                online = False
+                online = bool(current and credentials.get("token") and credentials.get("url"))
         except (OSError, ValueError, TypeError):
-            online, slots = False, []
+            online = False
+        if not online and status == "standby":
+            status = "reconnecting" if current else "standby"
         logo = assets.get(channel.get("logo_asset_id"))
         result.append({
             "id": str(channel.get("id", "")), "name": str(channel.get("name", "Untitled")),
-            "number": str(channel.get("number", "")), "online": online,
+            "number": str(channel.get("number", "")), "online": online, "state": status,
             "stream_url": f"{base}/live/{urllib.parse.quote(str(channel.get('id', '')))}.m3u8",
             "air_until": channel.get("air_until", ""),
             "air_until_epoch_ms": int(parse_timestamp(channel["air_until"]).timestamp()*1000) if channel.get("air_until") else 0,
-            **({"continuous_url": f"{base}/broadcast/{channel['id']}/master.m3u8"}
+            **({"continuous_url": f"{base}/broadcast/{channel['id']}/master.m3u8",
+                "firetv_url": f"{base}/broadcast/{channel['id']}/firetv.m3u8"}
                if continuous else {}),
             "logo_url": f"{base}/user-assets/{urllib.parse.quote(str(logo.get('filename', '')))}" if logo else "",
             "programs": [{
@@ -2955,23 +3391,38 @@ class Handler(BaseHTTPRequestHandler):
     def broadcast(self, channel_id, playlist, token):
         public, constrained = self.delivery_profile()
         feed_key = (channel_id, public, constrained)
-        if playlist == "master":
+        if playlist in ("master", "firetv"):
             channel = next((row for row in channels() if row["id"] == channel_id), None)
             if not channel:
                 return self.send_json(404, {"error": "Channel offline."})
             if run_finished(channel):
                 return self.send_json(410, {"error": "This channel has finished its lineup."})
 
-            def open_program(boundary):
+            def open_program(boundary, warm=False):
                 current = next((row for row in channels() if row["id"] == channel_id), None)
                 if not current:
                     raise ValueError("Channel offline.")
                 if run_finished(current, boundary):
                     return None
                 position = schedule_position(current, boundary)
-                identity = start_ffmpeg_session(current, public_delivery=public, constrained_live=constrained, position=position)
+                if not warm:
+                    feed.source = position["item"]
+                    if position.get("substitute_for"):
+                        record_broadcast_event(channel_id, "schedule_substitution", "unavailable_source")
+                    position["recovery_key"] = feed.recovery_key
+                try:
+                    identity = start_ffmpeg_session(current, public_delivery=public, constrained_live=constrained, position=position)
+                except ValueError as exc:
+                    if broadcast_failure_reason(exc) in ("invalid_program", "media_part_missing"):
+                        quarantine_unplayable_source(position["item"])
+                    raise
                 with LOCK:
+                    if not warm:
+                        PLAYBACK_ERRORS.pop(channel_id, None)
                     session = FFMPEG_SESSIONS[identity]
+                    if not warm:
+                        feed.media_start = session["media_start"]
+                        feed.segment_seconds = session["segment_seconds"]
                     return identity, session["directory"], session["process"], position["stop"]
 
             with LOCK:
@@ -2979,11 +3430,16 @@ class Handler(BaseHTTPRequestHandler):
                 if not feed or not feed.active() or feed.run_anchor != channel.get("schedule_anchor"):
                     if feed:
                         feed.stopped = True
-                    feed = LIVE_PLAYOUT[feed_key] = LivePlayout(open_program, channel.get("schedule_anchor"))
+                    feed = LIVE_PLAYOUT[feed_key] = LivePlayout(open_program, channel.get("schedule_anchor"),
+                                                               channel_id, lambda boundary: open_program(boundary, warm=True))
                     threading.Thread(target=feed.run, daemon=True, name="channel-playout").start()
                 feed.last_request = time.monotonic()
             lines = ["#EXTM3U"]
             variants = (("economy", 224000),) if constrained else (("economy", 270000), ("balanced", 690000), ("hd", 1750000))
+            if playlist == "firetv" and not constrained:
+                # A TV begins with the 480p track and can move down to 270p
+                # or up to 720p without starting another compatibility encoder.
+                variants = (variants[1], variants[0], variants[2])
             for name, bandwidth in variants:
                 lines.extend([f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}",
                               f"/broadcast/{channel_id}/{feed.token}/{name}.m3u8"])
@@ -2993,6 +3449,10 @@ class Handler(BaseHTTPRequestHandler):
                 feed = LIVE_PLAYOUT.get(feed_key)
                 if feed and feed.token == token and feed.capacity_error:
                     return self.send_json(503, {"error": feed.capacity_error})
+                if feed and feed.token == token and feed.error:
+                    reason = broadcast_failure_reason(feed.error)
+                    return self.send_json(503, {"state": "reconnecting", "reason": reason,
+                                                "error": public_playback_message(reason)})
                 if not feed or feed.token != token or not feed.active():
                     return self.send_json(410, {"error": "Tune this channel again."})
             try:
@@ -3000,7 +3460,9 @@ class Handler(BaseHTTPRequestHandler):
             except EncoderCapacityError as exc:
                 return self.send_json(503, {"error": str(exc)})
             except ValueError:
-                return self.send_json(503, {"error": "The studio could not prepare this channel."})
+                reason = broadcast_failure_reason(feed.error) if feed.error else "starting"
+                return self.send_json(503, {"state": "reconnecting" if feed.error else "starting", "reason": reason,
+                                           "error": public_playback_message(reason) if feed.error else "The studio is preparing video."})
         self.send_bytes(200, manifest.encode(), "application/vnd.apple.mpegurl")
 
     def send_playback_manifest(self, route: str, *, constrained_live: bool = False) -> None:
@@ -3044,6 +3506,12 @@ class Handler(BaseHTTPRequestHandler):
                 name = settings["creator_profile"].get("name") or settings["plex_profile"].get("server_name")
                 self.send_json(200, {"app": APP_NAME, "version": VERSION, "name": name, "channel_count": sum(not run_finished(row) for row in channels()),
                                      "creator_id": settings["creator_id"], "public_url": settings["public_url"]})
+            elif parsed.path == "/api/diagnostics":
+                return self.send_json(200, {"version": VERSION, "platform": sys.platform, "sharing": SHARING_STATUS,
+                                            "registered": bool(REGISTERED_ORIGIN), "heartbeat": HEARTBEAT_STATUS.copy(),
+                                            "broadcast": creator_broadcast_diagnostics()})
+            elif parsed.path == "/playback-diagnostics.js":
+                return self.send_bytes(200, (WEB_DIR / "playback-diagnostics.js").read_bytes(), "text/javascript")
             elif parsed.path == "/api/status":
                 if urllib.parse.parse_qs(parsed.query).get("brief") == ["1"]:
                     return self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True)})
@@ -3434,6 +3902,8 @@ def attach_media_funnel(origin):
 def start_public_media_server(*, automatic: bool = False) -> None:
     global PUBLIC_MEDIA_SERVER
     with PUBLIC_MEDIA_LOCK:
+        if SHUTTING_DOWN.is_set():
+            raise InterruptedError("Creator is shutting down.")
         previous = PUBLIC_MEDIA_SERVER
         if previous is None or (not automatic and previous.server_port != PUBLIC_MEDIA_PORT):
             PUBLIC_MEDIA_SERVER = open_public_media_server(0 if automatic else PUBLIC_MEDIA_PORT)
@@ -3571,8 +4041,11 @@ def restore_public_sharing() -> None:
     failures = 0
     relay_misses = 0
     next_relay_check = 0.0
-    while True:
+    next_heartbeat = 0.0
+    while not SHUTTING_DOWN.is_set():
         PUBLISH_CHANGED.clear()
+        if SHUTTING_DOWN.is_set():
+            return
         with PUBLISH_LOCK:
             settings = config()
             profile = settings["creator_profile"]
@@ -3606,9 +4079,24 @@ def restore_public_sharing() -> None:
                                 stop_public_tunnel()
                                 REGISTERED_ORIGIN = ""
                                 raise ValueError("The public relay stopped responding. Reconnecting.")
-                    SHARING_STATUS = "retrying" if relay_misses else "live"
+                    if profile.get("heartbeat_supported") and now >= next_heartbeat:
+                        state = "reconnecting" if relay_misses else broadcast_health(None)
+                        HEARTBEAT_STATUS["last_attempt"] = int(time.time())
+                        try:
+                            directory_request("POST", f'/v1/creators/{settings["creator_id"]}/heartbeat',
+                                              {"state": state}, settings["creator_key"])
+                        except ValueError:
+                            HEARTBEAT_STATUS["failures"] += 1
+                            next_heartbeat = now + min(120, 10 * 2 ** min(4, HEARTBEAT_STATUS["failures"] - 1))
+                            raise
+                        else:
+                            HEARTBEAT_STATUS.update(last_success=int(time.time()), failures=0)
+                            next_heartbeat = now + 60
+                    SHARING_STATUS = "retrying" if relay_misses or HEARTBEAT_STATUS["failures"] else "live"
                 else:
                     REGISTERED_ORIGIN = ""
+                    next_heartbeat = 0.0
+                    HEARTBEAT_STATUS.update(last_success=0, last_attempt=0, failures=0)
                     relay_misses = 0
                     SHARING_STATUS = "idle" if settings["auto_publish_channels"] else "private"
                 failures = 0
@@ -3618,6 +4106,30 @@ def restore_public_sharing() -> None:
                     print(f"ChannelForge public sharing could not connect: {sanitized_playback_error(exc)}")
                 SHARING_STATUS = "retrying"
         PUBLISH_CHANGED.wait(min(120, 5 * 2 ** min(max(0, failures - 1), 5)) if failures else 20)
+
+
+def shut_down_creator_host(server, *, serving_in_background=True):
+    """Release this host's listeners and child processes, preserving published configuration."""
+    SHUTTING_DOWN.set()
+    PUBLISH_CHANGED.set()
+    try:
+        if serving_in_background:
+            server.shutdown()
+        server.server_close()
+    finally:
+        try:
+            stop_public_media_server()
+        finally:
+            try:
+                stop_ffmpeg_sessions()
+            finally:
+                stop_public_tunnel()
+
+
+def stop_creator_preview(window):
+    """Stop only the dashboard decoder. The studio hosts viewers independently."""
+    if window.events.loaded.is_set():
+        window.run_js("window.stopCreatorPreview?.()")
 
 
 def main() -> None:
@@ -3675,7 +4187,6 @@ def main() -> None:
     sync_plex_movies_async()
     if not args.no_browser and sys.platform == "win32":
         import webview
-        import ctypes
         import pystray
         from PIL import Image
         thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server")
@@ -3690,17 +4201,23 @@ def main() -> None:
 
         def exit_application(_icon=None, _item=None) -> None:
             state["quitting"] = True
-            if tray:
-                tray.stop()
+            SHUTTING_DOWN.set()
+            PUBLISH_CHANGED.set()
+            # Closing the native window releases the renderer even if its JS is unresponsive.
             window.destroy()
 
         def minimize_to_tray(*_event) -> bool:
             if state["quitting"] or UPDATE_EXITING:
                 return True
+            # FormClosing runs on the WinForms UI thread. Waiting for a JS result
+            # here deadlocks WebView2's completion callback and the tray Exit command.
+            if window.events.loaded.is_set():
+                window.native.browser.webview.ExecuteScriptAsync("window.stopCreatorPreview?.()")
             window.hide()
             if not state["notified"]:
                 state["notified"] = True
-                ctypes.windll.user32.MessageBoxW(0, "ChannelForge Creator is still hosting your channels.\n\nUse its system-tray icon to reopen it or choose Exit to take the server offline.", "ChannelForge Creator is still running", 0x40)
+                if tray and tray.HAS_NOTIFICATION:
+                    tray.notify("Creator is hosting in the tray. Choose Exit and stop channels to shut down.")
             return False
 
         window.events.closing += minimize_to_tray
@@ -3712,10 +4229,11 @@ def main() -> None:
         try:
             webview.start(debug=False)
         finally:
-            if tray:
-                tray.stop()
-            server.shutdown()
-            server.server_close()
+            try:
+                shut_down_creator_host(server)
+            finally:
+                if tray:
+                    tray.stop()
         return
     if not args.no_browser:
         try:
@@ -3726,8 +4244,7 @@ def main() -> None:
             try:
                 start_webview(webview)
             finally:
-                server.shutdown()
-                server.server_close()
+                shut_down_creator_host(server)
             return
         except ImportError:
             threading.Timer(0.8, lambda: webbrowser.open(url)).start()
@@ -3736,7 +4253,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        shut_down_creator_host(server, serving_in_background=False)
 
 
 if __name__ == "__main__":

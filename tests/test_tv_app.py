@@ -194,12 +194,28 @@ class TvAppTests(unittest.TestCase):
         self.assertIn('id="scan-channels"', tv.HTML)
         self.assertIn('id="tv-guide"', tv.HTML)
         self.assertIn("async function scanChannels", tv.HTML)
-        self.assertIn("filter(channel=>channel.online)", tv.HTML)
+        self.assertIn("value.channels.filter(channel=>channel.stream_url)", tv.HTML)
         self.assertIn('id="home-changelog"', tv.HTML)
         self.assertIn('data-section-block="cinema" hidden><h2>Creator studios', tv.HTML)
         self.assertIn("if(name==='cinema'&&selectedCreator)studio(selectedCreator)", tv.HTML)
         self.assertIn("channelsByStudio.set(creator.playlist_url,channels)", tv.HTML)
         self.assertIn("directoryScan=refreshDirectory()", tv.HTML)
+
+    def test_cached_guide_survives_failure_and_an_authoritative_empty_catalog_is_kept(self):
+        guide = "https://studio.example/api/public/channels?guide=extended"
+        body = b'{"channels":[{"id":"channel","online":false}]}'
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+                tv, "GUIDE_CACHE", Path(directory) / "guide.db"):
+            tv.guide_snapshot(guide, body)
+            tv.guide_snapshot(guide, b'{"error":"studio unavailable"}')
+            self.assertEqual(tv.guide_snapshot(guide), body)
+            tv.guide_snapshot(tv.DIRECTORY, b'{"creators":[{"id":"one"}]}')
+            tv.guide_snapshot(tv.DIRECTORY, b'{"creators":[],"registrations_complete":false}')
+            self.assertEqual(json.loads(tv.guide_snapshot(tv.DIRECTORY))["creators"], [{"id": "one"}])
+            tv.guide_snapshot(tv.DIRECTORY, b'{"creators":[],"registrations_complete":true}')
+            self.assertEqual(json.loads(tv.guide_snapshot(tv.DIRECTORY))["creators"], [])
+            with mock.patch.object(tv.time, "time", return_value=time.time()+8*86400):
+                self.assertIsNone(tv.guide_snapshot(guide))
 
     def test_closed_viewer_is_not_sent_a_second_response(self):
         for error in (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):

@@ -1,4 +1,4 @@
-const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers:{"content-type":"application/json; charset=utf-8","access-control-allow-origin":"*","cache-control":status===200?"public, max-age=30":"no-store"}});
+const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers:{"content-type":"application/json; charset=utf-8","access-control-allow-origin":"*","cache-control":value.creators && status===200?"public, max-age=30":"no-store"}});
 const text = value => String(value || "").trim();
 const slugify = value => text(value).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,60);
 const token = () => [...crypto.getRandomValues(new Uint8Array(32))].map(value=>value.toString(16).padStart(2,"0")).join("");
@@ -25,7 +25,25 @@ function publicCreator(value) {
   return {...visible, cinema_supported: Boolean(verified && visible.vault_url)};
 }
 
-async function readBody(request){const value=await request.json();if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("Expected an object.");return value}
+async function readBody(request) {
+  const reader = request.body?.getReader();
+  if (!reader) throw new Error("Missing JSON body.");
+  const decoder = new TextDecoder();
+  let buffer = "", bytes = 0;
+  try {
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > 64000) throw new Error("Request exceeds 64 KB.");
+      buffer += decoder.decode(value, {stream:true});
+    }
+  } finally { await reader.cancel(); }
+  const result = JSON.parse(buffer + decoder.decode());
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Expected an object.");
+  return result;
+}
+
 function validate(value) {
   const creator_version = text(value.creator_version).slice(0, 32);
   if (!isSupportedCreator(creator_version)) throw new Error("Update ChannelForge Creator to 3.5.19 or later to share worldwide.");
@@ -54,7 +72,6 @@ function validate(value) {
     ...(creator_version ? {creator_version} : {}),
   };
 }
-async function owned(request,env,id){const creator=await env.CREATORS.get(`creator:${id}`,"json"),provided=text(request.headers.get("authorization")).replace(/^Bearer\s+/i,"");if(!creator||!provided||await hash(provided)!==creator.key_hash)return null;return creator}
 async function endpointOk(url, content, observed) {
   let reader;
   try {
@@ -97,82 +114,163 @@ async function endpointOk(url, content, observed) {
   }
 }
 
-function saveCreator(env, creator) {
-  return env.CREATORS.put(`creator:${creator.id}`, JSON.stringify(creator), {metadata: {online: creator.online}});
+const reportedStates = new Set(["standby", "starting", "broadcasting", "reconnecting", "overloaded"]);
+const epoch = () => Math.floor(Date.now()/1000);
+const indexFor = env => env.STUDIO_INDEX.getByName("published-studios");
+const bearer = request => (request.headers.get("authorization") || "").match(/^Bearer ([a-zA-Z0-9_-]+)$/i)?.[1];
+
+function gracePeriod(env) {
+  const value = Number(env.OFFLINE_AFTER_SECONDS);
+  return Number.isFinite(value) && value > 0 ? Math.max(60, Math.min(86400, value)) : 360;
 }
 
-function studioIndex(env) {
-  return env.STUDIO_INDEX.getByName("published-studios");
+async function probeOrigin(profile, observed = {}) {
+  // An empty valid status or playlist still represents a reachable studio.
+  return Boolean(profile.status_url && await endpointOk(profile.status_url + "?guide=brief", "json", observed))
+    || await endpointOk(profile.playlist_url, "m3u", observed);
 }
 
-async function listCreatorKeys(env) {
-  const keys = [];
-  let cursor;
-  do {
-    const page = await env.CREATORS.list({prefix: "creator:", ...(cursor ? {cursor} : {})});
-    keys.push(...page.keys);
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-  return keys;
+async function lookup(env, id) {
+  const index = indexFor(env), key = "creator:" + id;
+  const profile = await index.get(key);
+  if (profile) return profile;
+  const legacy = await env.CREATORS.get(key, "json");
+  if (legacy) {
+    await index.importProfile(legacy, epoch());
+    return index.get(key);
+  }
+  return null;
 }
 
-async function publishable(value) {
-  const checks = await Promise.all([
-    endpointOk(value.guide_url, "xml"),
-    endpointOk(value.playlist_url, "m3u"),
-    endpointOk(value.vault_url + "?limit=1", "json"),
-  ]);
-  return checks.every(Boolean);
+async function legacySlugOwner(env, slug) {
+  const owner = await env.CREATORS.get("slug:" + slug);
+  if (!owner) return null;
+  const migrated = await indexFor(env).get("creator:" + owner);
+  return migrated && migrated.slug !== slug ? null : owner;
 }
 
 async function register(request, env) {
-  const value = validate(await readBody(request));
-  const slugOwner = await env.CREATORS.get(`slug:${value.slug}`);
-  if (slugOwner) return json({error: "Creator name is already registered."}, 409);
-  if (!await publishable(value)) return json({error: "Guide, playlist, and vault must be online before publishing."}, 422);
-  const id = crypto.randomUUID(), apiKey = token(), now = Math.floor(Date.now()/1000);
-  const creator = {id, ...value, key_hash: await hash(apiKey), online: true, last_ok: now, updated_at: now, failures: 0};
-  await studioIndex(env).add(`creator:${id}`, now);
-  await Promise.all([
-    saveCreator(env, creator),
-    env.CREATORS.put(`slug:${value.slug}`, id),
-  ]);
-  return json({creator: publicCreator(creator), api_key: apiKey}, 201);
+  const profile = validate(await readBody(request));
+  // New Creators retain this random key before sending POST. If its response
+  // is lost they can repeat the request and reclaim exactly the same identity.
+  const supplied = bearer(request);
+  if (supplied && !/^[a-f0-9]{64}$/.test(supplied)) return json({error:"Invalid registration key."}, 400);
+  const apiKey = supplied || token();
+  const id = supplied ? (await hash("creator-id:" + apiKey)).slice(0, 32) : crypto.randomUUID();
+  const key_hash = await hash(apiKey);
+  const index = indexFor(env);
+  const prior = await index.get("creator:" + id);
+  if (prior && prior.key_hash === key_hash) {
+    if (Object.entries(profile).every(([field,value]) => prior[field] === value))
+      return json({creator:publicCreator(prior), api_key:apiKey, heartbeat_supported:true}, 200);
+    // A lost response and a subsequent Creator restart can change the relay.
+    // Reconcile the route as part of the authenticated registration replay.
+    return saveProfile(env, index, prior, profile, apiKey);
+  }
+  const slugOwner = await legacySlugOwner(env, profile.slug);
+  if (slugOwner && slugOwner !== id) return json({error:"Creator name is already registered."}, 409);
+  const now = epoch();
+  const reachable = await probeOrigin(profile);
+  if (!reachable) return json({error:"The public channel endpoint is unavailable. Retry when the studio is reachable."},422);
+  const creator = {id, ...profile, key_hash, online:reachable, updated_at:now, last_ok:reachable ? now : 0};
+  const result = await index.put(creator, now, reachable, true);
+  if (result === "conflict") return json({error:"Creator name is already registered."}, 409);
+  return json({creator:publicCreator(creator), api_key:apiKey, heartbeat_supported:true}, 201);
 }
 
-async function update(request, env, id) {
-  const creator = await owned(request, env, id);
-  if (!creator) return json({error: "Invalid creator key."}, 403);
+async function update(request, env, id, heartbeat) {
+  const index = indexFor(env), key = "creator:" + id;
+  const secret = bearer(request);
+  const creator = secret && await lookup(env, id);
+  const encoder = new TextEncoder();
+  if (!creator || !/^[a-f0-9]{64}$/.test(creator.key_hash) ||
+      !crypto.subtle.timingSafeEqual(encoder.encode(creator.key_hash), encoder.encode(await hash(secret)))) {
+    return json({error:"Invalid creator key."}, 403);
+  }
   if (request.method === "DELETE") {
-    await Promise.all([env.CREATORS.delete(`creator:${id}`), env.CREATORS.delete(`slug:${creator.slug}`)]);
-    await studioIndex(env).remove(`creator:${id}`);
-    return json({ok: true});
+    // Delete the legacy copy first, so an interrupted operation remains
+    // visible and retryable before the authoritative index removal.
+    if (await env.CREATORS.get(key)) {
+      await Promise.all([env.CREATORS.delete(key), env.CREATORS.delete("slug:" + creator.slug)]);
+    }
+    await index.remove(key);
+    return json({ok:true});
   }
-  const value = validate(await readBody(request));
-  if (!await publishable(value)) return json({error: "Guide, playlist, and vault must be online before republishing."}, 422);
-  if (value.slug !== creator.slug) {
-    const owner = await env.CREATORS.get(`slug:${value.slug}`);
-    if (owner && owner !== id) return json({error: "Creator name is already registered."}, 409);
-    await Promise.all([env.CREATORS.delete(`slug:${creator.slug}`), env.CREATORS.put(`slug:${value.slug}`, id)]);
+  const body = await readBody(request);
+  if (heartbeat) {
+    if (!reportedStates.has(body.state)) return json({error:"Unknown studio state."}, 400);
+    await index.heartbeat(key, epoch(), body.state);
+    return json({ok:true});
   }
-  const now = Math.floor(Date.now()/1000);
-  const saved = {...creator, ...value, online: true, last_ok: now, failures: 0, updated_at: now};
-  await studioIndex(env).add(`creator:${id}`, now);
-  await saveCreator(env, saved);
-  return json({creator: publicCreator(saved)});
+  return saveProfile(env, index, creator, validate(body));
+}
+
+async function saveProfile(env, index, creator, profile, registrationKey) {
+  if (profile.slug !== creator.slug) {
+    const owner = await legacySlugOwner(env, profile.slug);
+    if (owner && owner !== creator.id) return json({error:"Creator name is already registered."}, 409);
+  }
+  const reachable = await probeOrigin(profile);
+  const now = epoch(), saved = {...creator, ...profile, online:reachable, updated_at:now, last_ok:reachable ? now : 0};
+  const result = await index.put(saved, now, reachable, false);
+  if (result !== "ok") return json({error:"Registration changed. Refresh and try again."}, 409);
+  if (profile.slug !== creator.slug && await env.CREATORS.get("slug:" + creator.slug) === creator.id) {
+    await env.CREATORS.delete("slug:" + creator.slug);
+  }
+  return json({creator:publicCreator(saved), heartbeat_supported:true, ...(registrationKey ? {api_key:registrationKey} : {})});
+}
+
+function catalogEntry(row, profile, now, grace) {
+  const heartbeat = row.heartbeat || 0;
+  const fresh = heartbeat > 0 && now - heartbeat <= grace;
+  const reachable = row.profile ? row.reachable : profile.online;
+  const failedAt = row.first_failure || 0;
+  let state = "standby";
+  if (failedAt) state = now - failedAt >= grace ? "offline" : "reconnecting";
+  else if (!reachable) state = "starting";
+  else if (fresh) state = row.reported;
+  else if (heartbeat && now - (row.seen || 0) > grace) state = "offline";
+  return {...publicCreator(profile), last_heartbeat:heartbeat, last_ok:row.seen || profile.last_ok || 0,
+    online:Boolean(reachable && state !== "offline"), state};
 }
 
 async function catalog(env) {
-  const keys = await studioIndex(env).keys();
-  const creators = [];
-  for (let offset = 0; offset < keys.length; offset += 100) {
-    const rows = await env.CREATORS.get(keys.slice(offset, offset + 100), {type: "json"});
-    for (const creator of rows.values()) {
-      if (creator?.online) creators.push(publicCreator(creator));
-    }
+  const {rows, migrated} = await indexFor(env).entries();
+  const missing = rows.filter(row => !row.profile).map(row => row.key);
+  const legacy = new Map();
+  for (let offset=0; offset<missing.length; offset+=100) {
+    const result = await env.CREATORS.get(missing.slice(offset, offset+100), {type:"json"});
+    for (const [key, value] of result) legacy.set(key, value);
   }
-  creators.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  return json({version: 1, generated_at: Math.floor(Date.now()/1000), creators});
+  const now = epoch(), grace = gracePeriod(env), creators=[];
+  for (const row of rows) {
+    const profile = row.profile ? JSON.parse(row.profile) : legacy.get(row.key);
+    if (profile && isSupportedCreator(profile.creator_version)) creators.push(catalogEntry(row, profile, now, grace));
+  }
+  creators.sort((a,b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  return json({version:1, registrations_complete:migrated && missing.every(key=>legacy.has(key) && legacy.get(key)), generated_at:now, creators});
+}
+
+async function prepareRollback(env) {
+  const index = indexFor(env);
+  const snapshot = await index.entries();
+  if (!snapshot.migrated || snapshot.rows.some(row => !row.profile)) return false;
+  const checkpoint = `rollback:${env.ROLLBACK_SNAPSHOT}`;
+  const progress = await env.CREATORS.get(checkpoint, "json");
+  if (progress?.complete) return true;
+  const batch = await index.rollbackBatch(progress?.after || "", 5);
+  const now = epoch(), grace = gracePeriod(env);
+  for (const {key,profile} of batch) {
+    const creator = JSON.parse(profile);
+    const row = snapshot.rows.find(entry => entry.key === key);
+    const visible = catalogEntry(row, creator, now, grace);
+    creator.online = visible.online;
+    creator.last_ok = visible.last_ok;
+    await env.CREATORS.put(key, JSON.stringify(creator), {metadata:{online:creator.online}});
+    await env.CREATORS.put("slug:" + creator.slug, creator.id);
+  }
+  await env.CREATORS.put(checkpoint, JSON.stringify({complete:batch.length<5, after:batch.at(-1)?.key || progress?.after || ""}));
+  return true;
 }
 
 export default {
@@ -198,59 +296,41 @@ export default {
         if (cache && ctx) ctx.waitUntil(cache.put(key, result.clone()));
         return result;
       }
+      if (env.ROLLBACK_SNAPSHOT && ["POST","PUT","DELETE"].includes(method) && !pathname.endsWith("/heartbeat"))
+        return json({error:"Directory registration is temporarily frozen for maintenance."},503);
       if (method === "POST" && pathname === "/v1/creators") return await register(request, env);
-      const match = pathname.match(/^\/v1\/creators\/([0-9a-f-]+)$/);
-      if (match && (method === "PUT" || method === "DELETE")) return await update(request, env, match[1]);
+      const match = pathname.match(/^\/v1\/creators\/([0-9a-f-]+)(\/heartbeat)?$/);
+      if (match && (match[2] ? method === "POST" : ["PUT","DELETE"].includes(method))) return await update(request, env, match[1], Boolean(match[2]));
       return json({error: "Not found"}, 404);
     } catch (error) {
       return json({error: error.message || "Request failed"}, 400);
     }
   },
-  async scheduled(_event,env,ctx){ctx.waitUntil((async()=>{
-    // Workers Free permits 50 outbound subrequests per invocation. Check at most
-    // five creators (including index updates and up to three origin requests each) in a rotating batch so the public
-    // directory remains usable as the community grows without paid services.
-    const index = studioIndex(env);
-    const now = Math.floor(Date.now()/1000);
-    if (await index.claimImport(now)) {
-      try {
-        const legacy = await listCreatorKeys(env);
-        await index.importLegacy(legacy.map(row => row.name), now);
-      } catch {
-        console.warn("Legacy studio import deferred. Current registrations remain available.");
-      }
-    }
-    const selected = await index.due(now, 5);
-    for(const key of selected){
-      const creator=await env.CREATORS.get(key,"json");
-      if(!creator){await index.checked(key, false, now);continue;}
-      // A slow movie catalog or full guide should not hide reachable studios.
-      const observed = {};
-      const healthy = (creator.status_url && await endpointOk(creator.status_url + "?guide=brief", "json", observed))
-        || await endpointOk(creator.playlist_url, "m3u", observed);
-      const wasOnline=Boolean(creator.online),previousFailures=Number(creator.failures||0);
-      if(healthy){
-        // Healthy creators cause no recurring KV writes. Only recovery or a
-        // cleared failure counter is persisted.
-        const changedVersion = observed.version && observed.version !== creator.creator_version;
-        if (changedVersion) creator.creator_version = observed.version;
-        // A reverse proxy may replace Server headers. The paged vault response
-        // confirms the minimum supported Cinema protocol in that case.
-        if (!creator.creator_version && creator.vault_url) {
-          await endpointOk(creator.vault_url + "?limit=1", "vault", observed);
+  async scheduled(_event,env,ctx) {
+    ctx.waitUntil((async () => {
+      const index = indexFor(env), now = epoch();
+      const cursor = await index.claimImport(now);
+      if (cursor !== null) {
+        try {
+          const page = await env.CREATORS.list({prefix:"creator:",limit:100, ...(cursor ? {cursor} : {})});
+          await index.importLegacy(page.keys.map(row=>row.name), page.list_complete ? null : page.cursor, now);
+        } catch (error) {
+          console.warn("Legacy directory import deferred", error.name);
         }
-        const changedCinema = observed.cinemaProtocol && observed.cinemaProtocol !== creator.cinema_protocol;
-        if (changedCinema) creator.cinema_protocol = observed.cinemaProtocol;
-        if(!wasOnline||previousFailures||changedVersion||changedCinema){creator.failures=0;creator.online=true;creator.last_ok=now;await saveCreator(env,creator)}
-      }else if(wasOnline&&previousFailures<1){
-        // One missed probe is tolerated so a transient network hiccup does not
-        // make a channel vanish from every TV guide.
-        creator.failures=1;await saveCreator(env,creator);
-      }else if(wasOnline){
-        creator.failures=2;creator.online=false;await saveCreator(env,creator);
       }
-      // An already-offline creator causes no further KV writes until it recovers.
-      await index.checked(key, healthy, now);
-    }
-  })())}
+      if (env.ROLLBACK_SNAPSHOT && await prepareRollback(env)) return;
+      // Rotating, bounded work. Health results never overwrite registration
+      // metadata in KV and never remove membership.
+      for (const {key,generation} of await index.due(now, 5)) {
+        const creator = await lookup(env, key.slice("creator:".length));
+        if (!creator) { await index.unresolved(key, now); continue; }
+        if (!generation) continue; // Imported creators get a fresh probe lease.
+        const observed = {};
+        const healthy = await probeOrigin(creator, observed);
+        if (healthy && !creator.creator_version && !observed.version && creator.vault_url)
+          await endpointOk(creator.vault_url + "?limit=1", "vault", observed);
+        await index.checked(key, generation, healthy, observed, now);
+      }
+    })());
+  }
 };

@@ -10,3 +10,5 @@ Endpoints:
 - `POST /v1/creators`
 - `PUT /v1/creators/<id>` with `Authorization: Bearer <creator key>`
 - `DELETE /v1/creators/<id>` with the same authorization
+
+The reference service negotiates authenticated `POST /v1/creators/<id>/heartbeat` and reports availability independently of persisted registration. Set `CHANNELFORGE_DIRECTORY_GRACE_SECONDS` to adjust the heartbeat grace period (default 360 seconds). Legacy publications that never negotiated a heartbeat continue to rely on their actual media endpoint.

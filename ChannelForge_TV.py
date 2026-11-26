@@ -7,6 +7,10 @@ import http.server
 import json
 import os
 import re
+import hashlib
+import logging
+import sqlite3
+import time
 import shutil
 import subprocess
 import sys
@@ -14,8 +18,9 @@ import threading
 import urllib.parse
 import urllib.request
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
+from native_vlc import NativePlayback
 
 from linux_runtime import apply_linux_update, can_apply_linux_update, restart_linux_app, linux_install_command, linux_release_asset, start_webview
 from release_metadata import read_latest_release
@@ -72,6 +77,49 @@ def approved_download(url: str) -> str:
     if parsed.scheme != "https" or parsed.hostname not in {"github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}:
         raise ValueError("The update URL is not an approved GitHub address.")
     return url
+
+
+GUIDE_CACHE = UPDATE_DIR.parent / "viewer-guide.sqlite3"
+GUIDE_CACHE_LOCK = threading.Lock()
+
+
+def guide_snapshot(url: str, body: bytes | None = None) -> bytes | None:
+    """Keep bounded last-known public JSON across the viewer's ephemeral HTTP origins."""
+    parts = urllib.parse.urlsplit(url)
+    directory = url == DIRECTORY
+    if not directory and (parts.path != "/api/public/channels" or parts.query != "guide=extended"):
+        return None
+    key = hashlib.sha256(url.encode()).hexdigest()
+    now = int(time.time())
+    if body is not None:
+        if len(body) > 4 * 1024 * 1024:
+            return None
+        try:
+            value = json.loads(body)
+        except (ValueError, UnicodeError):
+            return None
+        if not isinstance(value, dict) or not isinstance(value.get("creators" if directory else "channels"), list):
+            return None
+        if directory and value.get("registrations_complete") is False:
+            return None
+    try:
+        with GUIDE_CACHE_LOCK:
+            GUIDE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            with closing(sqlite3.connect(GUIDE_CACHE, timeout=1)) as conn, conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS snapshots (id TEXT PRIMARY KEY, checked INTEGER, body BLOB)")
+                if body is None:
+                    row = conn.execute("SELECT body FROM snapshots WHERE id=? AND checked>?", (key, now-7*86400)).fetchone()
+                    return row[0] if row else None
+                conn.execute("INSERT OR REPLACE INTO snapshots VALUES (?,?,?)", (key, now, body))
+                total = 0
+                for index, (identifier, size, checked) in enumerate(conn.execute(
+                        "SELECT id,length(body),checked FROM snapshots ORDER BY checked DESC,rowid DESC").fetchall()):
+                    total += size
+                    if total > 16*1024*1024 or index >= 128 or checked <= now-7*86400:
+                        conn.execute("DELETE FROM snapshots WHERE id=?", (identifier,))
+    except (OSError, sqlite3.Error) as exc:
+        logging.warning("Guide snapshot unavailable (%s)", type(exc).__name__)
+    return None
 
 
 def approved_content_url(url: str) -> str:
@@ -409,7 +457,7 @@ function renderLiveGuide(){
         row.className='guide-row'+(tuned&&channel.stream_url===tuned.stream_url?' tuned':'');
         row.innerHTML='<div class="guide-station"><button type="button" class="station-tune" aria-label="Watch '+esc(channel.name)+'"><strong>'+esc(channel.number||'—')+'</strong>'
             +(channel.logo_url?'<img src="'+esc(channel.logo_url)+'" alt="">':'<i class="station-icon" aria-hidden="true"></i>')
-            +'<span><b>'+esc(channel.name)+'</b><small>'+esc(channel.creator_name||'ChannelForge Creator')+'</small></span></button><button type="button" class="station-favorite" aria-label="Favorite '+esc(channel.name)+'" aria-pressed="'+favoriteChannels.has(channel.stream_url)+'">'+(favoriteChannels.has(channel.stream_url)?'★':'☆')+'</button></div>'
+            +'<span><b>'+esc(channel.name)+'</b><small>'+esc(channel.creator_name||'ChannelForge Creator')+(channel.state && channel.state!=='broadcasting'?' · '+esc(channel.state):'')+'</small></span></button><button type="button" class="station-favorite" aria-label="Favorite '+esc(channel.name)+'" aria-pressed="'+favoriteChannels.has(channel.stream_url)+'">'+(favoriteChannels.has(channel.stream_url)?'★':'☆')+'</button></div>'
             +'<div class="guide-programs">'+(tiles.length?tiles.map((tile,index)=>{
                 const program=tile.programs[0], last=tile.programs.at(-1);
                 const width=100*(tile.end-tile.begin)/(stop-start), left=100*(tile.begin-start)/(stop-start);
@@ -566,16 +614,31 @@ async function discoverDirectory(url){
     const controller=new AbortController();
     const deadline=setTimeout(()=>controller.abort(),6500);
     try {
-        return (await json(url,true,controller.signal)).creators||[];
+        const payload=await json(url,true,controller.signal);
+        if(!Array.isArray(payload.creators))throw Error('Invalid studio directory');
+        return payload;
     } finally {
         clearTimeout(deadline);
     }
 }
+function mergeRegistrations(previous,updates){
+    const byId=new Map(previous.map(c=>[c.id||c.playlist_url,c]));
+    for(const c of updates)byId.set(c.id||c.playlist_url,c);
+    return [...byId.values()];
+}
 async function publicDirectory(){
+    const previous=allCreators.filter(c=>!c.local);
+    const cached=()=>localJson('/guide-cache?url='+encodeURIComponent('__DIRECTORY__')).catch(()=>null);
     try {
-        return await discoverDirectory('__DIRECTORY__');
-    } catch (_error) {
-        return discoverDirectory('__DIRECTORY_FALLBACK__');
+        const live=await discoverDirectory('__DIRECTORY__');
+        if(live.registrations_complete!==false)return live.creators;
+        const known=previous.length?previous:(await cached())?.creators||[];
+        return mergeRegistrations(known,live.creators);
+    } catch (error) {
+        if(previous.length)throw error;
+        const snapshot=await cached();
+        if(snapshot?.creators)return snapshot.creators.map(c=>({...c,state:'reconnecting'}));
+        return (await discoverDirectory('__DIRECTORY_FALLBACK__')).creators;
     }
 }
 async function scanStudio(creator){
@@ -586,9 +649,18 @@ async function scanStudio(creator){
         if(creator.status_url){
             const address=new URL(creator.status_url);
             address.searchParams.set('guide','extended');
-            const value=await json(address.href,true,controller.signal);
-            channels=(value.channels||[]).filter(channel=>channel.online)
-                .map(channel=>({...channel,creator_name:creator.name,
+            let value, stale=false;
+            try{
+                value=await json(address.href,true,controller.signal);
+                if(!Array.isArray(value.channels))throw Error('Invalid guide response');
+            }catch(error){
+                value=await localJson('/guide-cache?url='+encodeURIComponent(address.href));
+                if(!Array.isArray(value?.channels))throw error;
+                stale=true;
+            }
+            channels=value.channels.filter(channel=>channel.stream_url)
+                .map(channel=>({...channel,creator_name:creator.name,studio_id:creator.public_id||creator.id||creator.playlist_url,
+                    state:stale?'reconnecting':channel.state||(channel.online?'broadcasting':'offline'),
                     stream_url:creatorMedia(channel.stream_url,creator),
                     continuous_url:channel.continuous_url?creatorMedia(channel.continuous_url,creator):'',
                     logo_url:creatorArtwork(channel.logo_url,creator),creator_logo_url:creatorArtwork(creator.logo_url,creator),
@@ -602,10 +674,11 @@ async function scanStudio(creator){
             channels=parsePlaylist(await response.text(),creator);
         }
     } catch (_error) {
-        // Other studios remain available if this origin cannot be reached.
+        channels=(channelsByStudio.get(creator.playlist_url)||[]).map(c=>({...c,state:'reconnecting'}));
     } finally {
         clearTimeout(deadline);
     }
+    if(!allCreators.some(c=>c.playlist_url===creator.playlist_url))return;
     channelsByStudio.set(creator.playlist_url,channels);
     refreshGuideFromStudios();
 }
@@ -641,8 +714,9 @@ async function refreshDirectory(){
         if(local)await check(local);
         refreshGuideFromStudios();
         if(selectedCreator&&!document.querySelector('.vault-layout').hidden&&Date.now()-vaultLoadedAt>60_000)studio(selectedCreator,true);
-        const count=liveChannels.length;
-        status.textContent=(count+' online channel'+(count===1?'':'s'))+(unavailable?' • directory unavailable':' • scanned '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}));
+        const count=liveChannels.filter(channel=>channel.online&&channel.state!=='reconnecting').length;
+        const reconnecting=liveChannels.filter(channel=>channel.state==='reconnecting').length;
+        status.textContent=(count+' online channel'+(count===1?'':'s'))+(reconnecting?' • '+reconnecting+' reconnecting':'')+(unavailable?' • directory unavailable':' • scanned '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}));
         return liveChannels;
     }finally{
         button.disabled=false;
@@ -910,7 +984,7 @@ function playCinemaMovie(movie){
         movieOwnsFullscreen=true;
         setApplicationFullscreen(true);
     }
-    const deferDecode=/Linux/i.test(navigator.platform)&&window.Hls?.isSupported();
+    const deferDecode=window.ChannelForgeNative?.preferred()||(/Linux/i.test(navigator.platform)&&window.Hls?.isSupported());
     const media={kind:'movie',title:movie.title,movie,cinema:true,transportPending:true,deferDecode};
     play(movie.stream_url,media);
     animateCinemaTape(true,movie,()=>{
@@ -1053,6 +1127,7 @@ function armPlaybackDeadline(generation, delay){
 }
 function showNativePlayback(){
     setPlayerState('Video decoding is unavailable in this window.',true,false);
+    if(window.ChannelForgeNative?.offerFallback())return;
     if(!/Linux/i.test(navigator.platform)||!window.pywebview?.api?.play_in_linux_player)return;
     const button=document.createElement('button');
     button.className='retry-stream';
@@ -1078,11 +1153,15 @@ function advanceLive(failed=false, failureMessage='COULD NOT PLAY THIS CHANNEL')
     const earlyEnd=!failed&&current&&current.start===activeMedia.programStart ? Date.parse(current.stop)-Date.now() : 0;
     setPlayerState(failed?'RECONNECTING…':'TUNING NEXT PROGRAM…');
     setBuffering(true,failed?'Reconnecting to the studio…':'Loading the next program…');
-    liveRetryTimer=setTimeout(()=>{
-        liveRetryTimer=null;
+    liveRetryTimer=setTimeout(async()=>{
         if(generation!==playbackGeneration||!liveMode)return;
-        const next=programAt(channel,Date.now());
-        play(activeStreamUrl,{kind:'live',channel,title:next?.title||channel?.name||activeMedia.title},true);
+        // Other studios can keep scanning while this channel reconnects.
+        if(failed)await Promise.race([scanChannels().catch(()=>{}),new Promise(done=>setTimeout(done,2200))]);
+        if(generation!==playbackGeneration||!liveMode)return;
+        liveRetryTimer=null;
+        const updated=liveChannels.find(c=>channel?.id && c.id===channel.id && c.studio_id===channel.studio_id)||channel;
+        const next=programAt(updated,Date.now());
+        play(updated?.stream_url||activeStreamUrl,{kind:'live',channel:updated,title:next?.title||updated?.name||activeMedia.title},true);
     },Math.max(failed?1000*liveRetries:350,earlyEnd+200));
 }
 function play(url,media=null,continuing=false){
@@ -1090,6 +1169,7 @@ function play(url,media=null,continuing=false){
     clearTimeout(liveBoundaryTimer);
     clearTimeout(playbackTimer);playbackTimer=null;
     const generation=++playbackGeneration,v=$('#player'),shell=ensurePlayerShell();
+    window.ChannelForgeNative?.stop();
     const continuousUrl=media?.kind==='live'&&media.channel?.continuous_url;
     const source='/stream?url='+encodeURIComponent(continuousUrl||url);
     if(hls){hls.destroy();hls=null}
@@ -1118,7 +1198,11 @@ function play(url,media=null,continuing=false){
     v.autoplay=!activeMedia.transportPending;
     v.classList.add('playing');$('#close').classList.add('show');
     v.removeAttribute('src');v.load();
-    if(liveMode&&activeMedia.channel?.online===false){showChannelOffline();return}
+    if(liveMode&&activeMedia.channel?.online===false&&(!activeMedia.channel.state||activeMedia.channel.state==='offline')){showChannelOffline();return}
+    if(!activeMedia.webOnly&&window.ChannelForgeNative?.shouldPlay(activeMedia)){
+        window.ChannelForgeNative.play(generation,continuousUrl||url,activeMedia);
+        return;
+    }
     armPlaybackDeadline(generation,liveMode?(liveRetries?16000:12000):24000);
     const start=()=>{
         if(generation!==playbackGeneration||activeMedia.ejecting)return;
@@ -1457,6 +1541,7 @@ function updateTunedIndicator(media,status='PLAYING'){
 function ensurePlayerShell(){if(playerShell)return playerShell;playerShell=document.createElement('section');playerShell.id='mini-player-shell';playerShell.className='mini-player-shell';let player=$('#player');player.parentNode.insertBefore(playerShell,player);playerShell.append(player,$('#player-buffer'),$('#player-bug'),$('#player-hud'),$('#close'));return playerShell}
 function dockMiniPlayer(screen='live'){let shell=ensurePlayerShell(),slot=$('#mini-player-slot');document.body.classList.remove('player-controls-hidden');if(screen==='live'&&slot){slot.append(shell);shell.className='mini-player-shell guide-dock'}else{document.querySelector('main.wrap')?.prepend(shell);shell.className='mini-player-shell section-dock'}}
 function closeVideoView(){
+    window.ChannelForgeNative?.stop();
     if(playerMini||!liveMode){
         const media=activeMedia;
         if(media?.cinema){
@@ -1541,6 +1626,7 @@ HTML = HTML.replace('</head>', '<style>.retry-stream{margin-left:7px;padding:4px
 HTML = HTML.replace("OPEN VERIFIED UPDATE", "RESTART & INSTALL UPDATE").replace("Opening the verified update…", "Restarting to install the verified update in place…")
 HTML = HTML.replace("</head>", f"<style>{GUIDE_LAYOUT_CSS}</style></head>", 1)
 HTML = HTML.replace("</head>", '<link rel="stylesheet" href="/cinema.css"></head>', 1)
+HTML = HTML.replace("</body>", '<script src="/playback-diagnostics.js"></script></body>', 1)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -1552,6 +1638,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, HTML.encode(), "text/html; charset=utf-8")
             if parsed.path == "/hls.js":
                 return self.send(200, resource("web/hls.min.js").read_bytes(), "text/javascript")
+            if parsed.path == "/playback-diagnostics.js":
+                return self.send(200, resource("web/playback-diagnostics.js").read_bytes(), "text/javascript")
             if parsed.path == "/cinema.css":
                 return self.send(200, resource("web/cinema.css").read_bytes(), "text/css; charset=utf-8")
             if parsed.path in {"/cinema-hero.webp", "/cinema-tapes.webp"}:
@@ -1570,6 +1658,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not value:
                     raise ValueError("Update job was not found.")
                 return self.send(200, json.dumps(value).encode(), "application/json")
+            if parsed.path == "/guide-cache":
+                url = approved_content_url(parse_qs(parsed.query).get("url", [""])[0])
+                return self.send(200, guide_snapshot(url) or b"null", "application/json")
             if parsed.path == "/proxy":
                 query = parse_qs(parsed.query)
                 url = approved_content_url(query.get("url", [""])[0])
@@ -1584,6 +1675,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         body = response.read(limit + 1)
                     if len(body) > limit:
                         raise ValueError("Creator response exceeded 64 MB.")
+                    if query.get("scan") == ["1"]:
+                        guide_snapshot(url, body)
                     content_type = response.headers.get_content_type()
                     headers = {"Cache-Control": "private, max-age=300"} if response.status == 200 and content_type.startswith("image/") else None
                     return self.send(response.status, body, content_type, headers)

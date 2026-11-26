@@ -101,25 +101,46 @@ public class MainActivity extends Activity {
             showChannelBanner(tunedChannel);
         }
     };
-    private boolean playbackWaiting, playbackFailed;
+    private boolean playbackWaiting, playbackFailed, consumingRetryKey;
     private final Runnable resetPlaybackRetries = () -> { liveRetries = 0; movieRetries = 0; };
     private VaultItem activeMovie;
-    private int movieRetries;
+    private int movieRetries, playGeneration;
+    private long resumePosition, lastFrameChange, firstFrameMs = -1, tuneStarted;
+    private int lastFrameCount = -1, lastErrorCode, lastHttpCode, totalRetries;
+    private String lastReason = "none", decoderName = "unknown";
+    private long directoryChecked, lastCpuTime, lastCpuTick;
+    private int cpuPercent = -1;
+    private final ArrayDeque<String> recentEvents = new ArrayDeque<>();
+    private String pendingReport;
+    private static final int EXPORT_REPORT = 22;
+    private DefaultBandwidthMeter bandwidth;
+    private final Runnable watchdog = new Runnable() {
+        @Override public void run() {
+            if (guideVisible || playbackFailed || ejectingTape) return;
+            long now = SystemClock.elapsedRealtime();
+            androidx.media3.exoplayer.DecoderCounters counters = player.getVideoDecoderCounters();
+            long cpu = android.os.Process.getElapsedCpuTime();
+            if (lastCpuTick != 0 && lastCpuTick < now) cpuPercent = (int)((cpu - lastCpuTime) * 100 / (now - lastCpuTick));
+            lastCpuTime = cpu; lastCpuTick = now;
+            if (!player.isPlaying() || counters == null || player.getVideoFormat() == null) {
+                lastFrameChange = now;
+            } else {
+                counters.ensureUpdated();
+                if (counters.renderedOutputBufferCount != lastFrameCount) {
+                    lastFrameCount = counters.renderedOutputBufferCount;
+                    lastFrameChange = now;
+                } else if (now - lastFrameChange >= 12_000) {
+                    recover("Video decoder stalled");
+                    return;
+                }
+            }
+            video.postDelayed(this, 2000);
+        }
+    };
     private final LruCache<String, Bitmap> posters = new LruCache<String, Bitmap>(6 * 1024 * 1024) {
         @Override protected int sizeOf(String address, Bitmap image) { return image.getByteCount(); }
     };
-    private final Runnable playbackDeadline = () -> {
-        playbackWaiting = false;
-        if (!guideVisible) {
-            video.removeCallbacks(this.continueLive);
-            player.stop();
-            if (tunedChannel != null && liveRetries < 2) {
-                ++liveRetries;
-                showBuffering("Reconnecting to the studio…", true);
-                scheduleLive(1000);
-            } else if (!retryMovieConnection()) failPlayback();
-        }
-    };
+    private final Runnable playbackDeadline = () -> recover("Studio did not deliver video before the deadline");
     private final Runnable continueLive = () -> {
         if (tunedChannel != null && !guideVisible) {
             trackLiveProgram();
@@ -130,7 +151,10 @@ public class MainActivity extends Activity {
         }
     };
     private boolean directoryLoading = false;
-    private long directoryMissStarted;
+    private boolean readInitialCache = true;
+    private boolean directoryStale;
+    private final Set<String> staleGuides = new HashSet<>();
+    private GuideCache guideCache;
     private final ExecutorService posterLoader = Executors.newFixedThreadPool(3);
     private final ExecutorService studioLoader = Executors.newFixedThreadPool(4);
     private final ExecutorService updateLoader = Executors.newSingleThreadExecutor();
@@ -189,14 +213,13 @@ public class MainActivity extends Activity {
     private static final String PAIRED_CREATOR = "paired_creator_url";
     private static final long DIRECTORY_REFRESH_MS = 60_000L;
     private static final long DIRECTORY_RETRY_MS = 10_000L;
-    private static final long DIRECTORY_GRACE_MS = 30_000L;
     private static final int MOVIE_PAGE_SIZE = 12;
     private static final long METADATA_DEADLINE_MS = 20_000L;
     private static final int MAX_METADATA_BYTES = 24 * 1024 * 1024;
     private final Runnable directoryRetry = this::loadDirectory;
     private final Runnable directoryRefresh = new Runnable() {
         @Override public void run() {
-            if (guideVisible) loadDirectory();
+            if (guideVisible && resumed) loadDirectory();
             if (guide != null) guide.postDelayed(this, DIRECTORY_REFRESH_MS);
         }
     };
@@ -204,6 +227,7 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().getDecorView().setSystemUiVisibility(5894);
+        guideCache = new GuideCache(getFilesDir());
         buildUi();
         registerUpdateResult();
         loadDirectory();
@@ -244,14 +268,20 @@ public class MainActivity extends Activity {
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent("ChannelForge-TV/" + BuildConfig.VERSION_NAME)
                 .setConnectTimeoutMs(6000).setReadTimeoutMs(10000);
+        bandwidth = new DefaultBandwidthMeter.Builder(this).setInitialBitrateEstimate(240_000L).build();
         player = new ExoPlayer.Builder(this, new DefaultRenderersFactory(this).setEnableDecoderFallback(true))
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(http))
                 .setLoadControl(new DefaultLoadControl.Builder().setBufferDurationsMs(15000, 35000, 3500, 6000).build())
-                .setBandwidthMeter(new DefaultBandwidthMeter.Builder(this).setInitialBitrateEstimate(240_000L).build())
+                .setBandwidthMeter(bandwidth)
                 .setAudioAttributes(AudioAttributes.DEFAULT, true)
                 .build();
         player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
                 .setPreferredAudioLanguage("en").build());
+        player.addAnalyticsListener(new androidx.media3.exoplayer.analytics.AnalyticsListener() {
+            @Override public void onVideoDecoderInitialized(EventTime time, String name, long timestamp, long duration) {
+                decoderName = name;
+            }
+        });
         video.setPlayer(player);
         video.setUseController(false);
         video.setKeepContentOnPlayerReset(true);
@@ -396,7 +426,9 @@ public class MainActivity extends Activity {
                     if (tunedChannel != null && tunedChannel.airUntil > 0 && tunedChannel.airUntil <= System.currentTimeMillis() + 1000) {
                         showBuffering("Broadcast finished. Press Back for the guide.", false);
                     } else if (tunedChannel != null) {
-                        retuneAtBoundary();
+                        if (tunedProgramEnd > System.currentTimeMillis() + 2500 || tunedProgramEnd == 0)
+                            recover("Live stream ended before the scheduled transition");
+                        else retuneAtBoundary();
                     } else if (activeMovie != null) {
                         ejectMovie();
                     } else returnToGuide();
@@ -406,6 +438,7 @@ public class MainActivity extends Activity {
             @Override public void onRenderedFirstFrame() {
                 if (guideVisible) return;
                 renderedFrame = true;
+                if (firstFrameMs < 0) firstFrameMs = SystemClock.elapsedRealtime() - tuneStarted;
                 hidePlaybackBuffer();
                 if (tunedChannel != null) showChannelBanner(tunedChannel);
                 showUpcomingIfPlaying();
@@ -415,44 +448,22 @@ public class MainActivity extends Activity {
                 if (playing && renderedFrame && !guideVisible) {
                     hidePlaybackBuffer();
                     showUpcomingIfPlaying();
-                }
+                } else if (!playing) video.removeCallbacks(resetPlaybackRetries);
             }
 
             @Override public void onPlayerError(PlaybackException error) {
                 if (guideVisible) return;
-                clearPlaybackDeadline();
-                if (tunedChannel != null && error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW
-                        && liveRetries < 2) {
-                    ++liveRetries;
-                    video.removeCallbacks(resetPlaybackRetries);
-                    showBuffering("Catching up to live TV…", true);
-                    waitForPlayback();
-                    player.seekToDefaultPosition();
-                    player.prepare();
-                    return;
-                }
+                lastErrorCode = error.errorCode;
                 Throwable cause = error.getCause();
-                boolean unavailable = cause instanceof HttpDataSource.InvalidResponseCodeException
-                        && (((HttpDataSource.InvalidResponseCodeException) cause).responseCode == 404
-                        || ((HttpDataSource.InvalidResponseCodeException) cause).responseCode == 410);
-                String failedUrl = unavailable ? ((HttpDataSource.InvalidResponseCodeException) cause).dataSpec.uri.toString() : "";
-                if (tunedChannel != null && unavailable && !renderedFrame
-                        && (failedUrl.equals(tunedChannel.url) || failedUrl.equals(tunedChannel.continuousUrl))) {
-                    video.removeCallbacks(liveProgramBoundary);
-                    playbackFailed = true;
-                    showBuffering("This channel is offline. Press OK to retry or Back for the guide.", false);
-                } else if (tunedChannel != null && liveRetries < 2) {
-                    showBuffering("Reconnecting to the studio…", true);
-                    scheduleLive(1200L * ++liveRetries);
-                } else {
-                    boolean transientFailure = error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
-                            || error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT;
-                    if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
-                        int code = ((HttpDataSource.InvalidResponseCodeException) cause).responseCode;
-                        transientFailure = code == 408 || code == 429 || code >= 500;
-                    }
-                    if (!transientFailure || !retryMovieConnection()) failPlayback();
-                }
+                while (cause != null && !(cause instanceof HttpDataSource.InvalidResponseCodeException))
+                    cause = cause.getCause();
+                lastHttpCode = cause == null ? 0 : ((HttpDataSource.InvalidResponseCodeException)cause).responseCode;
+                String reason = lastHttpCode == 503 || lastHttpCode == 429 ? "Studio is busy"
+                        : lastHttpCode == 404 || lastHttpCode == 410 ? "Studio address or media expired"
+                        : error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW ? "Live window moved"
+                        : error.errorCode >= 4000 && error.errorCode < 5000 ? "Video decoder error"
+                        : "Studio connection interrupted";
+                recover(reason);
             }
         });
     }
@@ -487,60 +498,134 @@ public class MainActivity extends Activity {
         if(directoryLoading)return;
         directoryLoading=true;
         if (creators.isEmpty()) status.setText("Scanning the public ChannelForge directory…");
-        new Thread(() -> {
-            List<Creator> discovered=new ArrayList<>();
-            Exception last=null;
-            for(String address:new String[]{BuildConfig.DIRECTORY_URL,BuildConfig.DIRECTORY_FALLBACK_URL}){
-                try{
-                    JSONArray values=new JSONObject(get(address)).getJSONArray("creators");
-                    for(int i=0;i<values.length();i++){
-                        JSONObject o = values.optJSONObject(i);
-                        if (o == null) continue;
-                        String playlist = o.optString("playlist_url");
-                        if (!playlist.isEmpty() && !hasCreator(discovered, playlist)) {
-                            discovered.add(new Creator(o.optString("name", "Creator"), o.optString("description"),
-                                    playlist, o.optString("vault_url"), o.optString("status_url"),
-                                    o.optBoolean("cinema_supported")));
-                        }
-                    }
-                    if(!discovered.isEmpty())break;
-                }catch(Exception error){last=error;}
+        boolean restore = readInitialCache;
+        readInitialCache = false;
+        studioLoader.execute(() -> {
+            List<Creator> discovered = new ArrayList<>();
+            boolean authoritative = false;
+            Exception failure = null;
+            String saved = guideCache.read("directory");
+            List<Creator> cached = new ArrayList<>();
+            try {
+                if (!saved.isEmpty()) cached.addAll(parseCreators(new JSONObject(saved)));
+            } catch (JSONException invalid) {
+                android.util.Log.w("ChannelForgeGuide", "Invalid directory snapshot");
             }
+            if (restore && !cached.isEmpty()) {
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed() && creators.isEmpty()) {
+                        directoryStale = true;
+                        creators.addAll(cached);
+                        renderCreators();
+                    }
+                });
+            }
+            for (String address : new String[]{BuildConfig.DIRECTORY_URL, BuildConfig.DIRECTORY_FALLBACK_URL}) {
+                try {
+                    String body = get(address);
+                    JSONObject doc = new JSONObject(body);
+                    List<Creator> incoming = parseCreators(doc);
+                    boolean primary = address.equals(BuildConfig.DIRECTORY_URL);
+                    authoritative = primary && doc.optBoolean("registrations_complete");
+                    if (primary && (authoritative || !incoming.isEmpty())) {
+                        JSONObject snapshot = registrationSnapshot(doc, saved, authoritative);
+                        guideCache.write("directory", snapshot.toString());
+                        discovered.addAll(parseCreators(snapshot));
+                        break;
+                    }
+                    if (!incoming.isEmpty()) {
+                        discovered.addAll(incoming);
+                        for (Creator previous : cached) {
+                            boolean found = false;
+                            for (Creator row : discovered) if (row.id.equals(previous.id)) { found = true; break; }
+                            if (!found) discovered.add(previous);
+                        }
+                        break;
+                    }
+                } catch (Exception error) { failure = error; }
+            }
+            boolean stale = !authoritative && discovered.isEmpty() && !cached.isEmpty();
+            if (stale) discovered.addAll(cached);
             String paired = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PAIRED_CREATOR, "");
             if (!paired.isEmpty() && !hasCreator(discovered, paired + "/exports/channels.m3u")) {
-                try { discovered.add(readPairedCreator(paired)); } catch (Exception ignored) {}
+                try { discovered.add(readPairedCreator(paired)); }
+                catch (Exception error) { if (failure == null) failure = error; }
             }
-            Exception failure=last;
-            runOnUiThread(() -> applyDirectory(discovered, failure));
-        }).start();
+            final Exception resultError = failure;
+            runOnUiThread(() -> applyDirectory(discovered, resultError, stale));
+        });
     }
 
-    private void applyDirectory(List<Creator> discovered, Exception failure) {
-        directoryLoading = false;
-        if (isFinishing() || isDestroyed()) return;
-        guide.removeCallbacks(directoryRetry);
-        if (discovered.isEmpty()) {
-            if (!creators.isEmpty()) {
-                long now = SystemClock.elapsedRealtime();
-                if (directoryMissStarted == 0) directoryMissStarted = now;
-                if (now - directoryMissStarted < DIRECTORY_GRACE_MS) {
-                    status.setText("Checking worldwide studios… Showing the last scan.");
-                    if (guideVisible) guide.postDelayed(directoryRetry, DIRECTORY_RETRY_MS);
-                    return;
+    private JSONObject registrationSnapshot(JSONObject current, String saved, boolean authoritative) throws JSONException {
+        long now = System.currentTimeMillis();
+        JSONArray rows = current.getJSONArray("creators");
+        Set<String> incoming = new HashSet<>();
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject row = rows.optJSONObject(i);
+            if (row == null) continue;
+            incoming.add(row.optString("id",row.optString("playlist_url")));
+            row.put("observed_on_device", now);
+        }
+        if (!authoritative && !saved.isEmpty()) {
+            JSONArray previous;
+            try { previous = new JSONObject(saved).getJSONArray("creators"); }
+            catch (JSONException invalid) { previous = new JSONArray(); }
+            for (int i = 0; i < previous.length(); i++) {
+                JSONObject row = previous.optJSONObject(i);
+                if (row == null || now - row.optLong("observed_on_device") > 7L * 86400 * 1000) continue;
+                if (incoming.add(row.optString("id",row.optString("playlist_url")))) {
+                    row.put("state", "reconnecting");
+                    rows.put(row);
                 }
             }
+        }
+        return current;
+    }
+
+    private List<Creator> parseCreators(JSONObject doc) throws JSONException {
+        List<Creator> result = new ArrayList<>();
+        JSONArray rows = doc.getJSONArray("creators");
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject row = rows.optJSONObject(i);
+            if (row == null) continue;
+            String playlist = row.optString("playlist_url");
+            if (playlist.isEmpty() || hasCreator(result, playlist)) continue;
+            Creator creator = new Creator(row.optString("name", "Creator"), row.optString("description"),
+                    playlist, row.optString("vault_url"), row.optString("status_url"), row.optBoolean("cinema_supported"));
+            creator.id = row.optString("id", playlist);
+            creator.state = row.optString("state", row.optBoolean("online", true) ? "broadcasting" : "offline");
+            creator.lastHeartbeat = row.optLong("last_heartbeat");
+            result.add(creator);
+        }
+        return result;
+    }
+
+    private void applyDirectory(List<Creator> discovered, Exception failure, boolean stale) {
+        directoryLoading = false;
+        directoryChecked = System.currentTimeMillis();
+        if (isFinishing() || isDestroyed()) return;
+        guide.removeCallbacks(directoryRetry);
+        directoryStale = stale;
+        if (stale && guideVisible) guide.postDelayed(directoryRetry, DIRECTORY_RETRY_MS);
+        if (discovered.isEmpty()) {
             creators.clear();
             channelsByStudio.clear();
+            staleGuides.clear();
             renderDirectoryRecovery(failure);
             return;
         }
-        directoryMissStarted = 0;
         boolean changed = !sameCreators(discovered);
+        for (Creator next : discovered) for (Creator old : creators) {
+            if (!old.id.equals(next.id) || old.playlist.equals(next.playlist)) continue;
+            if (old.playlist.equals(selectedPlaylist)) selectedPlaylist = next.playlist;
+            if (old.playlist.equals(guideStudio)) guideStudio = next.playlist;
+        }
         creators.clear();
         creators.addAll(discovered);
         Set<String> activeOrigins = new HashSet<>();
         for (Creator creator : creators) activeOrigins.add(creator.playlist);
         channelsByStudio.keySet().retainAll(activeOrigins);
+        staleGuides.retainAll(activeOrigins);
         if (!activeOrigins.contains(guideStudio)) guideStudio = "";
         if (changed || liveRail == null) {
             renderCreators();
@@ -558,7 +643,7 @@ public class MainActivity extends Activity {
         if (creators.size() != discovered.size()) return false;
         for (int i = 0; i < creators.size(); i++) {
             Creator old = creators.get(i), current = discovered.get(i);
-            if (!old.playlist.equals(current.playlist) || !old.name.equals(current.name)
+            if (!old.state.equals(current.state) || !old.id.equals(current.id) || !old.playlist.equals(current.playlist) || !old.name.equals(current.name)
                     || !old.description.equals(current.description) || !old.vault.equals(current.vault)
                     || !old.channelStatus.equals(current.channelStatus)
                     || old.cinemaSupported != current.cinemaSupported) return false;
@@ -611,11 +696,11 @@ public class MainActivity extends Activity {
 
     private void renderCreators() {
         creatorRail.removeAllViews();
-        status.setText("●  " + creators.size() + " PUBLIC CREATOR STUDIOS ONLINE");
+        status.setText("●  " + creators.size() + " REGISTERED STUDIOS");
         creatorRail.addView(sectionTitle("CREATOR STUDIOS", "#5DEEFF"));
         Creator selected = creators.get(0);
         for (Creator creator : creators) {
-            TextView button = focusButton(creator.name + "\n" + creator.description);
+            TextView button = focusButton(creator.name + "\n" + (creator.state.equals("broadcasting") ? creator.description : creator.state));
             button.setTag(creator);
             button.setOnClickListener(view -> {
                 if (activePage == Page.LIVE) {
@@ -664,34 +749,79 @@ public class MainActivity extends Activity {
 
     private void loadStudioGuide(Creator creator) {
         if (!loadingGuides.add(creator.playlist)) return;
+        String key = "epg:" + creator.id;
+        boolean restore = !channelsByStudio.containsKey(creator.playlist);
         studioLoader.execute(() -> {
             List<Channel> loaded = null;
+            String address = Uri.parse(creator.channelStatus).buildUpon().appendQueryParameter("guide", "extended").build().toString();
+            if (restore) {
+                String cached = guideCache.read(key);
+                if (!cached.isEmpty()) try {
+                    List<Channel> rows = parseOnlineChannels(cached, address);
+                    runOnUiThread(() -> applyGuide(creator, rows, true));
+                } catch (JSONException invalid) { android.util.Log.w("ChannelForgeGuide", "Invalid EPG snapshot"); }
+            }
+            boolean degraded = false;
             try {
                 if (!creator.channelStatus.isEmpty()) {
-                    String guideUrl = Uri.parse(creator.channelStatus).buildUpon().appendQueryParameter("guide", "extended").build().toString();
-                    loaded = parseOnlineChannels(get(guideUrl), guideUrl);
+                    String payload = get(address);
+                    loaded = parseOnlineChannels(payload, address);
+                    guideCache.write(key, payload);
                 }
             } catch (Exception unavailable) {
-                // The playlist is independent of the guide and still allows tuning.
+                android.util.Log.w("ChannelForgeGuide", "Studio EPG request failed: " + unavailable.getClass().getSimpleName());
             }
             if (loaded == null) {
+                degraded = true;
                 try {
                     String playlist = get(creator.playlist);
                     if (playlist.startsWith("#EXTM3U")) loaded = parseM3u(playlist);
-                } catch (Exception ignored) {}
+                } catch (Exception unavailable) {
+                    android.util.Log.w("ChannelForgeGuide", "Playlist fallback unavailable");
+                }
             }
-            List<Channel> availableChannels = loaded;
+            final List<Channel> result = loaded;
+            final boolean stale = degraded;
             runOnUiThread(() -> {
                 loadingGuides.remove(creator.playlist);
-                if (isFinishing() || isDestroyed() || !hasCreator(creators, creator.playlist)) return;
-                if (availableChannels == null) channelsByStudio.remove(creator.playlist);
-                else {
-                    for (Channel channel : availableChannels) channel.studio = creator.name;
-                    channelsByStudio.put(creator.playlist, availableChannels);
-                }
-                showLoadedChannels();
+                applyGuide(creator, result, stale);
             });
         });
+    }
+
+    private void applyGuide(Creator creator, List<Channel> rows, boolean stale) {
+        if (isFinishing() || isDestroyed() || !hasCreator(creators, creator.playlist)) return;
+        if (stale) staleGuides.add(creator.playlist);
+        else staleGuides.remove(creator.playlist);
+        List<Channel> prior = channelsByStudio.get(creator.playlist);
+        if (rows != null && (!stale || prior == null || prior.isEmpty())) {
+            for (Channel channel : rows) {
+                channel.studio = creator.name;
+                channel.studioId = creator.id;
+            }
+            channelsByStudio.put(creator.playlist, rows);
+        } else if (rows != null) {
+            // A working playlist can restore tuning while the schedule endpoint is unavailable.
+            // Only the schedule endpoint can authoritatively remove a channel and its EPG.
+            for (Channel row : rows) {
+                Channel existing = null;
+                for (Channel previous : prior) {
+                    if ((!row.id.isEmpty() && row.id.equals(previous.id)) || row.url.equals(previous.url)) {
+                        existing = previous;
+                        break;
+                    }
+                }
+                if (existing == null) {
+                    row.studio = creator.name;
+                    row.studioId = creator.id;
+                    prior.add(row);
+                } else if (row.programs == null && !existing.url.equals(row.url)) {
+                    existing.url = row.url;
+                    existing.continuousUrl = "";
+                }
+            }
+        }
+        showLoadedChannels();
     }
 
     private void showLoadedChannels() {
@@ -847,20 +977,23 @@ public class MainActivity extends Activity {
     }
 
     private String favoriteKey(Channel channel) {
-        return channel.studio + Uri.parse(channel.url).getPath();
+        return channel.id.isEmpty() ? channel.studio + Uri.parse(channel.url).getPath()
+                : channel.studioId + "/" + channel.id;
     }
 
     private boolean isFavorite(Channel channel) {
-        return getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getStringSet("favorite_channels", Collections.emptySet()).contains(favoriteKey(channel));
+        Set<String> saved = getSharedPreferences(PREFS, MODE_PRIVATE).getStringSet("favorite_channels", Collections.emptySet());
+        return saved.contains(favoriteKey(channel)) || saved.contains(channel.studio + Uri.parse(channel.url).getPath());
     }
 
     private void toggleFavorite(Channel channel, TextView button) {
         SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         Set<String> saved = new HashSet<>(preferences.getStringSet("favorite_channels", Collections.emptySet()));
         String key = favoriteKey(channel);
-        boolean added = saved.add(key);
-        if (!added) saved.remove(key);
+        boolean removed = saved.remove(key);
+        removed |= saved.remove(channel.studio + Uri.parse(channel.url).getPath());
+        boolean added = !removed;
+        if (added) saved.add(key);
         preferences.edit().putStringSet("favorite_channels", saved).apply();
         button.setText(added ? "★" : "☆");
         button.setContentDescription((added ? "Remove from favorites: " : "Add to favorites: ") + channel.name);
@@ -931,9 +1064,11 @@ public class MainActivity extends Activity {
         JSONArray entries = new JSONObject(payload).getJSONArray("channels");
         for (int i = 0; i < entries.length(); i++) {
             JSONObject entry = entries.getJSONObject(i);
-            if (entry.optBoolean("online")) {
+            if (entry.has("stream_url")) {
                 Channel channel = new Channel(entry.getString("name"), entry.getString("stream_url"));
-                channel.continuousUrl = entry.optString("continuous_url");
+                channel.id = entry.optString("id");
+                channel.state = entry.optString("state", entry.optBoolean("online", true) ? "broadcasting" : "offline");
+                channel.continuousUrl = entry.optString("firetv_url", entry.optString("continuous_url"));
                 channel.airUntil = entry.optLong("air_until_epoch_ms", 0);
                 channel.number = entry.optString("number");
                 channel.logo = entry.optString("logo_url");
@@ -956,12 +1091,34 @@ public class MainActivity extends Activity {
             String thumbnail = item.optString("thumbnail_url");
             VaultItem movie = new VaultItem(item.optString("title", "Untitled"), item.optString("year"),
                     item.optString("summary"), thumbnail.isEmpty() ? cover : thumbnail, cover, item.getString("stream_url"));
+            movie.id = item.optString("id");
             if (seen.add(movie.releaseKey())) result.add(movie);
         }
         return result;
     }
 
-    private List<Channel> parseM3u(String m3u){List<Channel> result=new ArrayList<>();String pending="";for(String raw:m3u.split("\\r?\\n")){String line=raw.trim();if(line.startsWith("#EXTINF:")){int comma=line.lastIndexOf(',');pending=comma>=0?line.substring(comma+1).trim():"Channel";}else if(!line.isEmpty()&&!line.startsWith("#")&&!pending.isEmpty()){result.add(new Channel(pending,line));pending="";}}return result;}
+    private static final java.util.regex.Pattern M3U_ID = java.util.regex.Pattern.compile("tvg-id=\"public-channelforge\\.([^\"]+)\"");
+    private static final java.util.regex.Pattern M3U_NUMBER = java.util.regex.Pattern.compile("tvg-chno=\"([^\"]+)\"");
+
+    private List<Channel> parseM3u(String m3u) {
+        List<Channel> result = new ArrayList<>();
+        String info = "";
+        for (String raw : m3u.split("\\r?\\n")) {
+            String line = raw.trim();
+            if (line.startsWith("#EXTINF:")) {
+                info = line;
+            } else if (!line.isEmpty() && !line.startsWith("#") && !info.isEmpty()) {
+                int comma = info.indexOf(',');
+                Channel channel = new Channel(comma >= 0 ? info.substring(comma + 1).trim() : "Channel", line);
+                java.util.regex.Matcher id = M3U_ID.matcher(info), number = M3U_NUMBER.matcher(info);
+                if (id.find()) channel.id = id.group(1);
+                if (number.find()) channel.number = number.group(1);
+                result.add(channel);
+                info = "";
+            }
+        }
+        return result;
+    }
 
     private static final long HALF_HOUR = 30 * 60 * 1000L;
 
@@ -979,7 +1136,7 @@ public class MainActivity extends Activity {
         LinearLayout tools = new LinearLayout(this);
         tools.setGravity(Gravity.CENTER_VERTICAL);
         guideControl(tools, "↻ SCAN FOR CHANNELS", "scan", () -> loadDirectory(), previousFocus);
-        tools.addView(text(channels.size() + " online channels", 11, true));
+        tools.addView(text(channels.size() + " channels", 11, true));
         guideControl(tools, "‹ EARLIER", "earlier", () -> moveGuide(-1), previousFocus);
         guideControl(tools, "NOW", "now", () -> { guideOffset = 0; showLoadedChannels(); }, previousFocus);
         guideControl(tools, "LATER ›", "later", () -> moveGuide(1), previousFocus);
@@ -1203,7 +1360,11 @@ public class MainActivity extends Activity {
         tune.setTag(channel.url);
         tune.setContentDescription("CH " + displayNumber(channel, index) + " " + channel.name + ". Press OK to watch.");
         tune.setBackground(surface(new int[]{color("#101831"), color("#0B0B23")}, color("#2B597F"), 1, 4));
-        TextView station = text("CH " + displayNumber(channel, index) + "  " + channel.name + "\n" + channel.studio, 11, true);
+        String availability = channel.state;
+        Creator owner = studioFor(channel);
+        if (owner != null && !owner.state.equals("broadcasting") && !owner.state.equals("standby")) availability = owner.state;
+        TextView station = text("CH " + displayNumber(channel, index) + "  " + channel.name + "\n" + channel.studio
+                + ("broadcasting".equals(availability) ? "" : " · " + availability), 11, true);
         station.setPadding(dp(7), dp(4), dp(4), dp(4));
         station.setMaxLines(3);
         station.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -1283,7 +1444,7 @@ public class MainActivity extends Activity {
 
     private void updateStudioStatus(String creator) {
         status.setText("●  " + creator.toUpperCase(Locale.US) + "  •  " + channels.size()
-                + " LIVE CHANNELS  •  " + (movieShelfLoaded
+                + " CHANNELS" + (directoryStale || !staleGuides.isEmpty() ? "  •  LAST KNOWN GUIDE" : "") + "  •  " + (movieShelfLoaded
                 ? vaultItems.size() + (nextMovieOffset >= 0 ? "+" : "") + " MOVIES"
                 : moviePageLoading ? "CHECKING MOVIES" : "REWIND CINEMA"));
     }
@@ -1554,6 +1715,7 @@ public class MainActivity extends Activity {
         AlertDialog.Builder dialog = new AlertDialog.Builder(this)
                 .setTitle("What's new in v" + (available ? pendingUpdate.version : BuildConfig.VERSION_NAME))
                 .setMessage(latestUpdateNotes.isEmpty() ? "Playback and reliability improvements." : latestUpdateNotes);
+        dialog.setNeutralButton("Diagnostics", (box, which) -> showDiagnostics());
         if (available) dialog.setNegativeButton("Later", null)
                 .setPositiveButton("Install update", (box, which) -> installSelectedUpdate());
         else dialog.setPositiveButton("Done", null);
@@ -1590,6 +1752,20 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == EXPORT_REPORT) {
+            String report = pendingReport;
+            pendingReport = null;
+            if (resultCode == RESULT_OK && data != null && data.getData() != null && report != null) {
+                try (OutputStream out = getContentResolver().openOutputStream(data.getData(), "wt")) {
+                    if (out == null) throw new IOException("No output stream");
+                    out.write(report.getBytes(StandardCharsets.UTF_8));
+                    Toast.makeText(this, "Playback report saved.", Toast.LENGTH_SHORT).show();
+                } catch (IOException | SecurityException e) {
+                    Toast.makeText(this, "Could not write the playback report.", Toast.LENGTH_LONG).show();
+                }
+            }
+            return;
+        }
         if (requestCode != INSTALL_SETTINGS_REQUEST || pendingUpdate == null || updateBusy) return;
         if (canInstallUpdates()) downloadUpdate();
         else showBanner("Allow ChannelForge TV to install unknown apps, then select Updates again.");
@@ -1787,12 +1963,16 @@ public class MainActivity extends Activity {
         bufferPanel.setVisibility(View.GONE);
         if (player.isPlaying()) {
             video.removeCallbacks(resetPlaybackRetries);
-            video.postDelayed(resetPlaybackRetries, tunedChannel != null ? 4000 : 30000);
+            video.postDelayed(resetPlaybackRetries, 30000);
         }
     }
 
     private void startStream(String url, boolean live) {
         renderedFrame = false;
+        lastFrameChange = SystemClock.elapsedRealtime();
+        lastFrameCount = -1;
+        video.removeCallbacks(watchdog);
+        video.postDelayed(watchdog, 2000);
         video.removeCallbacks(resetPlaybackRetries);
         String host = Uri.parse(url).getHost();
         boolean constrained = host != null && host.endsWith(".app.lhr.life");
@@ -1803,36 +1983,119 @@ public class MainActivity extends Activity {
             media.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(12000).build());
             player.setMediaItem(media.build());
         } else {
-            player.setMediaItem(media.build(), 0);
+            player.setMediaItem(media.build(), resumePosition);
         }
         player.setPlayWhenReady(live);
         player.prepare();
     }
 
-    private void failPlayback() {
-        playbackFailed = true;
-        if (activeMovie != null && !ejectingTape) clearCassette();
-        showBuffering("The studio could not deliver video. Press OK to retry or Back for the guide.", false);
+    private void beginTune() {
+        ++playGeneration;
+        totalRetries = liveRetries = movieRetries = lastErrorCode = lastHttpCode = 0;
+        resumePosition = 0;
+        lastReason = "none";
+        tuneStarted = SystemClock.elapsedRealtime();
+        firstFrameMs = -1;
     }
 
-    private boolean retryMovieConnection() {
-        if (activeMovie == null || guideVisible || ejectingTape || movieRetries >= 2) return false;
-        movieRetries++;
-        showBuffering("Reconnecting to the movie…", true);
-        waitForPlayback();
-        // Preparing the same media item retains its playback position.
-        VaultItem movie = activeMovie;
-        video.post(() -> {
-            if (activeMovie != movie || guideVisible || ejectingTape) return;
-            player.prepare();
-            if (cassetteMotion == null) player.play();
-        });
-        return true;
+    private void recover(String reason) {
+        if (guideVisible || ejectingTape || playbackFailed) return;
+        clearPlaybackDeadline();
+        video.removeCallbacks(continueLive);
+        video.removeCallbacks(resetPlaybackRetries);
+        video.removeCallbacks(watchdog);
+        video.removeCallbacks(liveProgramBoundary);
+        video.removeCallbacks(upcomingProgram);
+        lastReason = reason;
+        if (recentEvents.size() == 16) recentEvents.removeFirst();
+        recentEvents.addLast(System.currentTimeMillis() + " " + reason + " (HTTP " + lastHttpCode + ")");
+        if (activeMovie != null) resumePosition = Math.max(0, player.getCurrentPosition());
+        int attempt = tunedChannel != null ? ++liveRetries : ++movieRetries;
+        int generation = ++playGeneration;
+        player.stop();
+        if (attempt > 3) {
+            playbackFailed = true;
+            if (activeMovie != null) clearCassette();
+            showBuffering(reason + ". Press OK to retry or Back for the guide.", false);
+            return;
+        }
+        totalRetries++;
+        showBuffering(reason + ". Reconnecting (" + attempt + "/3)…", true);
+        final Channel channel = tunedChannel;
+        final VaultItem film = activeMovie;
+        final Creator source = channel == null ? currentStudio : studioFor(channel);
+        video.postDelayed(() -> {
+            if (generation != playGeneration || guideVisible || isDestroyed()) return;
+            studioLoader.execute(() -> {
+                String updatedUrl = "";
+                Channel fresh = null;
+                try {
+                    Creator origin = source;
+                    if (source != null && (attempt >= 2 || lastHttpCode == 404 || lastHttpCode == 410)) {
+                        try {
+                            for (Creator entry : parseCreators(new JSONObject(get(BuildConfig.DIRECTORY_URL)))) {
+                                if (source.id.equals(entry.id)) { origin = entry; break; }
+                            }
+                        } catch (Exception unavailable) {
+                            android.util.Log.w("ChannelForgePlayback", "Directory unavailable during route refresh");
+                        }
+                    }
+                    if (channel != null && origin != null && !origin.channelStatus.isEmpty()) {
+                        String address = Uri.parse(origin.channelStatus).buildUpon().appendQueryParameter("guide", "extended").build().toString();
+                        for (Channel row : parseOnlineChannels(get(address), address)) {
+                            if ((!channel.id.isEmpty() && channel.id.equals(row.id)) || channel.url.equals(row.url)) {
+                                fresh = row;
+                                break;
+                            }
+                        }
+                    } else if (film != null && origin != null && !origin.vault.isEmpty()) {
+                        String address = Uri.parse(origin.vault).buildUpon().appendQueryParameter("q", film.title)
+                                .appendQueryParameter("limit", "50").build().toString();
+                        for (VaultItem row : parseVault(new JSONObject(get(address)))) {
+                            if ((!film.id.isEmpty() && film.id.equals(row.id)) || row.releaseKey().equals(film.releaseKey())) {
+                                updatedUrl = row.url; break;
+                            }
+                        }
+                    }
+                } catch (Exception unavailable) {
+                    android.util.Log.w("ChannelForgePlayback", "Route refresh failed: " + unavailable.getClass().getSimpleName());
+                }
+                final Channel replacement = fresh;
+                final String movieUrl = updatedUrl;
+                runOnUiThread(() -> {
+                    if (generation != playGeneration || guideVisible || isDestroyed()) return;
+                    if (channel != null) {
+                        if (replacement != null) {
+                            channel.url = replacement.url;
+                            channel.continuousUrl = replacement.continuousUrl;
+                            channel.programs = replacement.programs;
+                            channel.guideUrl = replacement.guideUrl;
+                            channel.state = replacement.state;
+                            channel.airUntil = replacement.airUntil;
+                        }
+                        continueLive.run();
+                    } else if (film != null) {
+                        if (!movieUrl.isEmpty()) film.url = movieUrl;
+                        waitForPlayback();
+                        startStream(film.url, false);
+                        if (cassetteMotion == null) player.play();
+                    }
+                });
+            });
+        }, 750L << (attempt - 1));
+    }
+
+    private Creator studioFor(Channel channel) {
+        for (Creator entry : creators) {
+            if (channel.studioId.equals(entry.id)) return entry;
+        }
+        return null;
     }
 
     private void play(int index) {
         if (channels.isEmpty()) return;
         channelIndex = (index + channels.size()) % channels.size();
+        beginTune();
         tunedChannel = channels.get(channelIndex);
         tunedProgramEnd = 0;
         upcomingDue = upcomingShown = false;
@@ -1854,6 +2117,7 @@ public class MainActivity extends Activity {
     }
 
     private void playMovie(VaultItem movie) {
+        beginTune();
         tunedChannel = null;
         video.removeCallbacks(upcomingProgram);
         video.removeCallbacks(liveProgramBoundary);
@@ -1932,6 +2196,19 @@ public class MainActivity extends Activity {
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         int key = event.getKeyCode();
+        boolean select = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER;
+        if (!guideVisible && select && (playbackFailed || consumingRetryKey)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0 && playbackFailed) {
+                consumingRetryKey = true;
+                if (tunedChannel != null) play(channelIndex);
+                else if (activeMovie != null) {
+                    movieRetries = 0;
+                    playbackFailed = false;
+                    recover("Retrying movie");
+                }
+            } else if (event.getAction() == KeyEvent.ACTION_UP) consumingRetryKey = false;
+            return true;
+        }
         if (!guideVisible && activeMovie != null
                 && (key == KeyEvent.KEYCODE_BACK || key == KeyEvent.KEYCODE_BUTTON_B)) {
             if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) ejectMovie();
@@ -1940,17 +2217,70 @@ public class MainActivity extends Activity {
         return super.dispatchKeyEvent(event);
     }
 
+    private JSONObject diagnosticSnapshot() {
+        JSONObject result = new JSONObject();
+        try {
+            result.put("app", BuildConfig.VERSION_NAME).put("engine", "Media3 ExoPlayer")
+                    .put("sdk", Build.VERSION.SDK_INT).put("model", Build.MODEL)
+                    .put("directoryLastChecked", directoryChecked).put("directoryCached", directoryStale)
+                    .put("studioCount", creators.size()).put("staleGuides", staleGuides.size())
+                    .put("firstFrameMs", firstFrameMs).put("bufferMs", player.getTotalBufferedDuration())
+                    .put("bandwidthEstimateBps", bandwidth.getBitrateEstimate()).put("retries", totalRetries)
+                    .put("error", lastReason).put("playerErrorCode", lastErrorCode).put("httpError", lastHttpCode)
+                    .put("decoder", decoderName).put("processCpuPercentOfOneCore", cpuPercent)
+                    .put("pssKiB", android.os.Debug.getPss()).put("events", new JSONArray(recentEvents));
+            Creator source = tunedChannel == null ? currentStudio : studioFor(tunedChannel);
+            if (source != null) result.put("studioState", source.state).put("studioLastHeartbeat", source.lastHeartbeat);
+            if (tunedChannel != null) {
+                String[] upcoming = currentAndNext(tunedChannel);
+                result.put("channelState", tunedChannel.state).put("guideHasCurrentProgram", !upcoming[0].isEmpty())
+                        .put("guideHasNextProgram", !upcoming[1].isEmpty()).put("currentProgramEndsMs", tunedProgramEnd);
+            }
+            androidx.media3.common.Format v = player.getVideoFormat(), a = player.getAudioFormat();
+            if (v != null) result.put("videoMime", v.sampleMimeType).put("width", v.width)
+                    .put("height", v.height).put("videoBitrateBps", v.bitrate);
+            if (a != null) result.put("audioMime", a.sampleMimeType).put("audioChannels", a.channelCount);
+            androidx.media3.exoplayer.DecoderCounters counters = player.getVideoDecoderCounters();
+            if (counters != null) {
+                counters.ensureUpdated();
+                result.put("renderedFrames", counters.renderedOutputBufferCount).put("droppedFrames", counters.droppedBufferCount);
+            }
+        } catch (JSONException invalid) { throw new IllegalStateException(invalid); }
+        return result;
+    }
+
+    private void showDiagnostics() {
+        JSONObject snapshot = diagnosticSnapshot();
+        String report;
+        try { report = snapshot.toString(2); } catch (JSONException e) { return; }
+        new AlertDialog.Builder(this).setTitle("Playback diagnostics").setMessage(
+                (tunedChannel == null ? "" : tunedChannel.name + "\n" + currentAndNext(tunedChannel)[0] + "\n\n") + report)
+                .setPositiveButton("Close", null)
+                .setNeutralButton("Export report", (dialog, button) -> {
+                    pendingReport = report;
+                    Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/json")
+                            .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "ChannelForge-playback.json");
+                    try { startActivityForResult(save, EXPORT_REPORT); }
+                    catch (ActivityNotFoundException unavailable) {
+                        pendingReport = null;
+                        File folder = getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS);
+                        if (folder == null) { Toast.makeText(this, "Downloads unavailable.", Toast.LENGTH_LONG).show(); return; }
+                        File file = new File(folder, "ChannelForge-playback.json");
+                        try (FileOutputStream out = new FileOutputStream(file)) {
+                            out.write(report.getBytes(StandardCharsets.UTF_8));
+                            Toast.makeText(this, "Report saved in " + file, Toast.LENGTH_LONG).show();
+                        } catch (IOException e) { Toast.makeText(this, "Report export failed.", Toast.LENGTH_LONG).show(); }
+                    }
+                }).show();
+    }
+
     @Override public boolean onKeyDown(int key, KeyEvent event) {
+        if (key == KeyEvent.KEYCODE_MENU) {
+            if (event.getRepeatCount() == 0) showDiagnostics();
+            return true;
+        }
         if (!guideVisible) {
             boolean select = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER;
-            if (select && playbackFailed) {
-                if (tunedChannel != null) play(channelIndex);
-                else if (activeMovie != null) {
-                    movieRetries = 0;
-                    retryMovieConnection();
-                }
-                return true;
-            }
             if (key == KeyEvent.KEYCODE_BACK || key == KeyEvent.KEYCODE_BUTTON_B || (select && tunedChannel != null)) {
                 if (activeMovie != null) ejectMovie();
                 else {
@@ -2073,6 +2403,7 @@ public class MainActivity extends Activity {
     private void ejectMovie() {
         if (ejectingTape || activeMovie == null) return;
         ejectingTape = true;
+        ++playGeneration;
         clearPlaybackDeadline();
         video.hideController();
         player.pause();
@@ -2087,7 +2418,11 @@ public class MainActivity extends Activity {
     private void returnToGuide() {
         boolean refreshAfterStall = !guideVisible && resumed
                 && (playbackFailed || playbackWaiting || liveRetries > 0 || movieRetries > 0);
+        ++playGeneration;
+        video.removeCallbacks(watchdog);
+        video.removeCallbacks(resetPlaybackRetries);
         ejectingTape = false;
+        consumingRetryKey = false;
         clearCassette();
         tunedChannel = null;
         activeMovie = null;
@@ -2128,24 +2463,29 @@ public class MainActivity extends Activity {
     private static class Creator {
         final String name, description, playlist, vault, channelStatus;
         final boolean cinemaSupported;
+        String id, state = "broadcasting";
+        long lastHeartbeat;
         Creator(String name, String description, String playlist, String vault, String channelStatus, boolean cinemaSupported) {
             this.name = name;
             this.description = description;
             this.playlist = playlist;
+            this.id = playlist;
             this.vault = vault;
             this.channelStatus = channelStatus;
             this.cinemaSupported = cinemaSupported;
         }
     }
     private static class Channel {
-        final String name, url;
+        final String name;
+        String url, id = "", studioId = "", state = "broadcasting";
         String number = "", logo = "", guideUrl = "", studio = "", continuousUrl = "";
         long airUntil;
         JSONArray programs;
         Channel(String name, String url) { this.name = name; this.url = url; }
     }
     private static class VaultItem {
-        final String title, year, summary, poster, fullPoster, url;
+        final String title, year, summary, poster, fullPoster;
+        String url, id = "";
         VaultItem(String title, String year, String summary, String poster, String fullPoster, String url) {
             this.title = title;
             this.year = year;

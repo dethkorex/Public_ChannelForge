@@ -721,6 +721,59 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(app.all_libraries(include_shared=False), [{**personal, "source": "plex"}])
         discover.assert_not_called()
 
+    def test_directory_heartbeat_retries_and_resumes_without_republishing(self):
+        settings = {"creator_profile": {"name":"Test", "heartbeat_supported":True},
+                    "pending_creator_profile":{}, "creator_id":"studio", "creator_key":"secret",
+                    "public_tunnel":False, "public_url":"https://studio.example"}
+        with (
+            mock.patch.object(app, "REGISTERED_ORIGIN", settings["public_url"]),
+            mock.patch.object(app, "HEARTBEAT_STATUS", {"last_success":0, "last_attempt":0, "failures":0}),
+            mock.patch.object(app, "config", return_value=settings),
+            mock.patch.object(app, "start_public_media_server"),
+            mock.patch.object(app, "publish_creator") as publish,
+            mock.patch.object(app, "broadcast_health", return_value="standby"),
+            mock.patch.object(app, "directory_request", side_effect=[ValueError("temporary outage"), {}, {}]) as request,
+            mock.patch.object(app.time, "monotonic", side_effect=[100,105,125,145,165,185]),
+            mock.patch.object(app.PUBLISH_CHANGED, "wait", side_effect=[None]*5+[InterruptedError]),
+        ):
+            with self.assertRaises(InterruptedError):
+                app.restore_public_sharing()
+            self.assertEqual(request.call_args_list, [mock.call("POST","/v1/creators/studio/heartbeat",{"state":"standby"},"secret")]*3)
+            self.assertGreater(app.HEARTBEAT_STATUS["last_success"], 0)
+            self.assertEqual(app.HEARTBEAT_STATUS["failures"], 0)
+            publish.assert_not_called()
+
+    def test_publication_retry_reuses_identity_and_restores_only_sharing_fields(self):
+        origin = "https://studio.example"
+        def outage(*args):
+            with app.LOCK:
+                current = app.load_json(app.CONFIG_FILE, {})
+                current["guide_hours"] = 42
+                app.atomic_json(app.CONFIG_FILE, current)
+            raise ValueError("temporary")
+        profile = {"name":"Studio", "public_url":origin}
+        with (
+            mock.patch.object(app, "start_public_media_server"),
+            mock.patch.object(app, "stop_public_media_server"),
+            mock.patch.object(app, "generate_exports"),
+            mock.patch.object(app, "directory_request", side_effect=outage) as request,
+        ):
+            for _ in range(2):
+                with self.assertRaisesRegex(ValueError, "temporary"):
+                    app.publish_studio(profile)
+            self.assertEqual(app.config()["guide_hours"], 42)
+            self.assertEqual(app.config()["public_url"], "")
+            self.assertEqual(request.call_args_list[0], request.call_args_list[1])
+            self.assertEqual(len(request.call_args.args[3]), 64)
+            self.assertNotIn(request.call_args.args[3], str(app.config(True)))
+
+    def test_old_channel_without_id_receives_one_persistent_id(self):
+        app.atomic_json(app.CHANNELS_FILE, [{"name":"Archive", "items":[]}])
+        first = app.channels()[0]["id"]
+        self.assertTrue(first)
+        self.assertEqual(app.load_json(app.CHANNELS_FILE, [])[0]["id"], first)
+        self.assertEqual(app.channels()[0]["id"], first)
+
     def test_worldwide_sharing_reconnects_a_broken_tunnel_even_while_ssh_is_alive(self):
         old = "https://previous.example.com"
         new = "https://reconnected.example.com"
