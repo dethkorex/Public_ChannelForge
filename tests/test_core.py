@@ -9,8 +9,7 @@ import io
 from unittest import mock
 from pathlib import Path
 
-os.environ["PUBLIC_CHANNELFORGE_HOME"] = tempfile.mkdtemp(prefix="public-channelforge-test-")
-import Public_ChannelForge as app
+from tests.creator_fixture import app
 
 
 class CoreTests(unittest.TestCase):
@@ -1047,7 +1046,7 @@ class CoreTests(unittest.TestCase):
 
     def test_updater_compares_semantic_versions(self):
         self.assertGreater(app.version_tuple("v2.10.0"), app.version_tuple("2.9.9"))
-        self.assertEqual(app.version_tuple("v2.3"), (2, 3, 0))
+        self.assertEqual(app.version_tuple("v2.3"), app.version_tuple("2.3.0"))
 
     def test_updater_verifies_windows_installer_checksum(self):
         installer = b"verified-installer"

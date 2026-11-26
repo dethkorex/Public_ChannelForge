@@ -12,7 +12,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-import Public_ChannelForge as app
+from tests.creator_fixture import app
 
 
 class BroadcastTests(unittest.TestCase):

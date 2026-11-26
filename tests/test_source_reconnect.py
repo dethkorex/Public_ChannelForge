@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-import Public_ChannelForge as app
+from tests.creator_fixture import app
 
 
 class SourceReconnectTests(unittest.TestCase):
