@@ -39,11 +39,12 @@ from xml.etree import ElementTree as ET
 
 from linux_runtime import apply_linux_update, can_apply_linux_update, restart_linux_app, linux_install_command, linux_release_asset, start_webview
 from collections import deque
-from release_metadata import read_latest_release
+from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "3.6.2"
+VERSION = "4.0.0-alpha.1"
+DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_PUBLIC_MEDIA_PORT = 8790
@@ -185,15 +186,6 @@ def load_json(path: Path, fallback: object) -> object:
         return json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return fallback
-
-
-def version_tuple(value: str) -> tuple[int, int, int]:
-    parts = value.strip().lower().lstrip("v").split(".")
-    numbers = []
-    for part in parts[:3]:
-        digits = "".join(char for char in part if char.isdigit())
-        numbers.append(int(digits or 0))
-    return tuple((numbers + [0, 0, 0])[:3])
 
 
 def github_bytes(url: str, limit: int = 100_000_000) -> bytes:
@@ -508,7 +500,7 @@ def publish_creator(payload: dict) -> dict:
         "playlist_url": public_url + "/exports/channels.m3u",
         "status_url": public_url + "/api/public/channels",
         "vault_url": public_url + "/api/public/vault",
-        "creator_version": VERSION,
+        "creator_version": DISCOVERY_VERSION,
         "logo_url": logo_url,
         "logo_asset_id": logo_asset_id if selected_logo else "",
     }
@@ -3262,7 +3254,7 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
                 "stop_epoch_ms": int(slot["stop"].timestamp() * 1000),
             } for slot in slots],
         })
-    return {"version": 1, "creator_version": VERSION, "cinema_supported": True,
+    return {"version": 1, "creator_version": DISCOVERY_VERSION, "cinema_supported": True,
             "generated_at": moment.isoformat(), "channels": result}
 
 
@@ -3504,7 +3496,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/local-creator":
                 settings = config()
                 name = settings["creator_profile"].get("name") or settings["plex_profile"].get("server_name")
-                self.send_json(200, {"app": APP_NAME, "version": VERSION, "name": name, "channel_count": sum(not run_finished(row) for row in channels()),
+                self.send_json(200, {"app": APP_NAME, "version": DISCOVERY_VERSION, "name": name, "channel_count": sum(not run_finished(row) for row in channels()),
                                      "creator_id": settings["creator_id"], "public_url": settings["public_url"]})
             elif parsed.path == "/api/diagnostics":
                 return self.send_json(200, {"version": VERSION, "platform": sys.platform, "sharing": SHARING_STATUS,
@@ -3824,7 +3816,7 @@ class PublicMediaHandler(Handler):
     """Limit the public HTTPS origin to the paths TV viewers consume."""
 
     def end_headers(self) -> None:
-        self.send_header("X-ChannelForge-Version", VERSION)
+        self.send_header("X-ChannelForge-Version", DISCOVERY_VERSION)
         super().end_headers()
 
     def catalog_base(self) -> str:

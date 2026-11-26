@@ -5,5 +5,7 @@
 - Creator shares a live broadcast across viewers, recovers from an interrupted encoder, and can deliver compatible movies without re-encoding the video. Resource limits help busy studios stay responsive.
 - Closing the Windows Creator window stops its preview audio. Choosing **Exit and stop channels** in the tray also shuts down its local server, encoder and WebView2 processes.
 - Desktop playback diagnostics are available from Creator’s System page and the TV app’s Updates page. Use **Copy report** to share a troubleshooting snapshot.
+- Windows and Linux TV viewers can select VLC under Updates when the VLC runtime is installed. The built-in player remains the default.
+- Roku retains channels during a directory interruption and retries a stalled stream using the studio’s current address. The included Roku ZIP is for developer sideloading. Store signing and physical Roku playback are pending.
 
 On a physical Fire TV Stick, both trials recovered when the studio address changed. Stall time in that specific test fell from 40.9 to 1.8 seconds per minute. On a healthy test connection, median startup improved from 2.03 to 1.76 seconds. Brief stalls on that connection persisted.

@@ -86,6 +86,27 @@ class TvAppTests(unittest.TestCase):
     def test_version_comparison_handles_double_digit_minor(self):
         self.assertGreater(tv.version_tuple("v3.10.0"), tv.version_tuple("3.9.9"))
 
+    def test_preview_updates_converge_on_stable(self):
+        def release(tag, **flags):
+            return {"tag_name": tag, "assets": [{"name": "ChannelForge_Setup.exe"}], **flags}
+
+        alpha = release("v4.0.0-alpha.9", prerelease=True)
+        newer_alpha = release("v4.0.0-alpha.10", prerelease=True)
+        final = release("v4.0.0")
+        draft = release("v5.0.0", draft=True)
+        for entries, expected in [([alpha, newer_alpha, draft], newer_alpha), ([alpha, final, draft], final)]:
+            with mock.patch.object(release_metadata.urllib.request, "urlopen",
+                                   return_value=FakeResponse(json.dumps(entries).encode())) as fetch:
+                selected = release_metadata.read_latest_release("ChannelForge-TV/4.0.0-alpha.1")
+            self.assertEqual(fetch.call_args.args[0].full_url, release_metadata.PREVIEW_SOURCE)
+            self.assertEqual(selected, expected)
+            self.assertGreater(tv.version_tuple(selected["tag_name"]), tv.version_tuple("4.0.0-alpha.1"))
+        # The manifest fallback must also discard a prerelease even if its flag is missing.
+        with mock.patch.object(release_metadata.urllib.request, "urlopen", side_effect=[
+                FakeResponse(json.dumps(release("v4.0.1-alpha.1")).encode()),
+                FakeResponse(json.dumps(final).encode())]):
+            self.assertEqual(release_metadata.read_latest_release("ChannelForge-TV/3.6.2"), final)
+
     def test_update_check_uses_published_manifest_when_api_is_rate_limited(self):
         release = {"tag_name": "v3.9.42", "body": "Playback and library improvements.",
                    "assets": [{"name": "ChannelForge_Setup.exe"}]}

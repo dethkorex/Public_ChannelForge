@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-1.0.1}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION="${1:-$(sed -n 's/^VERSION = "\([^"]*\)".*/\1/p' "$ROOT/Public_ChannelForge.py")}"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] || { echo "Invalid release version: $VERSION" >&2; exit 1; }
+DEB_VERSION="${VERSION/-/\~}"
+ARCH_VERSION="${VERSION/-/}"
 OUT="$ROOT/release"
 WORK="${RUNNER_TEMP:-/tmp}/public-channelforge-packaging"
 APP_ROOT="$WORK/app"
-PYTHON_FILES=("$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/linux_runtime.py" "$ROOT/release_metadata.py")
+PYTHON_FILES=("$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/linux_runtime.py" "$ROOT/release_metadata.py" "$ROOT/native_vlc.py")
 
 rm -rf "$WORK" "$OUT"
 mkdir -p "$OUT" "$APP_ROOT/ChannelForge"
@@ -25,12 +28,13 @@ cp "${PYTHON_FILES[@]}" "$ROOT/PLUGIN_DEVELOPMENT.md" "$DEB/opt/public-channelfo
 cp -R "$ROOT/web" "$ROOT/plugins" "$ROOT/assets" "$DEB/opt/public-channelforge/"
 cat > "$DEB/DEBIAN/control" <<EOF
 Package: public-channelforge
-Version: $VERSION
+Version: $DEB_VERSION
 Section: video
 Priority: optional
 Architecture: all
 Depends: python3 (>= 3.10), python3-webview, python3-pil, python3-urllib3, gir1.2-webkit2-4.1, ffmpeg, openssh-client, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav, mpv
 Maintainer: Public ChannelForge contributors
+Recommends: python3-vlc, vlc-plugin-base, vlc-plugin-video-output, python3-tk
 Description: Local-first personal channel guide builder
  Build personal channel rotations and watch the public TV guide in two desktop apps.
 EOF
@@ -89,7 +93,7 @@ cp "$DEB/usr/lib/systemd/user/public-channelforge.service" "$ARCH/usr/lib/system
 cat > "$ARCH/.PKGINFO" <<EOF
 pkgname = public-channelforge
 pkgbase = public-channelforge
-pkgver = $VERSION-1
+pkgver = $ARCH_VERSION-1
 pkgdesc = Local-first personal channel guide builder
 url = https://github.com/dethkorex/Public_ChannelForge
 builddate = $(date +%s)
@@ -110,8 +114,11 @@ depend = gst-plugins-good
 depend = gst-plugins-bad
 depend = gst-libav
 depend = mpv
+optdepend = python-vlc: optional VLC playback
+optdepend = vlc: optional native video decoder
+optdepend = tk: optional VLC playback controls
 EOF
-tar --zstd --owner=0 --group=0 --numeric-owner -C "$ARCH" -cf "$OUT/public-channelforge-${VERSION}-1-any.pkg.tar.zst" .PKGINFO opt usr
+tar --zstd --owner=0 --group=0 --numeric-owner -C "$ARCH" -cf "$OUT/public-channelforge-${ARCH_VERSION}-1-any.pkg.tar.zst" .PKGINFO opt usr
 
 (cd "$OUT" && sha256sum ChannelForge-* Public_ChannelForge-* public-channelforge-* > SHA256SUMS-Linux.txt)
 echo "Linux packages created in $OUT"

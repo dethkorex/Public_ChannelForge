@@ -12,10 +12,12 @@ import tempfile
 from collections.abc import Collection
 from pathlib import Path
 
+from release_metadata import RELEASE_VERSION
+
 
 LINUX_APP_FILES = (
     "Public_ChannelForge.py", "ChannelForge_TV.py", "windows_distribution.py", "linux_runtime.py", "release_metadata.py",
-    "PLUGIN_DEVELOPMENT.md", "web", "plugins", "assets", "install.sh", "uninstall.sh",
+    "native_vlc.py", "PLUGIN_DEVELOPMENT.md", "web", "plugins", "assets", "install.sh", "uninstall.sh",
 )
 
 
@@ -27,12 +29,13 @@ def start_webview(webview) -> None:
 
 
 def linux_release_asset(names: Collection[str], version: str, app_directory: Path) -> str:
-    if not re.fullmatch(r"\d+(?:\.\d+){1,3}", version):
+    if not re.fullmatch(RELEASE_VERSION, version):
         raise ValueError("GitHub reported an invalid updater version.")
     portable = (f"ChannelForge-{version}-linux-x64.tar.gz", f"Public_ChannelForge-{version}-linux-x64.tar.gz")
     if app_directory == Path("/opt/public-channelforge"):
         if Path("/etc/arch-release").exists():
-            return f"public-channelforge-{version}-1-any.pkg.tar.zst"
+            arch_version = version.replace("-", "")
+            return f"public-channelforge-{arch_version}-1-any.pkg.tar.zst"
         if Path("/etc/debian_version").exists():
             return f"Public_ChannelForge-{version}-linux-all.deb"
     return next((name for name in portable if name in names), portable[0])

@@ -23,10 +23,10 @@ from pathlib import Path
 from native_vlc import NativePlayback
 
 from linux_runtime import apply_linux_update, can_apply_linux_update, restart_linux_app, linux_install_command, linux_release_asset, start_webview
-from release_metadata import read_latest_release
+from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "3.6.2"
+VERSION = "4.0.0-alpha.1"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -55,10 +55,6 @@ if urllib3 and hasattr(urllib3.response.HTTPResponse, "read1"):
 
 def resource(name: str) -> Path:
     return Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / name
-
-
-def version_tuple(value: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in value.lstrip("v").split(".") if part.isdigit())
 
 
 def github_json() -> dict:
@@ -1261,6 +1257,9 @@ function play(url,media=null,continuing=false){
         });
         player.on(Hls.Events.ERROR,(_event,data)=>{
             if(!data.fatal||generation!==playbackGeneration)return;
+            if(data.type===Hls.ErrorTypes.MEDIA_ERROR&&window.ChannelForgeNative?.canFallback()&&movieRecovery){
+                player.destroy();hls=null;showNativePlayback();return;
+            }
             if(liveMode){
                 const status=Number(data.response?.code);
                 if(data.details===Hls.ErrorDetails.MANIFEST_LOAD_ERROR&&(status===404||status===410)){
@@ -1332,7 +1331,7 @@ function stopPlayer(){liveMode=false;playerMini=false;activeStreamUrl='';activeM
     });
     video.addEventListener('error',()=>{
         if(video!==$('#player')||!activeStreamUrl)return;
-        if(video.error?.code===3&&/Linux/i.test(navigator.platform)){
+        if(video.error?.code===3&&(/Linux/i.test(navigator.platform)||window.ChannelForgeNative?.canFallback())){
             if(hls){hls.destroy();hls=null}
             showNativePlayback();
         }else if(!hls){
@@ -1627,6 +1626,8 @@ HTML = HTML.replace("OPEN VERIFIED UPDATE", "RESTART & INSTALL UPDATE").replace(
 HTML = HTML.replace("</head>", f"<style>{GUIDE_LAYOUT_CSS}</style></head>", 1)
 HTML = HTML.replace("</head>", '<link rel="stylesheet" href="/cinema.css"></head>', 1)
 HTML = HTML.replace("</body>", '<script src="/playback-diagnostics.js"></script></body>', 1)
+HTML = HTML.replace("</body>", '<script src="/desktop-playback.js"></script></body>', 1)
+HTML = HTML.replace("function stopPlayer(){++playbackGeneration;", "function stopPlayer(){window.ChannelForgeNative?.stop();++playbackGeneration;", 1)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -1640,6 +1641,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, resource("web/hls.min.js").read_bytes(), "text/javascript")
             if parsed.path == "/playback-diagnostics.js":
                 return self.send(200, resource("web/playback-diagnostics.js").read_bytes(), "text/javascript")
+            if parsed.path == "/desktop-playback.js":
+                return self.send(200, resource("web/desktop-playback.js").read_bytes(), "text/javascript")
             if parsed.path == "/cinema.css":
                 return self.send(200, resource("web/cinema.css").read_bytes(), "text/css; charset=utf-8")
             if parsed.path in {"/cinema-hero.webp", "/cinema-tapes.webp"}:
@@ -1767,6 +1770,62 @@ class DesktopControls:
         self._player = None
         self._lock = threading.Lock()
         self._fullscreen = False
+        self._native = NativePlayback()
+        self._vlc_available = None
+        self._preference_file = UPDATE_DIR.parent / "viewer-player.json"
+
+    def playback_settings(self):
+        with self._lock:
+            if self._vlc_available is None:
+                try:
+                    import tkinter
+                    import vlc
+                    self._vlc_available = bool(tkinter.TkVersion and vlc.libvlc_get_version())
+                except (ImportError, OSError, AttributeError):
+                    self._vlc_available = False
+            try:
+                selected = json.loads(self._preference_file.read_text(encoding="utf8")).get("engine")
+            except (OSError, ValueError, AttributeError):
+                selected = "web"
+            return {"engine": "vlc" if selected == "vlc" and self._vlc_available else "web",
+                    "available": self._vlc_available}
+
+    def select_playback_engine(self, engine):
+        if engine not in ("web", "vlc") or (engine == "vlc" and not self.playback_settings()["available"]):
+            return False
+        with self._lock:
+            path = self._preference_file
+            temp = path.with_suffix("." + uuid.uuid4().hex + ".tmp")
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temp.write_text(json.dumps({"engine": engine}), encoding="utf8")
+                temp.replace(path)
+            except OSError:
+                return False
+            finally:
+                temp.unlink(missing_ok=True)
+            return True
+
+    def start_native_playback(self, generation, url, title, live, resume_at, prebuffer, fullscreen):
+        try:
+            target = urllib.parse.urlsplit(approved_content_url(url))
+            if (target.username or target.password or target.fragment or not re.fullmatch(
+                r"/(?:(?:live|vault)/[A-Za-z0-9_-]+|broadcast/[A-Za-z0-9_-]+/(?:master|firetv))\.m3u8", target.path)):
+                return False
+            source = f"http://127.0.0.1:{self._port}/stream?" + urllib.parse.urlencode({"url": url})
+            return self._native.start(int(generation), source, str(title)[:240], bool(live),
+                                      max(0, min(float(resume_at or 0), 86400)), bool(prebuffer), bool(fullscreen))
+        except (ValueError, TypeError, AttributeError, OSError):
+            return False
+
+    def native_playback_state(self, generation):
+        return self._native.state(generation)
+
+    def native_playback_command(self, generation, command):
+        if isinstance(command, dict) and isinstance(command.get("caption"), str):
+            self._native.command(generation, {"caption": command["caption"][:500]})
+        elif command in ("show", "stop", "pause", "resume"):
+            self._native.command(generation, command)
 
     def set_tv_fullscreen(self, active: bool) -> bool:
         with self._lock:
@@ -1817,10 +1876,13 @@ def main():
     try:
         start_webview(webview)
     finally:
+        controls._native.close()
         controls._stop_player()
         server.shutdown()
         server.server_close()
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()

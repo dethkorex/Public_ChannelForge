@@ -9,12 +9,14 @@ import tempfile
 import time
 from pathlib import Path
 
+from release_metadata import version_tuple
+
 
 SUITE_SETUP = "ChannelForge_Setup.exe"
 LEGACY_SETUPS = (
     "ChannelForge_Creator_Setup.exe", "ChannelForge_TV_Setup.exe", "Public_ChannelForge_Setup.exe",
 )
-RELEASE_VERSION = r"\d+(?:\.\d+){1,3}"
+RELEASE_VERSION = r"\d+(?:\.\d+){1,3}(?:-(?:alpha|beta|rc)\.\d+)?"
 CACHED_SETUP = re.compile(rf"ChannelForge_Setup-v({RELEASE_VERSION})\.exe", re.IGNORECASE)
 OLD_TV_DOWNLOAD = re.compile(rf"ChannelForge_TV-(?:Setup|Portable)-v({RELEASE_VERSION})\.exe", re.IGNORECASE)
 
@@ -92,7 +94,7 @@ def clean_windows_update_cache(version: str) -> None:
     """Remove superseded setup downloads inside the apps' own caches."""
     if not re.fullmatch(RELEASE_VERSION, version):
         return
-    current = tuple(int(part) for part in version.split("."))
+    current = version_tuple(version)
     root = windows_data()
     caches = (windows_update_cache(), root / "Public_ChannelForge" / "updates", root / "ChannelForge_TV" / "updates")
     expired = []
@@ -101,7 +103,7 @@ def clean_windows_update_cache(version: str) -> None:
             continue
         for path in directory.iterdir():
             match = CACHED_SETUP.fullmatch(path.name) or OLD_TV_DOWNLOAD.fullmatch(path.name)
-            if match and tuple(int(part) for part in match[1].split(".")) <= current:
+            if match and version_tuple(match[1]) <= current:
                 expired.append(path)
             elif directory != caches[0] and path.name in (SUITE_SETUP, *LEGACY_SETUPS):
                 expired.append(path)

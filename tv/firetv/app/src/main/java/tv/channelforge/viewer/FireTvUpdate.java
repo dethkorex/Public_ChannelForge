@@ -33,7 +33,7 @@ final class FireTvUpdate {
             "https://github.com/dethkorex/Public_ChannelForge/releases/download/";
     private static final String RELEASE_MANIFEST =
             "https://github.com/dethkorex/Public_ChannelForge/releases/latest/download/ChannelForge-release.json";
-    private static final Pattern VERSION = Pattern.compile("[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}");
+    private static final Pattern VERSION = Pattern.compile("([0-9]{1,9})\\.([0-9]{1,9})\\.([0-9]{1,9})(?:-(alpha|beta|rc)\\.([0-9]{1,9}))?");
     private static final Pattern SHA256 = Pattern.compile("[a-fA-F0-9]{64}");
     private static final int MAX_APK_BYTES = 100 * 1024 * 1024;
 
@@ -52,14 +52,13 @@ final class FireTvUpdate {
     }
 
     static FireTvUpdate latest(StringBuilder notes) throws Exception {
-        JSONObject release;
-        try {
-            release = readRelease(BuildConfig.GITHUB_RELEASES_API);
-        } catch (Exception unavailable) {
-            release = readRelease(RELEASE_MANIFEST);
-        }
+        JSONObject release = latestRelease();
         String tag = release.getString("tag_name");
         String version = tag.substring(1);
+        if (isNewer(BuildConfig.VERSION_NAME, version)) {
+            notes.append("You are running a newer build than the latest available release.");
+            return null;
+        }
         for (String line : release.optString("body").split("\\r?\\n")) {
             String text = line.trim();
             if (text.isEmpty() || text.contains("http://") || text.contains("https://") || text.startsWith("##")) continue;
@@ -68,8 +67,7 @@ final class FireTvUpdate {
             if (notes.length() > 0) notes.append('\n');
             notes.append(text);
         }
-        if (release.optBoolean("draft") || release.optBoolean("prerelease")
-                || !isNewer(version, BuildConfig.VERSION_NAME)) return null;
+        if (!isNewer(version, BuildConfig.VERSION_NAME)) return null;
 
         JSONArray assets = release.getJSONArray("assets");
         JSONObject apk = findAsset(assets, APK);
@@ -87,25 +85,58 @@ final class FireTvUpdate {
         return new FireTvUpdate(version, apkUrl, expected);
     }
 
+    private static JSONObject latestRelease() throws Exception {
+        if (BuildConfig.VERSION_NAME.contains("-")) {
+            try {
+                URL previews = new URL(BuildConfig.GITHUB_RELEASES_API.replace("/latest", "?per_page=10"));
+                JSONArray releases = new JSONArray(readText(previews, 1024 * 1024));
+                JSONObject newest = null;
+                for (int i = 0; i < releases.length(); i++) {
+                    JSONObject entry = releases.optJSONObject(i);
+                    if (entry != null && validRelease(entry, true) && (newest == null ||
+                            isNewer(entry.getString("tag_name").substring(1), newest.getString("tag_name").substring(1)))) {
+                        newest = entry;
+                    }
+                }
+                if (newest != null) return newest;
+            } catch (Exception unavailable) {
+                // The stable manifest still offers the final release when the API is unavailable.
+            }
+        }
+        try {
+            return readRelease(BuildConfig.GITHUB_RELEASES_API);
+        } catch (Exception unavailable) {
+            return readRelease(RELEASE_MANIFEST);
+        }
+    }
+
+    private static boolean validRelease(JSONObject release, boolean preview) {
+        String tag = release.optString("tag_name");
+        return tag.startsWith("v") && VERSION.matcher(tag.substring(1)).matches()
+                && !release.optBoolean("draft") && (preview || (!release.optBoolean("prerelease") && !tag.contains("-")))
+                && release.optJSONArray("assets") != null && release.optJSONArray("assets").length() > 0;
+    }
+
     private static JSONObject readRelease(String address) throws Exception {
         JSONObject release = new JSONObject(readText(new URL(address), 1024 * 1024));
-        String tag = release.optString("tag_name");
-        if (!tag.startsWith("v") || !VERSION.matcher(tag.substring(1)).matches()
-                || release.optJSONArray("assets") == null) {
+        if (!validRelease(release, false)) {
             throw new IOException("GitHub returned an invalid release.");
         }
         return release;
     }
 
     static boolean isNewer(String candidate, String installed) {
-        if (!VERSION.matcher(candidate).matches() || !VERSION.matcher(installed).matches()) return false;
-        String[] next = candidate.split("\\.");
-        String[] current = installed.split("\\.");
-        for (int i = 0; i < next.length; i++) {
-            int comparison = Integer.compare(Integer.parseInt(next[i]), Integer.parseInt(current[i]));
+        Matcher next = VERSION.matcher(candidate), current = VERSION.matcher(installed);
+        if (!next.matches() || !current.matches()) return false;
+        for (int i = 1; i <= 3; i++) {
+            int comparison = Integer.compare(Integer.parseInt(next.group(i)), Integer.parseInt(current.group(i)));
             if (comparison != 0) return comparison > 0;
         }
-        return false;
+        if (next.group(4) == null) return current.group(4) != null;
+        if (current.group(4) == null) return false;
+        // alpha, beta and rc sort in their release order.
+        int stage = next.group(4).compareTo(current.group(4));
+        return stage != 0 ? stage > 0 : Integer.parseInt(next.group(5)) > Integer.parseInt(current.group(5));
     }
 
     private static JSONObject findAsset(JSONArray assets, String name) throws Exception {

@@ -21,6 +21,22 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install "urllib3>=2.5,<3"
+      - name: Verify release tag matches application versions
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: python
+        run: |
+          import os, re, sys
+          from pathlib import Path
+          sys.path.insert(0, os.getcwd())
+          from release_metadata import RELEASE_VERSION
+          tag = os.environ["GITHUB_REF_NAME"]
+          assert re.fullmatch("v" + RELEASE_VERSION, tag), "Invalid release tag"
+          for path, pattern in [
+              ("Public_ChannelForge.py", r'^VERSION = "([^"]+)"'),
+              ("ChannelForge_TV.py", r'^VERSION = "([^"]+)"'),
+              ("tv/firetv/app/build.gradle", r"^\s*versionName '([^']+)'"),
+          ]:
+              assert re.search(pattern, Path(path).read_text(encoding="utf-8"), re.M)[1] == tag[1:], path
       - run: python -m unittest discover -s tests -v
 
   windows-installer:
@@ -57,8 +73,7 @@ jobs:
       - name: Build Linux, Debian, Arch and Omarchy packages
         run: |
           chmod +x packaging/build_linux_packages.sh scripts/install_linux.sh scripts/uninstall_linux.sh
-          VERSION="${GITHUB_REF_NAME#v}"
-          packaging/build_linux_packages.sh "$VERSION"
+          packaging/build_linux_packages.sh
       - name: Verify the portable suite from the release archive
         run: |
           PACKAGE_DIR="$(mktemp -d)"
@@ -192,12 +207,14 @@ jobs:
                   with file.open("rb") as binary:
                       record["digest"] = "sha256:" + hashlib.file_digest(binary, "sha256").hexdigest()
               assets.append(record)
-          manifest = {"tag_name": tag, "html_url": f"{releases}/tag/{tag}",
+          manifest = {"tag_name": tag, "prerelease": "-" in tag, "html_url": f"{releases}/tag/{tag}",
                       "body": Path("RELEASE_NOTES.md").read_text(encoding="utf-8"), "assets": assets}
           (output / "ChannelForge-release.json").write_text(json.dumps(manifest), encoding="utf-8")
           PY
       - uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: release-assets/*
           body_path: RELEASE_NOTES.md
 
