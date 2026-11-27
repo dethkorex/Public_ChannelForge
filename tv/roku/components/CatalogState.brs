@@ -25,8 +25,3 @@ function mergeStudioRows(previous as object, fresh as object, complete as boolea
   end for
   return rows
 end function
-
-function alphaVersionLabel(version as string) as string
-  if Right(version, 2) = ".0" then version = Left(version, Len(version) - 2)
-  return "Alpha V" + version
-end function

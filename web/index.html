@@ -27,7 +27,7 @@
     </nav>
     <div class="sidebar-note"><i aria-hidden="true"></i><b>Studio is running</b><small id="sidebar-source-status">Checking media sources</small></div>
   </header>
-  <div class="workspace-topbar"><div class="topbar-actions"><span id="topbar-status" class="status-dot">Connecting</span><button id="topbar-scan">Scan libraries</button><button data-view="system" id="version" aria-label="Open system information"></button></div></div>
+  <div class="workspace-topbar"><div class="studio-workspace-title"><span>YOUR STUDIO</span><strong id="workspace-title">Overview</strong></div><div class="topbar-actions"><span id="topbar-status" class="status-dot">Connecting</span><button id="topbar-scan">Scan libraries</button><button data-view="system" id="version" aria-label="Open system information"></button></div></div>
   <main>
     <section id="start" class="view active">
       <section class="creator-launch">
@@ -83,7 +83,9 @@
       <div id="channel-list" class="cards"></div>
     </section>
     <section id="assets" class="view">
-      <div class="page-heading"><div><h2>Branding</h2><p>Create or upload logos, backgrounds, and on-screen overlays for your channels.</p></div></div>
+      <div class="page-heading"><div><h2>Branding</h2><p>Preview and configure what airs between programmes on each channel.</p></div><button data-view="channels">Manage channels</button></div>
+      <div id="channel-branding-grid" class="channel-branding-grid"></div>
+      <details class="panel studio-spaced branding-library"><summary>Artwork and ambience</summary>
       <div class="asset-workspace">
         <form id="generate-asset" class="panel form-grid">
           <h3 class="wide">Generate an asset</h3>
@@ -101,8 +103,16 @@
           <p class="muted wide">PNG, JPEG, WebP, or SVG up to 8 MB. Only upload artwork you have permission to use.</p>
           <button class="primary wide">Add artwork</button>
         </form>
+        <form id="upload-ambience" class="panel form-grid">
+          <h3 class="wide">Upload ambience</h3>
+          <label>Clip name<input name="name" required maxlength="100"></label>
+          <label>Audio file<input name="clip" type="file" accept="audio/*" required></label>
+          <p class="muted wide">Up to 25 seconds and 3.5 MB.</p>
+          <button class="primary wide">Add ambience</button>
+        </form>
       </div>
       <h3 class="studio-section-title">Artwork library</h3><div id="asset-list" class="asset-grid"></div>
+      </details>
     </section>
     <section id="setup" class="view">
       <div class="page-heading"><div><h2>Sources &amp; sharing</h2><p>Connect your libraries, manage your studio listing, and configure network access.</p></div></div>
@@ -176,8 +186,7 @@
           <label>Plex token<input id="plex-token" type="password" placeholder="Leave blank to keep the saved token"></label>
           <span id="token-status" class="muted wide"></span>
           <div class="wide"><button type="button" id="test-plex">Test connection</button></div>
-          <h3 class="settings-divider wide">Guide &amp; local network</h3>
-          <label>Guide length (hours)<input id="guide-hours" type="number" min="1" max="168" value="24"></label>
+          <h3 class="settings-divider wide">Local network</h3>
           <label>Network access<select id="bind-host"><option value="127.0.0.1">This computer only</option><option value="0.0.0.0">Local network</option></select></label>
           <label class="wide">LAN or public base URL<input id="public-url" placeholder="Optional, e.g. http://192.168.1.50:8787"></label>
           <p class="muted wide">To connect another device on your home network, choose Local network and enter this computer's LAN URL. Restart Creator after changing network access.</p>
@@ -187,7 +196,7 @@
       </section>
     </section>
     <section id="exports" class="view">
-      <div class="page-heading"><div><h2>Guide artwork &amp; delivery</h2><p>Preview channel logos and connect your TV guide to another player.</p></div><button id="regenerate" class="primary">Regenerate exports</button></div>
+      <div class="page-heading"><div><h2>Guide artwork &amp; delivery</h2><p>The exported guide automatically follows the next 12 hours of programming.</p></div><button id="regenerate" class="primary">Regenerate exports</button></div>
       <div class="cards"><article><h3>XMLTV guide</h3><code id="xmltv-url"></code><div class="actions"><button data-copy-target="xmltv-url">Copy XMLTV URL</button><a class="button" href="/exports/guide.xml" download>Download</a></div></article><article><h3>M3U channel list</h3><code id="m3u-url"></code><div class="actions"><button data-copy-target="m3u-url">Copy M3U URL</button><a class="button" href="/exports/channels.m3u" download>Download</a></div></article></div><div id="guide-artwork-grid" class="guide-artwork-grid"></div>
     </section>
     <section id="tools" class="view">
@@ -202,6 +211,7 @@
     </section>
     <section id="system" class="view">
       <div class="page-heading"><div><h2>System</h2><p>Check studio health, backups, updates, and installed tools.</p></div></div>
+      <p class="muted">Alpha Studio sends basic performance and error codes on close. Reports exclude credentials, media titles, and library paths.</p>
       <div id="system-checks" class="system-check-grid"></div>
       <div class="system-settings-grid studio-spaced">
         <article class="panel backup-card"><h3>Automatic backups</h3><p>Creator saves channel and branding settings before lineup changes. Backups exclude Plex credentials.</p><strong id="backup-count">0 backups available</strong></article>
@@ -238,13 +248,14 @@
           <option value="PG-13">PG-13</option><option value="TV-14">TV-14</option>
           <option value="R">R</option><option value="TV-MA">TV-MA</option><option value="NC-17">NC-17</option>
         </select></label>
-        <p id="channel-rating-help" class="muted wide">Studio shows titles rated at or below this limit. A TV series is eligible when every available episode meets the limit. Titles without a known rating appear only with no limit.</p>
+        <p id="channel-rating-help" class="muted wide">Studio shows titles rated at or below this limit. Choose individual episodes to find eligible titles inside a mixed-rating series.</p>
         <p id="channel-rating-impact" class="muted wide" role="status" hidden></p>
       </div>
     </section>
     <section class="builder-step active" data-builder-step="1" aria-label="Choose titles">
       <div class="builder-toolbar">
         <label class="builder-search"><i aria-hidden="true"></i><input id="media-filter" type="search" aria-label="Search library titles and tags" placeholder="Search titles, tags, actors, or directors…"></label>
+        <button type="button" id="builder-detail-toggle" aria-pressed="false">Choose episodes</button>
         <button id="builder-filter-toggle" class="builder-filter-toggle" type="button" aria-expanded="false" aria-controls="builder-filters" title="Library and filters" aria-label="Library and filters">•••</button>
         <output id="smart-match-count" class="builder-title-count" aria-live="polite">0 titles</output>
       </div>
@@ -257,7 +268,7 @@
         </div>
         <label>Media library<select id="channel-library"><option value="">Choose a library</option></select></label>
       </div>
-      <div class="smart-filter-grid"><label>Genre or tag<select id="smart-genre"><option value="all">All genres and tags</option></select></label><label>From year<input id="smart-year-min" type="number" min="1900" max="2100" placeholder="Any"></label><label>To year<input id="smart-year-max" type="number" min="1900" max="2100" placeholder="Any"></label><label>Rating<select id="smart-rating"><option value="all">All ratings</option></select></label><button type="button" id="select-all-media">Select all shown</button></div>
+      <div class="smart-filter-grid"><label>Genre or tag<select id="smart-genre"><option value="all">All genres and tags</option></select></label><label>Holiday<select id="smart-holiday"><option value="all">All titles</option></select></label><label>TV show<select id="smart-series"><option value="all">All shows</option></select></label><label>From year<input id="smart-year-min" type="number" min="1900" max="2100" placeholder="Any"></label><label>To year<input id="smart-year-max" type="number" min="1900" max="2100" placeholder="Any"></label><label>Rating<select id="smart-rating"><option value="all">All ratings</option></select></label><button type="button" id="select-all-media">Select all matching</button></div>
       </div>
       <div id="builder-library-status" class="builder-status" role="status"></div>
       <div id="media-status" class="builder-status" role="status"></div>
@@ -269,16 +280,25 @@
         <span id="lineup-edit-status" class="lineup-announcement" role="status"></span>
       </aside>
     </section>
-    <section class="builder-step builder-settings" data-builder-step="2" aria-label="Name and playback"><div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100" placeholder="Movie Night"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label class="wide">Playback order<select id="playback-mode" aria-describedby="preset-description"><option value="ordered">Play selection in order</option><option value="shuffle">Shuffle every title</option><option value="shuffle_in_order">Shuffle shows, episodes in order</option><option value="marathon">Marathon shows in selection order</option><option value="franchise">Smart franchise timeline — movies + complete shows</option></select></label><p class="muted wide" id="preset-description"></p><button type="button" id="restore-preset" hidden>Restore selected preset order</button><label>Broadcast quality<select id="broadcast-height" aria-describedby="broadcast-help"><option value="720">720p</option><option value="480">480p</option><option value="270">270p</option></select></label>
+    <section class="builder-step builder-settings" data-builder-step="2" aria-label="Name and playback"><div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100" placeholder="Movie Night"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label class="wide">Playback order<select id="playback-mode" aria-describedby="preset-description"><option value="custom">Maximum customization · exact episode and movie order</option><option value="ordered" selected>Play selection in order</option><option value="shuffle">Shuffle every title</option><option value="shuffle_in_order">Shuffle shows, episodes in order</option><option value="marathon">Marathon shows in selection order</option><option value="franchise">Smart franchise timeline — movies + complete shows</option></select></label><p class="muted wide" id="preset-description"></p><button type="button" id="restore-preset" hidden>Restore selected preset order</button><label>Broadcast quality<select id="broadcast-height" aria-describedby="broadcast-help"><option value="720">720p</option><option value="480">480p</option><option value="270">270p</option></select></label>
         <label>Broadcast bitrate limit (kbps)<input id="broadcast-kbps" type="number" min="250" max="2500" step="1" placeholder="2500" aria-describedby="broadcast-help"></label>
         <p class="muted wide" id="broadcast-help">Defaults to 720p at 2,500 kbps. Lower either setting to reduce upload. Changes apply when the broadcast restarts.</p></div></section>
-    <section class="builder-step builder-settings" data-builder-step="3" aria-label="Branding"><div class="form-grid"><label>Channel logo<select id="channel-logo"><option value="">No logo</option></select></label><label>Guide/player background<select id="channel-background"><option value="">Default background</option></select></label><label>Corner bug<select id="channel-corner-bug"><option value="">No corner bug</option></select></label></div>
+    <section class="builder-step builder-settings builder-branding-layout" data-builder-step="3" aria-label="Branding"><div class="form-grid"><label>Channel logo<select id="channel-logo"><option value="">No logo</option></select></label><label>Guide/player background<select id="channel-background"><option value="">Default background</option></select></label><label>Corner bug<select id="channel-corner-bug"><option value="">No corner bug</option></select></label></div>
       <figure class="creator-brand-preview" aria-label="Channel branding preview">
         <img id="branding-preview-background" class="preview-background" alt="" hidden>
         <img id="branding-preview-logo" class="preview-logo" alt="Channel logo" hidden>
         <div class="preview-caption"><span id="branding-preview-number">CH 1</span><strong id="branding-preview-name">Your channel</strong></div>
         <img id="branding-preview-bug" class="preview-bug" alt="Corner overlay" hidden>
       </figure>
+      <fieldset id="builder-branding" class="brand-card-controls">
+        <legend>Up Next</legend>
+        <label class="wide"><input type="checkbox" name="up-next-enabled" checked> Air a card between programmes</label>
+        <label>Card style<select name="up-next-style"><option value="studio">Clean Studio</option><option value="rewind">Rewind</option><option value="midnight">Midnight</option></select></label>
+        <label>Duration in seconds<input type="number" min="5" max="25" name="up-next-duration" value="18" required></label>
+        <label>Ambience<select name="up-next-ambience"><option value="silent">Silent</option></select></label>
+        <button type="button" data-preview-branding>Preview Up Next</button>
+        <audio controls hidden preload="none" aria-label="Preview ambience"></audio>
+      </fieldset>
     </section>
     <section class="builder-step builder-settings" data-builder-step="4" aria-label="Review channel"><div id="builder-summary" class="summary-card"></div>
     <div id="worldwide-on-save">

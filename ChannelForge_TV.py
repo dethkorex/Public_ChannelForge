@@ -21,11 +21,11 @@ import uuid
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from linux_runtime import apply_linux_update, can_apply_linux_update, restart_linux_app, linux_install_command, linux_release_asset, start_webview
+from linux_runtime import apply_linux_update, can_apply_linux_update, clean_linux_update_cache, restart_linux_app, linux_install_command, linux_release_asset, start_webview
 from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "4.5.1"
+VERSION = "4.5.5"
 VERSION_LABEL = f"Alpha Version {VERSION.removesuffix('.0')}"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
@@ -57,14 +57,7 @@ def resource(name: str) -> Path:
     return Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / name
 
 
-TESTER_CONFIG = resource("assets/tester-config.json")
-TESTER_BUILD = TESTER_CONFIG.is_file()
-APP_TITLE = "ChannelForge TV Tester" if TESTER_BUILD else "ChannelForge TV"
-if TESTER_BUILD:
-    VERSION = json.loads(TESTER_CONFIG.read_text(encoding="utf-8")).get("version", VERSION)
-    UPDATE_DIR = UPDATE_DIR.parent.with_name("ChannelForge-TV-Tester") / "updates"
-TESTER_STUDIO = "http://127.0.0.1:18787"
-TESTER_CONSENT = UPDATE_DIR.parent / "diagnostics-consent"
+APP_TITLE = "ChannelForge TV"
 
 
 def github_json() -> dict:
@@ -168,8 +161,6 @@ def approved_content_url(url: str) -> str:
     if parsed.scheme == "https" and parsed.hostname:
         return url
     if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port == 8787:
-        return url
-    if TESTER_BUILD and parsed.scheme == "http" and parsed.netloc == "127.0.0.1:18787":
         return url
     raise ValueError("ChannelForge TV only opens HTTPS creator media or the local Creator on port 8787.")
 
@@ -386,9 +377,6 @@ function renderReleaseNotes(container,value){
 }
 async function checkUpdate(onLaunch=false){
     const button=$('#update'), statuses=document.querySelectorAll('#home-update-state,#screen-update-status');
-    if(document.documentElement.hasAttribute('data-tester')){
-        return;
-    }
     const showStatus=message=>statuses.forEach(element=>element.textContent=message);
     button.title='Checking for updates…';
     showStatus('Checking for updates…');
@@ -1407,7 +1395,6 @@ function showChannelOffline(){
 }
 let playbackGeneration=0, liveRetryTimer, liveBoundaryTimer, liveRetries=0, movieRetries=0, playbackTimer, lastPlaybackTime=-1, playingSince=0;
 let usingPreferredRelay=false, skipPreferredRelay=false;
-let routeRecoveryStarted=0;
 let liveStallStarted=0, recentLiveStalls=[];
 const newPlaybackTrace=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('');
 async function refreshMovieRoute(movie){
@@ -1430,23 +1417,20 @@ function recoverMovie(refresh=false){
     if(liveMode||!activeStreamUrl||activeMedia?.ejecting)return false;
     if(fallbackFromPreferredRelay())return true;
     if(liveRetryTimer)return true;
-    const replacementOnly=movieRetries===2&&document.documentElement.hasAttribute('data-tester')
-        &&activeMedia.movie?.studio_id&&!activeMedia.movie.local_studio;
-    if(movieRetries>=2&&!replacementOnly)return false;
-    if(++movieRetries===1)routeRecoveryStarted=performance.now();
+    if(movieRetries>=2)return false;
+    ++movieRetries;
     const generation=playbackGeneration;
     activeMedia.resumeAt=$('#player').currentTime||activeMedia.resumeAt||0;
     clearTimeout(playbackTimer);playbackTimer=null;
-    setBuffering(true,replacementOnly?'Checking for the Studio’s backup connection…':'Reconnecting to the movie…');
+    setBuffering(true,'Reconnecting to the movie…');
     liveRetryTimer=setTimeout(async()=>{
         if(generation!==playbackGeneration||activeMedia?.ejecting)return;
         const url=(refresh||movieRetries>1)?await refreshMovieRoute(activeMedia.movie).catch(()=> ''):'';
         if(generation!==playbackGeneration||activeMedia?.ejecting)return;
         liveRetryTimer=null;
-        if(replacementOnly&&(!url||url===activeStreamUrl)){setPlayerState('The studio connection is unavailable.',true);return}
         if(url&&activeMedia.movie)activeMedia.movie={...activeMedia.movie,stream_url:url};
         play(url||activeStreamUrl,activeMedia,true);
-    },replacementOnly?Math.max(1000,30000-(performance.now()-routeRecoveryStarted)):1000*movieRetries);
+    },1000*movieRetries);
     return true;
 }
 function armPlaybackDeadline(generation, delay){
@@ -1513,28 +1497,25 @@ function advanceLive(failed=false, failureMessage='COULD NOT PLAY THIS CHANNEL')
     clearTimeout(liveBoundaryTimer);
     const generation=playbackGeneration;
     const channel=liveChannels.find(item=>item.stream_url===activeStreamUrl)||activeMedia.channel;
-    if(failed&&++liveRetries===1)routeRecoveryStarted=performance.now();
-    const replacementOnly=failed&&liveRetries===3&&channel?.id&&channel.studio_id
-        &&document.documentElement.hasAttribute('data-tester')&&/^https:\/\//.test(activeStreamUrl);
-    if(failed&&liveRetries>2&&!replacementOnly){setPlayerState(failureMessage,true);return}
+    if(failed)++liveRetries;
+    if(failed&&liveRetries>2){setPlayerState(failureMessage,true);return}
     const current=programAt(channel,Date.now());
     const earlyEnd=!failed&&current&&current.start===activeMedia.programStart ? Date.parse(current.stop)-Date.now() : 0;
     setPlayerState(failed?'RECONNECTING…':'TUNING NEXT PROGRAM…');
-    setBuffering(true,replacementOnly?'Checking for the Studio’s backup connection…':failed?'Reconnecting to the studio…':'Loading the next program…');
+    setBuffering(true,failed?'Reconnecting to the studio…':'Loading the next program…');
     liveRetryTimer=setTimeout(async()=>{
         if(generation!==playbackGeneration||!liveMode)return;
         let refreshed, deadline;
         if(failed){
-            refreshed=await Promise.race([refreshTunedChannel(channel,replacementOnly).catch(()=>null),new Promise(done=>{deadline=setTimeout(done,8000)})]);
+            refreshed=await Promise.race([refreshTunedChannel(channel).catch(()=>null),new Promise(done=>{deadline=setTimeout(done,8000)})]);
             clearTimeout(deadline);
         }
         if(generation!==playbackGeneration||!liveMode)return;
         liveRetryTimer=null;
-        if(replacementOnly&&!refreshed){setPlayerState(failureMessage,true);return}
         const updated=refreshed||liveChannels.find(c=>channel?.id && c.id===channel.id && c.studio_id===channel.studio_id)||channel;
         const next=programAt(updated,Date.now());
         play(updated?.stream_url||activeStreamUrl,{kind:'live',channel:updated,title:next?.title||updated?.name||activeMedia.title},true);
-    },replacementOnly?Math.max(1000,30000-(performance.now()-routeRecoveryStarted)):Math.max(failed?1000*liveRetries:350,earlyEnd+200));
+    },Math.max(failed?1000*liveRetries:350,earlyEnd+200));
 }
 function fallbackFromPreferredRelay(){
     if(!usingPreferredRelay)return false;
@@ -1663,7 +1644,7 @@ function play(url,media=null,continuing=false){
             if(generation===playbackGeneration){
                 const status=Number(data?.response?.code);
                 const kind=data.frag?'segment':/^(manifest|level|audioTrack|subtitleTrack)Load/i.test(data.details||'')?'manifest':'other';
-                window.dispatchEvent(new CustomEvent('cf-tester-stream-error',{detail:{status:Number.isInteger(status)?status:0,kind}}));
+                window.dispatchEvent(new CustomEvent('cf-playback-stream-error',{detail:{status:Number.isInteger(status)?status:0,kind}}));
             }
             if(!data.fatal||generation!==playbackGeneration)return;
             if(liveMode){
@@ -1859,6 +1840,10 @@ function toggleApplicationFullscreen(){
     movieOwnsFullscreen=false;
     setApplicationFullscreen(!document.documentElement.classList.contains('application-fullscreen'));
 }
+window.addEventListener('pywebviewready',async()=>{
+    const fullscreen=window.pywebview?.api?.tv_fullscreen;
+    if(fullscreen)reflectApplicationFullscreen(await fullscreen());
+});
 document.addEventListener('fullscreenchange',()=>reflectApplicationFullscreen(Boolean(document.fullscreenElement)));
 $('#desktop-fullscreen').onclick=toggleApplicationFullscreen;
 $('#home-display').onclick=toggleApplicationFullscreen;
@@ -1889,12 +1874,12 @@ $('#restart-update').onclick=async()=>{
 load();checkUpdate(true);</script></body></html>'''.replace("__VERSION__", VERSION).replace("__VERSION_LABEL__", VERSION_LABEL).replace("__DIRECTORY__", DIRECTORY).replace("__DIRECTORY_FALLBACK__", DIRECTORY_FALLBACK)
 
 def configured_playback_relay() -> str:
-    path = TESTER_CONFIG if TESTER_BUILD else resource("assets/playback-relay.json")
+    path = resource("assets/playback-relay.json")
     try:
         config = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return ""
-    route = config.get("relay_pilot" if TESTER_BUILD else "relay_route") if isinstance(config, dict) else None
+    route = config.get("relay_route") if isinstance(config, dict) else None
     if isinstance(route, str) and re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+=[a-z0-9-]+(?:\.[a-z0-9-]+)+", route):
         return route
     return ""
@@ -2485,39 +2470,8 @@ HTML = HTML.replace("</body>", '<script src="/playback-diagnostics.js"></script>
 HTML = HTML.replace('<span class="menu-label">Updates</span>', '<span class="menu-label">System</span>', 1)
 HTML = HTML.replace('<strong>Updates</strong>', '<strong>System</strong>', 1)
 HTML = HTML.replace('><h2>Updates</h2>', '><h2>System</h2>', 1)
-HTML = HTML.replace("function stopPlayer(){++playbackGeneration;", "function stopPlayer(){window.dispatchEvent(new Event('cf-tester-stop'));saveCurrentMovie();++playbackGeneration;", 1)
+HTML = HTML.replace("function stopPlayer(){++playbackGeneration;", "function stopPlayer(){window.dispatchEvent(new Event('cf-playback-stop'));saveCurrentMovie();++playbackGeneration;", 1)
 
-if TESTER_BUILD:
-    from tester_updates import alpha_version_label
-
-    tester_version = alpha_version_label(VERSION)
-    HTML = HTML.replace("<html", '<html data-tester', 1).replace("<title>ChannelForge TV</title>",
-                                                               f"<title>{APP_TITLE}</title>", 1)
-    HTML = HTML.replace(f'>{VERSION_LABEL}</button>', f'>{tester_version}</button>', 1)
-    HTML = HTML.replace(f'ChannelForge TV • v{VERSION}<br>', f'ChannelForge TV • {tester_version}<br>', 1)
-    HTML = HTML.replace("load();showScreen(new URLSearchParams(location.search).get('screen')||'home');setNavigation(!narrowNavigation.matches);checkUpdate(true);",
-                        "showScreen('home');setNavigation(!narrowNavigation.matches);", 1)
-    HTML = HTML.replace("showScreen('updates');checkUpdate(false)", "showScreen('updates')")
-    HTML = HTML.replace("Downloads come only from the official GitHub release and are SHA-256 verified.",
-                        "Check for a private Tester build. Verified updates restart TV and Studio.")
-    HTML = HTML.replace('id="screen-update-status" role="status">Checking for updates…', 'id="screen-update-status" role="status">Ready to check for updates.')
-    HTML = HTML.replace('<span>Select Check Now to refresh release status.</span>', '')
-    HTML = HTML.replace('>CHECK NOW</button>', '>Check for Update</button>')
-    HTML = HTML.replace("$('#screen-check-update').onclick=()=>checkUpdate(false);", "")
-    HTML = HTML.replace('Checking the official release…', 'Open System to check for a new Tester build.')
-    HTML = HTML.replace('Loading changelog…', '')
-    HTML = re.sub(r'<details class="playback-troubleshooting viewer-system-card">.*?</details>', '', HTML, count=1, flags=re.S)
-    HTML = HTML.replace('<div id="tv-release-notes" class="home-changelog"></div>',
-                        '<div id="tv-release-notes" class="home-changelog"></div>'
-                        '<a class="update" href="?screen=developer" data-screen="developer">Developer</a>', 1)
-    HTML = HTML.replace("</main>", '<section data-section-block="developer" hidden><div class="screen-title">'
-                        '<span class="eyebrow">APPLICATION</span><h2>Developer</h2><p>Private Tester build</p>'
-                        '<a class="update" href="?screen=updates" data-screen="updates">Back to System</a></div>'
-                        '</section></main>', 1)
-    HTML = HTML.replace("</head>", '<link rel="stylesheet" href="/tester-report-ui.css"></head>', 1)
-    HTML = HTML.replace("</body>", '<script src="/tester-updates.js"></script>'
-                        '<script src="/tester-report-ui.js"></script></body>', 1)
-    HTML = HTML.replace("</body>", '<script src="/tester-tools.js"></script></body>', 1)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -2531,24 +2485,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, resource("web/hls.min.js").read_bytes(), "text/javascript")
             if parsed.path == "/playback-diagnostics.js":
                 return self.send(200, resource("web/playback-diagnostics.js").read_bytes(), "text/javascript")
-            if TESTER_BUILD and parsed.path == "/tester-tools.js":
-                return self.send(200, resource("web/tester-tools.js").read_bytes(), "text/javascript")
-            if TESTER_BUILD and parsed.path in {"/tester-updates.js", "/tester-report-ui.js", "/tester-report-ui.css"}:
-                content_type = "text/css" if parsed.path.endswith(".css") else "text/javascript"
-                return self.send(200, resource("web" + parsed.path).read_bytes(), content_type)
-            if TESTER_BUILD and parsed.path in {"/api/tester-update", "/api/tester-update/progress", "/api/tester-update/installed"}:
-                from tester_updates import local_update
-                status, payload = local_update("GET", parsed.path, self.headers, self.server.server_port, component="tv")
-                return self.send(status, json.dumps(payload).encode(), "application/json")
-            if TESTER_BUILD and parsed.path == "/api/tester/status":
-                from tester_diagnostics import automatic_reports
-                allowed = TESTER_CONSENT.is_file()
-                settings = json.loads(TESTER_CONFIG.read_text(encoding="utf-8"))
-                report_url = settings.get("report_url", "")
-                return self.send(200, json.dumps({"consented": allowed, "can_send": bool(report_url), "auto_reports": automatic_reports(),
-                                                  "build_revision": settings.get("revision"),
-                                                  "version": VERSION, "platform": "linux" if sys.platform.startswith("linux") else "windows"
-                                                  }).encode(), "application/json")
             if parsed.path == "/cinema.css":
                 return self.send(200, resource("web/cinema.css").read_bytes(), "text/css; charset=utf-8")
             if parsed.path in {"/cinema-hero.webp", "/cinema-vhs-texture.webp"}:
@@ -2557,15 +2493,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, resource("assets" + parsed.path).read_bytes(), "image/png",
                                  {"Cache-Control": "private, max-age=86400"})
             if parsed.path == "/app-icon.png":
-                icon = "channel-forge-tester-icon.png" if TESTER_BUILD else "channel-forge-tv-icon.png"
+                icon = "channel-forge-tv-icon.png"
                 return self.send(200, resource(f"assets/{icon}").read_bytes(), "image/png")
-            if TESTER_BUILD and parsed.path.startswith("/api/update"):
-                return self.send(403, b'{"error":"Tester updates come from the private Developer link."}', "application/json")
             if parsed.path == "/api/update":
                 value = latest_tv_release(); value.pop("assets", None)
                 return self.send(200, json.dumps(value).encode(), "application/json")
             if parsed.path == "/api/local-creator":
-                status = local_creator(TESTER_STUDIO) if TESTER_BUILD else {"available": False}
+                status = {"available": False}
                 if not status["available"]:
                     status = local_creator()
                 return self.send(200, json.dumps(status).encode(), "application/json")
@@ -2606,7 +2540,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if self.headers.get("Range"):
                     headers["Range"] = self.headers["Range"]
                 with open_creator_stream(url, headers) as (response, final_url):
-                    from tester_diagnostics import playback_response_headers
+                    from diagnostic_metrics import playback_response_headers
                     extra = playback_response_headers(response.headers)
                     if response.status >= 400:
                         return self.send(response.status, json.dumps({"error": f"Creator returned HTTP {response.status}."}).encode(), "application/json", extra)
@@ -2642,14 +2576,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ValueError("Invalid movie progress.")
                 movie_progress(json.loads(self.rfile.read(int(length))))
                 return self.send(200, b'{"ok":true}', "application/json")
-            if TESTER_BUILD and parsed.path.startswith("/api/tester-update/"):
-                from tester_updates import local_update
-                status, payload = local_update("POST", parsed.path, self.headers, self.server.server_port)
-                return self.send(status, json.dumps(payload).encode(), "application/json")
-            if TESTER_BUILD and parsed.path.startswith("/api/tester/"):
-                return self.handle_tester_post(parsed.path)
-            if TESTER_BUILD and parsed.path.startswith("/api/update/"):
-                return self.send(403, b'{"error":"Tester updates come from the private Developer link."}', "application/json")
             if parsed.path == "/api/update/start":
                 return self.send(202, json.dumps({"job_id": start_tv_update()}).encode(), "application/json")
             if parsed.path == "/api/update/launch":
@@ -2660,34 +2586,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as exc:
             self.send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
 
-    def handle_tester_post(self, path):
-        from tester_diagnostics import MAX_REPORT_BYTES, automatic_reports, post_report, report_address
-        if self.headers.get("X-ChannelForge-Tester") != "desktop" or self.headers.get_content_type() != "application/json":
-            return self.send(403, b'{"error":"Open Developer inside ChannelForge TV Tester."}', "application/json")
-        length = self.headers.get("Content-Length", "")
-        if not length.isascii() or not length.isdecimal() or len(length) > 4 or not 0 < int(length) <= MAX_REPORT_BYTES:
-            return self.send(400, b'{"error":"Invalid report size."}', "application/json")
-        data = json.loads(self.rfile.read(int(length)))
-        if path == "/api/tester/consent" and isinstance(data.get("agreed"), bool):
-            if data["agreed"]:
-                TESTER_CONSENT.parent.mkdir(parents=True, exist_ok=True)
-                TESTER_CONSENT.touch()
-            else:
-                TESTER_CONSENT.unlink(missing_ok=True)
-                automatic_reports(False)
-            return self.send(200, b'{"ok":true}', "application/json")
-        if path == "/api/tester/automatic" and TESTER_CONSENT.is_file() and isinstance(data.get("agreed"), bool):
-            return self.send(200, json.dumps({"enabled": automatic_reports(data["agreed"])}).encode(), "application/json")
-        if path != "/api/tester/report" or not TESTER_CONSENT.is_file():
-            return self.send(403, b'{"error":"Tester consent is required."}', "application/json")
-        target = json.loads(TESTER_CONFIG.read_text(encoding="utf-8")).get("report_url", "")
-        if not report_address(target):
-            return self.send(503, b'{"error":"Report sharing is unavailable for this build."}', "application/json")
-
-        receipt = post_report(target, data)
-        if receipt:
-            return self.send(201, json.dumps({"receipt": receipt}).encode(), "application/json")
-        return self.send(502, b'{"error":"Could not send the report. The testing link may have expired."}', "application/json")
 
     def send(self, status, body, content_type, extra_headers=None):
         try:
@@ -2729,11 +2627,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 class DesktopControls:
-    def __init__(self, port: int):
+    def __init__(self, port: int, *, fullscreen=False):
         self._port = port
         self._player = None
         self._lock = threading.Lock()
-        self._fullscreen = False
+        self._fullscreen = fullscreen
+        self.health = {}
+
+    def tv_fullscreen(self) -> bool:
+        return self._fullscreen
+
+    def remember_health(self, snapshot):
+        if isinstance(snapshot, dict) and len(snapshot) < 80:
+            self.health = snapshot
 
     def set_tv_fullscreen(self, active: bool) -> bool:
         with self._lock:
@@ -2771,35 +2677,36 @@ class DesktopControls:
 def main():
     global APP_WINDOW
     import webview
-    if sys.platform == "win32" and getattr(sys, "frozen", False) and not TESTER_BUILD:
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
         threading.Thread(target=clean_windows_update_cache, args=(VERSION,), daemon=True).start()
+    elif sys.platform.startswith("linux"):
+        clean_linux_update_cache(UPDATE_DIR, VERSION)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     url = f"http://127.0.0.1:{server.server_port}/"
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-tv-server")
     thread.start()
     minimum = (760, 480) if sys.platform.startswith("linux") else (1100, 700)
-    controls = DesktopControls(server.server_port)
-    APP_WINDOW = webview.create_window(APP_TITLE, url=url, js_api=controls, fullscreen=False,
+    fullscreen = sys.platform == "win32" or sys.platform.startswith("linux")
+    controls = DesktopControls(server.server_port, fullscreen=fullscreen)
+    from public_diagnostics import PublicDiagnostics
+    reports = PublicDiagnostics(UPDATE_DIR.parent, "tv", VERSION)
+    APP_WINDOW = webview.create_window(APP_TITLE, url=url, js_api=controls, fullscreen=fullscreen,
                                       width=1500, height=900, min_size=minimum, background_color="#080414")
-    if TESTER_BUILD:
-        from tester_updates import watch_restart
-
-        def close_for_restart():
-            try:
-                APP_WINDOW.evaluate_js("saveCurrentMovie()")
-            finally:
-                APP_WINDOW.destroy()
-
-        APP_WINDOW.events.loaded += lambda: watch_restart(close_for_restart)
+    failure = None
     try:
         if sys.platform == "win32":
             webview.start(debug=False, icon=str(resource("assets/channel-forge-tv.ico")))
         else:
-            start_webview(webview, application_id="channelforge-tv-tester" if TESTER_BUILD else "channelforge-tv",
+            start_webview(webview, application_id="channelforge-tv",
                           icon=resource("assets/channel-forge-tv-icon.png"))
+    except Exception as error:
+        failure = error
+        raise
     finally:
         controls._stop_player()
         server.shutdown()
+        if reports:
+            reports.submit(controls.health, failure=failure)
         server.server_close()
 
 

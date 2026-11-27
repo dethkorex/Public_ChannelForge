@@ -2,6 +2,11 @@ name: Build and release
 
 on:
   workflow_dispatch:
+    inputs:
+      qa_relay_url:
+        description: Scoped Tailscale Studio URL for an off-network IPv4 playback check
+        type: string
+        required: false
   push:
     tags: ["v*"]
 
@@ -20,7 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install "urllib3>=2.5,<3"
+      - run: python -m pip install "urllib3>=2.5,<3" "Pillow>=11,<13"
       - name: Verify release tag matches application versions
         if: startsWith(github.ref, 'refs/tags/')
         shell: python
@@ -75,9 +80,9 @@ jobs:
       - name: Install packaging tools
         timeout-minutes: 3
         run: |
-          if ! command -v zstd >/dev/null; then
+          if ! command -v zstd >/dev/null || ! /usr/bin/python3 -Es -c 'import PIL'; then
             sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
-            sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y zstd
+            sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y zstd python3-pil
           fi
       - name: Build Linux, Debian, Arch and Omarchy packages
         run: |
@@ -175,6 +180,18 @@ jobs:
         with:
           name: ChannelForge-TV-Roku
           path: tv-release/*
+
+  off-network-playback:
+    if: github.event_name == 'workflow_dispatch' && inputs.qa_relay_url != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check playback on the IPv4 Tailscale route
+        env:
+          CHANNELFORGE_QA_RELAY_URL: ${{ inputs.qa_relay_url }}
+        run: python3 scripts/smoke_public_relay.py "$CHANNELFORGE_QA_RELAY_URL"
 
   publish-release:
     if: startsWith(github.ref, 'refs/tags/')

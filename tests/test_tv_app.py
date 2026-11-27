@@ -39,7 +39,7 @@ class TvAppTests(unittest.TestCase):
     def test_public_build_loads_only_an_explicit_valid_studio_relay_pair(self):
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder) / "playback-relay.json"
-            with mock.patch.object(tv, "TESTER_BUILD", False), mock.patch.object(tv, "resource", return_value=config):
+            with mock.patch.object(tv, "resource", return_value=config):
                 self.assertEqual(tv.configured_playback_relay(), "")
                 route = "studio.example=relay.example"
                 config.write_text(json.dumps({"relay_route": route}), encoding="utf-8")
@@ -108,6 +108,17 @@ class TvAppTests(unittest.TestCase):
                     linux_runtime.apply_linux_update(package, expected, Path("/opt/public-channelforge"))
             install.assert_not_called()
             self.assertIn(expected, linux_runtime.linux_install_command(package, expected_sha256=expected))
+
+    def test_linux_update_cleanup_keeps_new_packages_and_unrelated_data(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            expired = {"ChannelForge-4.5.1-linux-x64.tar.gz", "Public_ChannelForge-4.5.5-linux-all.deb",
+                       "public-channelforge-4.5.5alpha.2-1-any.pkg.tar.zst"}
+            keep = {"ChannelForge-4.6.0-linux-x64.tar.gz", "personal-backup.deb", "favorites.json"}
+            for name in expired | keep:
+                (directory / name).touch()
+            linux_runtime.clean_linux_update_cache(directory, "4.5.5")
+            self.assertEqual({item.name for item in directory.iterdir()}, keep)
 
     def test_omarchy_package_uses_system_package_manager_and_polkit(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -338,12 +349,13 @@ assert.equal(retries.at(-1), true);
         self.assertIn("directoryScan=refreshDirectory()", tv.HTML)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise playback diagnostics")
-    def test_tester_snapshot_works_without_public_dialog_and_ignores_cached_studio_timings(self):
+    def test_playback_snapshot_works_without_dialog_and_ignores_cached_studio_timings(self):
         setup = r'''
 const assert = require('node:assert/strict');
 const video = Object.assign(new EventTarget(), {buffered:[], currentTime:3, readyState:4});
 const events = new EventTarget();
 const addEventListener = events.addEventListener.bind(events);
+const setInterval = () => null;
 const document = {getElementById:()=>null, querySelector:id=>id==='#player'?video:null,
     documentElement:{hasAttribute:()=>true}};
 const window = globalThis, activeStreamUrl = 'https://private.example/media';
@@ -357,7 +369,7 @@ ChannelForgePlaybackTransfer('manifest',500,200,headers({'X-ChannelForge-Relay':
     'X-ChannelForge-Upstream-Header-Time':'0.342','X-ChannelForge-Studio-Response-Ms':'200'}));
 ChannelForgePlaybackTransfer('segment',60,800,headers({'X-ChannelForge-Cache':'HIT',
     'X-ChannelForge-Studio-Response-Ms':'9000'}));
-const report = ChannelForgeTesterSnapshot();
+const report = ChannelForgePlaybackSnapshot();
 assert.equal(report.delivery_path,'managed-vps');
 assert.equal(report.segment_loads,1);
 assert.equal(report.relay_cache_hits,1);

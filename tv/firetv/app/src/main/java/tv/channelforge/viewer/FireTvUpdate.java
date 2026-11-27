@@ -28,7 +28,6 @@ import javax.net.ssl.HttpsURLConnection;
 
 final class FireTvUpdate {
     private static final String APK = "ChannelForgeTV-FireTV.apk";
-    private static final String TESTER_APK = BuildConfig.TESTER_APK_NAME;
     private static final String CHECKSUM = "SHA256SUMS-TV.txt";
     private static final String RELEASE_ASSETS =
             "https://github.com/dethkorex/Public_ChannelForge/releases/download/";
@@ -39,19 +38,13 @@ final class FireTvUpdate {
     private static final int MAX_APK_BYTES = 100 * 1024 * 1024;
 
     final String version;
-    final int testerRevision;
     private final URL apkUrl;
     private final byte[] checksum;
 
     private FireTvUpdate(String version, URL apkUrl, byte[] checksum) {
-        this(version, apkUrl, checksum, 0);
-    }
-
-    private FireTvUpdate(String version, URL apkUrl, byte[] checksum, int testerRevision) {
         this.version = version;
         this.apkUrl = apkUrl;
         this.checksum = checksum;
-        this.testerRevision = testerRevision;
     }
 
     interface DownloadProgress {
@@ -59,7 +52,6 @@ final class FireTvUpdate {
     }
 
     static FireTvUpdate latest(StringBuilder notes) throws Exception {
-        if (BuildConfig.TESTER_BUILD) return latestTester(notes);
         JSONObject release = latestRelease();
         String tag = release.getString("tag_name");
         String version = tag.substring(1);
@@ -91,41 +83,6 @@ final class FireTvUpdate {
             expected[i] = (byte) Integer.parseInt(digest.substring(start, start + 2), 16);
         }
         return new FireTvUpdate(version, apkUrl, expected);
-    }
-
-    private static String privateBase() {
-        String address = BuildConfig.TESTER_REPORT_URL;
-        return BuildConfig.TESTER_BUILD && address.endsWith("/report")
-                ? address.substring(0, address.length() - 7) : "";
-    }
-
-    private static FireTvUpdate latestTester(StringBuilder notes) throws Exception {
-        String base = privateBase();
-        if (base.isEmpty()) throw new IOException("Missing private Tester update address.");
-        JSONObject channel = new JSONObject(readText(new URL(base + "/manifest.json?manual=1"), 8192));
-        JSONObject release = channel.optJSONObject(TESTER_APK);
-        if (release == null || release.optInt("revision") <= BuildConfig.VERSION_CODE) return null;
-        String version = release.optString("version");
-        String digest = release.optString("sha256");
-        int size = release.optInt("bytes");
-        if (!VERSION.matcher(version).matches() || !SHA256.matcher(digest).matches()
-                || size <= 0 || size > MAX_APK_BYTES) throw new IOException("Invalid private Tester update.");
-        byte[] expected = new byte[32];
-        for (int i = 0; i < expected.length; i++) {
-            expected[i] = (byte) Integer.parseInt(digest.substring(i * 2, i * 2 + 2), 16);
-        }
-        JSONArray changes = release.optJSONArray("release_notes");
-        if (changes != null) {
-            for (int i = 0; i < Math.min(changes.length(), 12); i++) {
-                Object entry = changes.opt(i);
-                if (entry instanceof String && !((String) entry).trim().isEmpty()) {
-                    String line = ((String) entry).trim();
-                    if (notes.length() > 0) notes.append('\n');
-                    notes.append("• ").append(line, 0, Math.min(line.length(), 240));
-                }
-            }
-        }
-        return new FireTvUpdate(version, new URL(base + "/" + TESTER_APK), expected, release.getInt("revision"));
     }
 
     private static JSONObject latestRelease() throws Exception {
@@ -311,12 +268,9 @@ final class FireTvUpdate {
     private static HttpsURLConnection open(URL url) throws IOException {
         for (int redirects = 0; redirects <= 5; redirects++) {
             String host = url.getHost();
-            String base = privateBase();
-            boolean testerAsset = !base.isEmpty() && (url.toString().equals(base + "/manifest.json?manual=1")
-                    || url.toString().equals(base + "/" + TESTER_APK));
             if (!"https".equals(url.getProtocol()) || url.getUserInfo() != null
                     || (url.getPort() != -1 && url.getPort() != 443)
-                    || !(testerAsset || "api.github.com".equals(host) || "github.com".equals(host)
+                    || !("api.github.com".equals(host) || "github.com".equals(host)
                     || "release-assets.githubusercontent.com".equals(host)
                     || "objects.githubusercontent.com".equals(host))) {
                 throw new IOException("The update download redirected away from GitHub.");
@@ -330,7 +284,6 @@ final class FireTvUpdate {
                 connection.setRequestProperty("Accept-Encoding", "identity");
                 int status = connection.getResponseCode();
                 if (status == 200) return connection;
-                if (testerAsset) throw new IOException("Private update server returned HTTP " + status + ".");
                 if (status != 301 && status != 302 && status != 303 && status != 307 && status != 308) {
                     throw new IOException("GitHub returned HTTP " + status + ".");
                 }

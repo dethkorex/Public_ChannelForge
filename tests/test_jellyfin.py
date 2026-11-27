@@ -156,7 +156,8 @@ class JellyfinTests(unittest.TestCase):
             self.assertEqual(len(media[jellyfin_sections[0]]), 2)
             local = [items[0] for section, items in media.items() if section.startswith("local:")]
             channel = request(creator + "/api/channels", "POST", {"name": "Mixed", "number": "81",
-                              "section": jellyfin_sections[0], "items": [first, *local, second]})["channel"]
+                              "section": jellyfin_sections[0], "items": [first, *local, second],
+                              "branding": {"enabled": False}})["channel"]
             self.assertEqual([item["source"] for item in channel["items"]], ["jellyfin", "local", "local", "jellyfin"])
             catalog = request(public + "/api/public/channels?guide=extended")
             program = next(row for row in catalog["channels"][0]["programs"] if row["backdrop_url"])

@@ -11,7 +11,10 @@ sub Main(args as dynamic)
   while true
     message = wait(0, port)
     if type(message) = "roSGScreenEvent"
-      if message.IsScreenClosed() then return
+      if message.IsScreenClosed()
+        sendAlphaShutdown(scene.alphaHealth)
+        return
+      end if
     else if type(message) = "roInputEvent"
       if message.IsInput()
         info = message.GetInfo()
@@ -21,4 +24,24 @@ sub Main(args as dynamic)
       end if
     end if
   end while
+end sub
+
+sub sendAlphaShutdown(snapshot as dynamic)
+  app = CreateObject("roAppInfo")
+  report = {platform:"roku", component:"tv", app:app.GetValue("channelforge_version"), report_type:"exit"}
+  if type(snapshot) = "roAssociativeArray"
+    for each field in ["kind", "delivery_path", "stalls", "stall_ms", "first_progress_ms"]
+      if snapshot[field] <> invalid then report[field] = snapshot[field]
+    end for
+  end if
+  transfer = CreateObject("roUrlTransfer")
+  transfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
+  transfer.SetUrl("https://channelforge-directory.fresh-anorak.workers.dev/v1/diagnostics/exit")
+  transfer.AddHeader("Content-Type", "application/json")
+  port = CreateObject("roMessagePort")
+  transfer.SetMessagePort(port)
+  if transfer.AsyncPostFromString(FormatJson(report))
+    result = wait(1600, port)
+    if result = invalid then transfer.AsyncCancel()
+  end if
 end sub

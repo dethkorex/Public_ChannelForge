@@ -67,7 +67,7 @@ For relay redundancy, add a `backup` object with the same fields inside `communi
 
 ### Manual connection
 
-For manual operation, use the existing custom HTTPS origin without a matching `community-relay.json`. Start the read-only listener with `--public-media-port 18790` in Tester or use 8790 for stable Studio. Run the forward using your verified relay host key and a process manager.
+For manual operation, use the existing custom HTTPS origin without a matching `community-relay.json`. Start the read-only listener on Studio's default port 8790. Run the forward using your verified relay host key and a process manager.
 
 ```sh
 ssh -NT -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=2 \
@@ -116,7 +116,7 @@ If the VPS fails, republish the existing Funnel HTTPS address from **Sources & s
 
 For a temporary VPS pilot, add `--https-origin relay.example.org=studio.example.org` to the NGINX configuration command. The relay validates the existing upstream's HTTPS certificate, caches immutable segments, and rewrites its guide, playlist, and catalog URLs to the relay hostname. If the upstream is a Funnel, playback through either hostname still depends on that Funnel. Leave the registered Studio address in the directory so ordinary clients and IPv4-only viewers can reach the Studio.
 
-The Android Tester pilot takes `-PchannelForgeRelayPilot=studio.example.org=relay.example.org` at build time. It keeps guide discovery on the registered address and tries the relay for live and movie playback. If the relay fails, the player restarts playback on the registered address and retains the movie position. Omit the build property for other Studios and for normal releases. Use the pilot only after checking that both HTTPS endpoints return the same `/api/public/origin` instance and that live and movie media load through the relay.
+Guide discovery uses the registered Studio address. With an explicit relay override, the player tries the configured relay for live TV and movies. If it fails, the player retries the registered address and retains the movie position. Confirm both HTTPS endpoints return the same `/api/public/origin` instance before configuring an override.
 
 To exercise this route in a public-channel candidate, pass `-PchannelForgeRelayRoute=studio.example.org=relay.example.org` for Android. In an isolated desktop packaging checkout, add `assets/playback-relay.json` with `{"relay_route":"studio.example.org=relay.example.org"}`. Only the exact registered Studio host is eligible for this override. Leave the build option and file unset if there is no verified pair to include.
 

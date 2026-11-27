@@ -12,14 +12,38 @@ import tempfile
 from collections.abc import Collection
 from pathlib import Path
 
-from release_metadata import RELEASE_VERSION
+from release_metadata import RELEASE_VERSION, version_tuple
 
 
 LINUX_APP_FILES = (
     "Public_ChannelForge.py", "ChannelForge_TV.py", "windows_distribution.py", "linux_runtime.py", "release_metadata.py",
+    "studio_branding.py", "relay_child.py", "diagnostic_metrics.py", "public_diagnostics.py",
     "PLUGIN_DEVELOPMENT.md", "web", "plugins", "assets", "install.sh", "uninstall.sh",
 )
 LINUX_OBSOLETE_APP_FILES = ("native_vlc.py",)
+
+
+def clean_linux_update_cache(directory: Path, installed_version: str) -> None:
+    if not directory.is_dir() or directory.is_symlink():
+        return
+    installed = version_tuple(installed_version)
+    if not installed:
+        return
+    try:
+        packages = list(directory.iterdir())
+    except OSError:
+        return
+    for package in packages:
+        match = re.fullmatch(rf"(?:ChannelForge|Public_ChannelForge)-({RELEASE_VERSION})-linux-(?:x64\.tar\.gz|all\.deb)", package.name)
+        if not match:
+            match = re.fullmatch(r"public-channelforge-(\d+\.\d+\.\d+(?:(?:alpha|beta|rc)\.\d+)?)-1-any\.pkg\.tar\.zst", package.name)
+        if match:
+            version = re.sub(r"(?<=\d)(alpha|beta|rc)", r"-\1", match[1])
+            if version_tuple(version) <= installed:
+                try:
+                    package.unlink(missing_ok=True)
+                except OSError:
+                    continue
 
 
 def start_webview(webview, *, application_id: str, icon: Path) -> None:

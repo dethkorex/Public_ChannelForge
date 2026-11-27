@@ -45,16 +45,11 @@ sub init()
   m.liveRetryTimer = m.top.findNode("liveRetryTimer")
   m.liveRetryTimer.observeField("fire", "resumePlayback")
   appInfo = CreateObject("roAppInfo")
-  m.relayPilot = appInfo.GetValue("channelforge_relay_pilot")
+  m.relayRoute = appInfo.GetValue("channelforge_relay_route")
   installedVersion = appInfo.GetValue("channelforge_version")
   if installedVersion = "" then installedVersion = appInfo.GetVersion()
-  if appInfo.GetValue("channelforge_tester_portal") <> ""
-    m.testerVersionLabel = alphaVersionLabel(installedVersion)
-    m.updateButtonLabel = "SYSTEM  •  " + m.testerVersionLabel
-  else
-    if Right(installedVersion, 2) = ".0" then installedVersion = Left(installedVersion, Len(installedVersion) - 2)
-    m.updateButtonLabel = "Alpha Version " + installedVersion
-  end if
+  if Right(installedVersion, 2) = ".0" then installedVersion = Left(installedVersion, Len(installedVersion) - 2)
+  m.updateButtonLabel = "Alpha Version " + installedVersion
   m.updates.text = m.updateButtonLabel
   m.progressTimer = m.top.findNode("progressTimer")
   m.progressTimer.observeField("fire", "checkPlaybackProgress")
@@ -223,7 +218,6 @@ sub showSystem()
   panel = CreateObject("roSGNode", "Dialog")
   panel.title = "System"
   diagnostics = "Playback diagnostics"
-  if m.testerVersionLabel <> invalid then diagnostics = "Developer"
   panel.buttons = ["Check for Update", diagnostics, "Pair a Studio", "Close", "Playback quality"]
   panel.observeField("buttonSelected", "systemSelected")
   m.top.dialog = panel
@@ -318,40 +312,6 @@ sub showDiagnostics()
     if m.diagnosticFirst >= 0 then panel.message += Chr(10) + "First playback progress " + m.diagnosticFirst.ToStr() + " ms"
   end if
   panel.buttons = ["Close"]
-  appInfo = CreateObject("roAppInfo")
-  if appInfo.GetValue("channelforge_tester_portal") <> ""
-    retries = 0
-    if m.liveItem <> invalid and m.liveRetries <> invalid then retries = m.liveRetries
-    if m.activeMovie <> invalid and m.movieRetries <> invalid then retries = m.movieRetries
-    report = {
-      platform: "roku", app: appInfo.GetValue("channelforge_version"), engine: "Roku SceneGraph",
-      state: m.video.state, position_seconds: m.video.position, retries: retries,
-      build_revision: Val(appInfo.GetValue("channelforge_tester_revision"))
-    }
-    if m.diagnosticClock <> invalid
-      report.trace_id = m.viewerLease
-      report.kind = m.diagnosticKind
-      report.delivery_path = m.diagnosticPath
-      report.stalls = m.diagnosticStalls
-      report.stall_ms = diagnosticStallTime()
-      report.first_progress_ms = m.diagnosticFirst
-      report.position_seconds = m.diagnosticPosition
-    end if
-    if m.video.errorCode > 0 then report.playerErrorCode = m.video.errorCode
-    if m.liveItem <> invalid then report.kind = "live"
-    if m.activeMovie <> invalid then report.kind = "movie"
-    if m.liveItem <> invalid or m.activeMovie <> invalid
-      report.delivery_route = "registered-route"
-      if m.skipPreferredRelay = true then report.delivery_route = "registered-fallback"
-      if m.usingPreferredRelay = true then report.delivery_route = "preferred-relay"
-    end if
-    m.rokuPlaybackReport = report
-    panel.message = panel.message + Chr(10) + "Position: " + report.position_seconds.ToStr() + " s"
-    if report.stalls <> invalid then panel.message = panel.message + Chr(10) + "Buffer events: " + report.stalls.ToStr()
-    if report.playerErrorCode <> invalid then panel.message = panel.message + Chr(10) + "Error code: " + report.playerErrorCode.ToStr()
-    panel.message = panel.message + Chr(10) + Chr(10) + "Reports include the Tester build and playback metrics. Accounts, titles and addresses are excluded."
-    panel.buttons = ["Close", "Send report"]
-  end if
   panel.observeField("buttonSelected", "dismissDiagnostics")
   m.top.dialog = panel
 end sub
@@ -380,23 +340,8 @@ sub finishDiagnosticStall()
   m.diagnosticBuffer = invalid
 end sub
 sub dismissDiagnostics()
-  selected = m.top.dialog.buttonSelected
   m.top.dialog = invalid
   focusSystemButton()
-  if selected <> 1 or m.rokuPlaybackReport = invalid then return
-  if m.reportTask <> invalid and m.reportTask.state = "run" then return
-  m.reportTask = CreateObject("roSGNode", "ReportTask")
-  m.reportTask.report = m.rokuPlaybackReport
-  m.reportTask.observeField("result", "diagnosticReportSent")
-  m.reportTask.control = "run"
-end sub
-sub diagnosticReportSent()
-  dialog = CreateObject("roSGNode", "Dialog")
-  dialog.title = "Developer"
-  dialog.message = m.reportTask.result
-  dialog.buttons = ["Close"]
-  dialog.observeField("buttonSelected", "dismissDiagnostics")
-  m.top.dialog = dialog
 end sub
 function savedMovies() as object
   registry = CreateObject("roRegistrySection", "ChannelForge")
@@ -1013,7 +958,6 @@ sub showUpdateDialog(releaseTag as string, notes as string, status as string)
   dialog.title = "What's new in " + releaseTag
   if releaseTag = ""
     dialog.title = "Roku updates"
-    if m.testerVersionLabel <> invalid then dialog.title = "Tester updates"
   end if
   if status <> "" and notes <> "" then status = status + Chr(10) + Chr(10)
   dialog.message = status + notes
@@ -1124,6 +1068,10 @@ sub clearPlaybackDeadline()
 end sub
 sub checkPlaybackProgress()
   if m.guide.visible or m.ejectingMovie or m.lastProgress = invalid then return
+  if m.diagnosticClock <> invalid
+    m.top.alphaHealth = {kind:m.diagnosticKind, delivery_path:m.diagnosticPath, stalls:m.diagnosticStalls,
+      stall_ms:diagnosticStallTime(), first_progress_ms:m.diagnosticFirst}
+  end if
   if m.lastProgress.TotalSeconds() >= 20
     playbackTimedOut()
     return
@@ -1440,8 +1388,8 @@ end sub
 function playbackContent(item as object, recovering as boolean, live as boolean) as object
   address = item.url
   m.usingPreferredRelay = false
-  if m.skipPreferredRelay <> true and m.relayPilot <> invalid
-    alternate = preferredRelayUrl(item.url, m.relayPilot)
+  if m.skipPreferredRelay <> true and m.relayRoute <> invalid
+    alternate = preferredRelayUrl(item.url, m.relayRoute)
     if alternate <> item.url
       address = alternate
       m.usingPreferredRelay = true

@@ -9,7 +9,7 @@ import statistics
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tester_diagnostics import MAX_REPORT_BYTES, clean_report
+from diagnostic_metrics import MAX_REPORT_BYTES, clean_report
 
 
 def summarize(root: Path, since: datetime) -> list[dict]:

@@ -21,6 +21,44 @@ CACHED_SETUP = re.compile(rf"ChannelForge_Setup-v({RELEASE_VERSION})\.exe", re.I
 OLD_TV_DOWNLOAD = re.compile(rf"ChannelForge_TV-(?:Setup|Portable)-v({RELEASE_VERSION})\.exe", re.IGNORECASE)
 
 
+def relay_process_job():
+    """A non-inherited handle makes Windows close relay children with Studio."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Limits(ctypes.Structure):
+        _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
+                    ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
+                    ("max_working_set", ctypes.c_size_t), ("active_limit", wintypes.DWORD),
+                    ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                    ("scheduling", wintypes.DWORD)]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [("basic", Limits), ("io", ctypes.c_uint64 * 6), ("memory", ctypes.c_size_t * 4)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+    limits = ExtendedLimits()
+    limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+        error = ctypes.WinError(ctypes.get_last_error())
+        kernel.CloseHandle(job)
+        raise error
+
+    def attach(process):
+        if not kernel.AssignProcessToJobObject(job, int(process._handle)) and process.poll() is None:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    return attach
+
+
 def windows_data() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", Path.home()))
 

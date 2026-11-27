@@ -434,6 +434,9 @@ async function prepareRollback(env) {
   return true;
 }
 
+// Operational reports use a separate object name for each platform.
+import { shutdownReport } from "./diagnostics.js";
+
 export default {
   async fetch(request, env, ctx) {
     try {
@@ -445,6 +448,7 @@ export default {
         "access-control-allow-headers": "authorization,content-type",
       }});
       if (method === "GET" && pathname === "/health") return json({ok: true, service: "ChannelForge Creator Directory"});
+      if (method === "POST" && pathname === "/v1/diagnostics/exit") return await shutdownReport(request, env);
       if (method === "GET" && pathname === "/fire") {
         return Response.redirect("https://github.com/dethkorex/Public_ChannelForge/releases/latest/download/ChannelForgeTV-FireTV.apk", 302);
       }

@@ -5,12 +5,7 @@
     <uses-permission android:name="${applicationId}.permission.UPDATE_RESULT" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
-    <application android:name=".TesterApplication" android:theme="@style/AppTheme" android:label="${channelForgeLabel}" android:icon="${channelForgeIcon}" android:roundIcon="${channelForgeIcon}" android:banner="${channelForgeBanner}" android:usesCleartextTraffic="false">
-        <receiver android:name=".TesterUpdateReceiver" android:exported="false" android:enabled="${channelForgeTester}">
-            <intent-filter>
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
+    <application android:name=".ViewerApplication" android:theme="@style/AppTheme" android:label="${channelForgeLabel}" android:icon="${channelForgeIcon}" android:roundIcon="${channelForgeIcon}" android:banner="${channelForgeBanner}" android:usesCleartextTraffic="false">
         <activity android:name=".MainActivity" android:screenOrientation="${channelForgeOrientation}" android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

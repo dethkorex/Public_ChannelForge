@@ -37,8 +37,6 @@ sub load()
   end if
   m.top.rows = rows
   m.top.stale = not complete
-  appInfo = CreateObject("roAppInfo")
-  if appInfo.GetValue("channelforge_tester_portal") <> "" then rows = filterUnreachableLegacyStudios(rows)
   root = CreateObject("roSGNode", "ContentNode")
   for each creator in rows
     if creator.state <> "offline" and not (creator.state = invalid and creator.online = false)
@@ -56,60 +54,6 @@ sub load()
   end for
   m.top.content = root
 end sub
-
-function filterUnreachableLegacyStudios(rows as object) as object
-  messages = CreateObject("roMessagePort")
-  pending = {}
-  reachable = {}
-  for each creator in rows
-    if creator.state <> invalid and creator.state <> ""
-      reachable[creator.playlist_url] = true
-    else if creator.online <> false
-      status = creator.status_url
-      isGuide = status <> invalid and status <> ""
-      address = creator.playlist_url
-      if isGuide then address = status
-      if address <> invalid and address <> ""
-        transfer = CreateObject("roUrlTransfer")
-        transfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
-        transfer.InitClientCertificates()
-        transfer.EnableEncodings(true)
-        transfer.SetUrl(address)
-        transfer.SetMessagePort(messages)
-        if transfer.AsyncGetToString() then pending[transfer.GetIdentity().ToStr()] = {creator:creator, transfer:transfer, guide:isGuide}
-      end if
-    end if
-  end for
-  timer = CreateObject("roTimespan")
-  while pending.Count() > 0
-    remaining = 5500 - timer.TotalMilliseconds()
-    if remaining <= 0 then exit while
-    event = wait(remaining, messages)
-    if event = invalid then exit while
-    key = event.GetSourceIdentity().ToStr()
-    probe = pending[key]
-    if probe <> invalid
-      if event.GetResponseCode() = 200
-        body = event.GetString()
-        if probe.guide
-          content = ParseJson(body)
-          if type(content) = "roAssociativeArray" and type(content.channels) = "roArray" then reachable[probe.creator.playlist_url] = true
-        else if Left(body, 7) = "#EXTM3U"
-          reachable[probe.creator.playlist_url] = true
-        end if
-      end if
-      pending.Delete(key)
-    end if
-  end while
-  for each key in pending
-    pending[key].transfer.AsyncCancel()
-  end for
-  visible = []
-  for each creator in rows
-    if reachable[creator.playlist_url] = true then visible.Push(creator)
-  end for
-  return visible
-end function
 
 function loadCatalog(address as string) as object
   if address = "" then return invalid

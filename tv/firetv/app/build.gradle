@@ -11,57 +11,28 @@ def directoryUrl = providers.gradleProperty('channelForgeCatalogUrl')
 if (!(directoryUrl ==~ /https:\/\/[A-Za-z0-9.:-]+\/v1\/catalog/)) {
     throw new GradleException('channelForgeCatalogUrl must be an HTTPS /v1/catalog URL')
 }
-def tester = providers.gradleProperty('channelForgeTester').map { it == 'true' }.getOrElse(false)
-def testerDevice = providers.gradleProperty('channelForgeTesterDevice').getOrElse('firetv')
-def testerDevices = [
-    firetv: [id: 'tv.channelforge.viewer.tester', file: 'ChannelForgeTV-Tester-FireTV.apk'],
-    androidtv: [id: 'tv.channelforge.viewer.androidtv.tester', file: 'ChannelForgeTV-Tester-AndroidTV.apk'],
-    phone: [id: 'tv.channelforge.viewer.android.tester', file: 'ChannelForgeTV-Tester-Android.apk']
-]
-if (tester && !testerDevices.containsKey(testerDevice)) throw new GradleException('Unknown ChannelForge Tester device')
-def testerTarget = testerDevices[tester ? testerDevice : 'firetv']
-def testerRelease = new groovy.json.JsonSlurper().parse(rootProject.file('../../TESTER_RELEASES.json'))
-def testerVersion = providers.gradleProperty('channelForgeTesterVersion').getOrElse(testerRelease.version)
-if (tester && !testerRelease.releases.containsKey(testerVersion)) throw new GradleException('Unknown ChannelForge Tester version')
-def testerRevision = providers.gradleProperty('channelForgeTesterRevision').map { it.toInteger() }.getOrElse(testerRelease.revisions.android)
-def releaseNotes = testerRelease.releases[tester ? testerVersion : testerRelease.version]
-def testerNotes = ((releaseNotes.common ?: []) + (releaseNotes.android ?: [])).collect { '• ' + it }.join('\n')
 def relayRoute = providers.gradleProperty('channelForgeRelayRoute').getOrElse('')
-if (tester) relayRoute = providers.gradleProperty('channelForgeRelayPilot').getOrElse(relayRoute)
 if (relayRoute && !(relayRoute ==~ /[a-z0-9-]+(?:\.[a-z0-9-]+)+=[a-z0-9-]+(?:\.[a-z0-9-]+)+/)) {
     throw new GradleException('Expected a relay route in FALLBACK_HOST=RELAY_HOST format')
 }
-def reportUrl = providers.environmentVariable('CHANNELFORGE_TESTER_REPORT_URL').getOrElse('')
-if (tester && reportUrl && !(reportUrl ==~ /https:\/\/[A-Za-z0-9.:-]+\/[A-Za-z0-9_-]{32,64}\/report/)) {
-    throw new GradleException('CHANNELFORGE_TESTER_REPORT_URL must be a private HTTPS report URL')
-}
-
 android {
     namespace 'tv.channelforge.viewer'
     compileSdk 35
     defaultConfig {
         applicationId 'tv.channelforge.viewer'
-        if (tester) applicationId = testerTarget.id
         manifestPlaceholders = [
-            channelForgeLabel: tester ? 'ChannelForge TV Tester' : 'ChannelForge TV',
-            channelForgeTester: tester.toString(),
-            channelForgeOrientation: tester && testerDevice == 'phone' ? 'fullUser' : 'landscape',
-            channelForgeIcon: tester ? '@drawable/channel_forge_tv_tester_icon' : '@mipmap/channel_forge_tv_icon',
-            channelForgeBanner: tester ? '@drawable/channel_forge_tv_tester_banner' : '@drawable/channel_forge_tv_banner'
+            channelForgeLabel: 'ChannelForge TV',
+            channelForgeOrientation: 'landscape',
+            channelForgeIcon: '@mipmap/channel_forge_tv_icon',
+            channelForgeBanner: '@drawable/channel_forge_tv_banner'
         ]
         minSdk 21
         targetSdk 35
-        versionCode tester ? testerRevision : 392
-        versionName '4.5.1'
-        if (tester) versionName testerVersion
+        versionCode 396
+        versionName '4.5.5'
         buildConfigField 'String', 'GITHUB_RELEASES_API', '"https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"'
         buildConfigField 'String', 'DIRECTORY_URL', '"' + directoryUrl + '"'
         buildConfigField 'String', 'DIRECTORY_FALLBACK_URL', '"https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"'
-        buildConfigField 'boolean', 'TESTER_BUILD', tester.toString()
-        buildConfigField 'boolean', 'PHONE_TESTER', (tester && testerDevice == 'phone').toString()
-        buildConfigField 'String', 'TESTER_RELEASE_NOTES', groovy.json.JsonOutput.toJson(tester ? testerNotes : '')
-        buildConfigField 'String', 'TESTER_APK_NAME', '"' + testerTarget.file + '"'
-        buildConfigField 'String', 'TESTER_REPORT_URL', '"' + (tester ? reportUrl : '') + '"'
         buildConfigField 'String', 'PLAYBACK_RELAY_ROUTE', '"' + relayRoute + '"'
     }
     buildFeatures { buildConfig true }

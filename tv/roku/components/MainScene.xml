@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <component name="MainScene" extends="Scene">
-  <interface><field id="deepLinkRequest" type="assocarray" alwaysNotify="true"/></interface>
+  <interface>
+    <field id="deepLinkRequest" type="assocarray" alwaysNotify="true"/>
+    <field id="alphaHealth" type="assocarray"/>
+  </interface>
   <script type="text/brightscript" uri="MainScene.brs"/>
   <script type="text/brightscript" uri="CatalogState.brs"/>
   <script type="text/brightscript" uri="MovieBookmarks.brs"/>

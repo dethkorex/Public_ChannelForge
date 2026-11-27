@@ -1,4 +1,4 @@
-// Keep playback measurements in memory. Sharing requires an explicit user action.
+// Manual reports are local. Public Alpha shutdown reports carry only allowlisted health metrics.
 (() => {
     const creator = Boolean(document.getElementById('tv-player'));
     const video = document.querySelector(creator ? '#tv-player' : '#player');
@@ -58,21 +58,28 @@
             transport.stalls++;
         });
         for (const event of ['pause','ended','seeking']) video.addEventListener(event, endStall);
-        addEventListener('cf-tester-stream-error', ({detail:{kind,status}}) => {
+        addEventListener('cf-playback-stream-error', ({detail:{kind,status}}) => {
             if (!transport) return;
             if (kind === 'segment') transport.segment_errors++;
             if (kind === 'manifest') transport.manifest_errors++;
             if (status >= 400 && status <= 599) Object.assign(transport, {httpError:status, http_resource:kind});
         });
-        addEventListener('cf-tester-stop', () => {
+        addEventListener('cf-playback-stop', () => {
             if (!activeMedia || !transport) return;
             endStall();
             lastPlayback = currentPlayback();
         });
-        if (document.documentElement.hasAttribute('data-tester')) {
-            window.ChannelForgeTesterSnapshot = () => ({...currentPlayback(), studios:allCreators.length,
-                channels:liveChannels.length, reconnecting:liveChannels.filter(channel => channel.state === 'reconnecting').length});
-        }
+        window.ChannelForgePlaybackSnapshot = currentPlayback;
+        const rememberHealth = () => {
+            const api = window.pywebview?.api;
+            if (!api?.remember_health) return;
+            const sample = !activeMedia && lastPlayback ? lastPlayback : currentPlayback();
+            api.remember_health({...sample, width:sample.resolution?.[0]||0, height:sample.resolution?.[1]||0}).catch(()=>{});
+        };
+        addEventListener('pywebviewready', rememberHealth);
+        addEventListener('pagehide', rememberHealth);
+        video.addEventListener('playing', rememberHealth);
+        setInterval(rememberHealth, 5000);
     }
     const container = document.querySelector(creator ? '#system .system-links' : '#playback-troubleshooting-controls');
     if (!container) return;

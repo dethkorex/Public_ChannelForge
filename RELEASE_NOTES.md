@@ -1,7 +1,9 @@
-# ChannelForge Alpha 4.5.1
+# ChannelForge Alpha 4.5.5
 
-- The Live TV Guide shows up to eight programmes per channel with start times in your device’s time zone. Scroll across the schedule on smaller screens.
-- Press OK during live playback on Fire TV or Android TV to open Quality, Channel Up, Channel Down, and Live TV Guide. Roku provides the same actions in a remote menu.
-- Switch between HQ for up to 720p, Balanced for up to 480p at 1 Mbps, and Data Saver for up to 270p at 0.4 Mbps when the source has a matching stream.
-- Android shares simultaneous artwork downloads and caches the results to reduce repeated loading on Home and in Rewind Cinema.
-- Studio Activity shows current live programmes, viewer sessions, and Studio upload. Active Movies lists titles with current playback activity, their viewer counts, and whether Studio is encoding or serving cached video.
+- Coming Up Next starts with an 18-second card on new channels and upgrades existing lineups that have no card settings. Studio keeps the current programme in place during migration. The card shows the next title, episode details, and library poster while Studio gets the next video ready.
+- The Branding workspace includes Clean Studio, Rewind, and Midnight artwork, preview controls, and selectable ambience. Creators can also upload clips up to 25 seconds.
+- Maximum customization lets you order individual episodes and movies together. Holiday filters use titles, summaries, and library tags to find relevant programmes.
+- The guide follows a rolling 12-hour schedule. ChannelForge TV opens fullscreen on Windows and Linux, with F11 available to switch back to a window.
+- Studio cleans up the relay process it started when it exits or restarts for updates. Desktop update cleanup preserves lineups and library settings.
+- Alpha exit reports contain basic performance measurements and error codes. They exclude media titles, credentials, library paths, and full stream URLs.
+- Windows, Linux, Fire TV, and Android use the public Alpha release channel. Roku remains available for developer sideloading.

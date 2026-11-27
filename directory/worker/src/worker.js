@@ -39,6 +39,28 @@ export class StudioIndex extends DurableObject {
     }
   }
 
+  async recordAlphaHealth(report) {
+    const now = Math.floor(Date.now() / 1000), hour = now - now % 3600;
+    const accepted = this.storage.transactionSync(() => {
+      this.sql.exec("CREATE TABLE IF NOT EXISTS alpha_health (id TEXT PRIMARY KEY, received INTEGER NOT NULL, payload TEXT NOT NULL)");
+      this.sql.exec("CREATE INDEX IF NOT EXISTS alpha_health_received ON alpha_health(received)");
+      this.sql.exec("DELETE FROM alpha_health WHERE received < ?", now - 14 * 86400);
+      const {count} = this.sql.exec("SELECT COUNT(*) AS count FROM alpha_health WHERE received >= ?", hour).one();
+      if (count >= 400) return false;
+      this.sql.exec("INSERT INTO alpha_health VALUES (?,?,?)", crypto.randomUUID(), now, JSON.stringify(report));
+      return true;
+    });
+    if (accepted && await this.storage.getAlarm() === null) await this.storage.setAlarm((now + 14 * 86400) * 1000);
+    return accepted;
+  }
+
+  async alarm() {
+    const now = Math.floor(Date.now() / 1000);
+    this.sql.exec("DELETE FROM alpha_health WHERE received <= ?", now - 14 * 86400);
+    const {oldest} = this.sql.exec("SELECT MIN(received) AS oldest FROM alpha_health").one();
+    if (oldest !== null) await this.storage.setAlarm((oldest + 14 * 86400) * 1000);
+  }
+
   channelNumberOwner(number) {
     return Boolean(this.sql.exec("SELECT 1 FROM channel_numbers WHERE number=? LIMIT 1", number).toArray().length);
   }

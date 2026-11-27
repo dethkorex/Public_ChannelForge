@@ -25,6 +25,7 @@ import socketserver
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -32,6 +33,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import wave
 import zlib
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
@@ -41,22 +43,19 @@ from pathlib import Path
 from typing import NamedTuple
 from xml.etree import ElementTree as ET
 
-from linux_runtime import apply_linux_update, can_apply_linux_update, restart_linux_app, linux_install_command, linux_release_asset, start_webview
+from linux_runtime import apply_linux_update, can_apply_linux_update, clean_linux_update_cache, restart_linux_app, linux_install_command, linux_release_asset, start_webview
 from collections import deque
 from release_metadata import read_latest_release, version_tuple
-from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
+import studio_branding
+from windows_distribution import clean_windows_update_cache, published_hash, relay_process_job, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-TESTER_CONFIG = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets/tester-config.json"
-TESTER_BUILD = TESTER_CONFIG.is_file()
-APP_TITLE = "ChannelForge Studio Tester" if TESTER_BUILD else "ChannelForge Studio"
-VERSION = "4.5.1"
-if TESTER_BUILD:
-    VERSION = json.loads(TESTER_CONFIG.read_text(encoding="utf-8")).get("version", VERSION)
+APP_TITLE = "ChannelForge Studio"
+VERSION = "4.5.5"
 DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
-DEFAULT_PORT = 18787 if TESTER_BUILD else 8787
-DEFAULT_PUBLIC_MEDIA_PORT = 18790 if TESTER_BUILD else 8790
+DEFAULT_PORT = 8787
+DEFAULT_PUBLIC_MEDIA_PORT = 8790
 LEGACY_RELAY_HOST_KEY = "localhost.run ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9"
 RELAY_INSTANCE = secrets.token_hex(20)
 RELAY_MEDIA_SAMPLE = secrets.token_bytes(512 * 1024)
@@ -80,6 +79,13 @@ LIVE_PLAYOUT = {}
 BROADCAST_DEFAULT = (720, 2500)
 BROADCAST_HEIGHTS = (270, 480, 720)
 EXPORT_CHANNEL_IDS = None
+EXPORT_REFRESHED_AT = float("-inf")
+GUIDE_HOURS = 12
+DEFAULT_CHANNEL_ARTWORK = {"logo_asset_id": "builtin-studio-studio-logo",
+                           "background_asset_id": "builtin-studio-studio-guide-background",
+                           "corner_bug_asset_id": "builtin-studio-studio-corner-bug"}
+RELAY_JOB = None
+CHECKED_RELAY_PORTS = set()
 DEFAULT_DIRECTORY_URL = "https://channelforge-directory.fresh-anorak.workers.dev"
 OLD_DIRECTORY_URL = "https://directory.channelforge.tv"
 RELAY_SLOT_PATH = r"/studio/[a-f0-9]{16}"
@@ -93,9 +99,9 @@ def app_dir() -> Path:
         return Path(override).expanduser().resolve()
     if sys.platform == "win32":
         root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        return root / ("ChannelForge-Studio-Tester" if TESTER_BUILD else APP_NAME)
+        return root / (APP_NAME)
     root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return root / ("ChannelForge-Studio-Tester" if TESTER_BUILD else "public-channelforge")
+    return root / ("public-channelforge")
 
 
 DATA_DIR = app_dir()
@@ -114,6 +120,7 @@ LOCK = threading.RLock()
 # Bound the lock pool while allowing different channels to start in parallel.
 ENCODER_START_LOCKS = tuple(threading.Lock() for _ in range(32))
 NEXT_PROGRAM_SLOT = threading.BoundedSemaphore(1)
+NEXT_SOURCE_SLOTS = threading.BoundedSemaphore(2)
 POSTER_CACHE_LOCKS = tuple(threading.Lock() for _ in range(32))
 HLS_PROXY: dict[str, tuple[str, float]] = {}
 HLS_PROXY_CHANNELS: dict[str, str] = {}
@@ -192,31 +199,8 @@ PUBLIC_MEDIA_SERVER: ThreadingHTTPServer | None = None
 PUBLIC_MEDIA_PORT = DEFAULT_PUBLIC_MEDIA_PORT
 PUBLIC_MEDIA_LOCK = threading.RLock()
 APP_WINDOW = None
+ALPHA_REPORTS = None
 UPDATE_EXITING = False
-DEFAULT_ASSET_THEMES = {
-    "kids": ("Kids Club", "#ffea3d", "#ff5ebc", "star"),
-    "anime": ("Anime Pulse", "#ff4d7d", "#6de8ff", "anime"),
-    "horror": ("Horror Midnight", "#ff334f", "#64118c", "horror"),
-    "action": ("Action Blast", "#ffcf27", "#ff4b18", "action"),
-    "scifi": ("Sci-Fi Signal", "#45f3ff", "#6d4cff", "planet"),
-    "comedy": ("Laugh Track", "#ffe35b", "#3fe09b", "smile"),
-    "drama": ("Drama House", "#eab8ff", "#7b3fc6", "drama"),
-    "retro": ("Retro Rewind", "#ff8ad8", "#38e7df", "cassette"),
-    "classic": ("Classic Television", "#f4c95d", "#d66b4d", "television"),
-    "cinema": ("Cinema Premiere", "#f1d18a", "#8f2437", "clapper"),
-    "sports": ("Sports Arena", "#7cff6b", "#1473e6", "ball"),
-    "news": ("News Desk", "#42a5ff", "#e9f2ff", "globe"),
-    "mystery": ("Mystery Files", "#a98bff", "#26365f", "search"),
-    "fantasy": ("Fantasy Quest", "#ffd45a", "#9a4de2", "crown"),
-    "adventure": ("Adventure Trails", "#ffb44d", "#1bb69d", "mountain"),
-    "crime": ("Crime Watch", "#d8e0ed", "#cb3148", "badge"),
-    "music": ("Music Video", "#ff54cf", "#674dff", "music"),
-    "nature": ("Nature World", "#8cf05c", "#087f73", "leaf"),
-    "kitchen": ("Kitchen Club", "#ff9c52", "#e94562", "chef"),
-    "holiday": ("Holiday Cheer", "#f5fbff", "#3ac7e5", "snowflake"),
-}
-
-
 def atomic_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
@@ -353,6 +337,9 @@ def exit_for_update(shutdown) -> None:
     """Release the web server, tray host, and executable before replacement."""
     global UPDATE_EXITING
     UPDATE_EXITING = True
+    SHUTTING_DOWN.set()
+    set_community_relay(None)
+    stop_legacy_relay()
     shutdown()
     if APP_WINDOW is not None:
         APP_WINDOW.destroy()
@@ -413,7 +400,7 @@ def config(public: bool = False) -> dict:
     result = {
         "plex_url": str(value.get("plex_url", "http://127.0.0.1:32400")).rstrip("/"),
         "plex_token": str(value.get("plex_token", "")),
-        "guide_hours": max(1, min(168, int(value.get("guide_hours", 24)))),
+        "guide_hours": GUIDE_HOURS,
         "port": max(1024, min(65535, int(value.get("port", DEFAULT_PORT)))),
         "bind_host": str(value.get("bind_host", HOST)).strip() or HOST,
         "public_url": str(value.get("public_url", "")).strip().rstrip("/"),
@@ -428,7 +415,7 @@ def config(public: bool = False) -> dict:
         "creator_key": "" if legacy_directory else str(value.get("creator_key", "")),
         "creator_profile": value.get("creator_profile", {}) if isinstance(value.get("creator_profile", {}), dict) else {},
         "pending_creator_profile": value.get("pending_creator_profile", {}) if isinstance(value.get("pending_creator_profile", {}), dict) else {},
-        "auto_publish_channels": bool(value.get("auto_publish_channels", not TESTER_BUILD)),
+        "auto_publish_channels": bool(value.get("auto_publish_channels", True)),
     }
     if public:
         result["jellyfin_connections"] = jellyfin_connections(public=True)
@@ -764,7 +751,7 @@ def channels() -> list[dict]:
         missing_ids = [channel for channel in value if not channel.get("id")]
         for channel in missing_ids:
             channel["id"] = secrets.token_hex(8)
-        legacy = [channel for channel in value if channel.get("items") and not channel.get("air_until")]
+        legacy = [channel for channel in value if channel.get("items") and not (channel.get("repeat_on_air") or channel.get("air_until"))]
         if legacy:
             for channel in legacy:
                 channel["air_until"] = current_run_end(channel).isoformat()
@@ -775,7 +762,7 @@ def channels() -> list[dict]:
 
 def lineup_duration(channel, *, items=None):
     if items is None:
-        items = scheduled_items(channel)
+        items = timeline_items(channel)
     return timedelta(milliseconds=sum(max(1000, int(item.get("duration_ms", 1800000))) for item in items))
 
 
@@ -787,7 +774,8 @@ def current_run_end(channel):
 
 
 def run_finished(channel, moment=None):
-    return bool(channel.get("air_until") and (moment or datetime.now(timezone.utc)) >= parse_timestamp(channel["air_until"]))
+    return bool(not channel.get("repeat_on_air") and channel.get("air_until")
+                and (moment or datetime.now(timezone.utc)) >= parse_timestamp(channel["air_until"]))
 
 
 def update_channel_run(channel_id, action):
@@ -797,6 +785,8 @@ def update_channel_run(channel_id, action):
         if not channel:
             raise ValueError("Channel not found.")
         finished = run_finished(channel)
+        if action == "shuffle" and channel.get("playback_mode") == "custom":
+            raise ValueError("Maximum customization uses the exact order saved in the channel builder.")
         if action == "shuffle":
             previous_order = scheduled_items(channel)
             for _ in range(16):
@@ -806,7 +796,8 @@ def update_channel_run(channel_id, action):
         if (action == "reair" and finished) or (action == "shuffle" and not finished):
             now = datetime.now(timezone.utc)
             channel["schedule_anchor"] = now.isoformat()
-            channel["air_until"] = (now + lineup_duration(channel)).isoformat()
+            channel["repeat_on_air"] = True
+            channel["air_until"] = ""
         if action == "shuffle" or (action == "reair" and finished):
             atomic_json(CHANNELS_FILE, values)
         PLAYBACK_ERRORS.pop(channel_id, None)
@@ -861,82 +852,50 @@ def save_asset_record(record: dict, content: bytes) -> dict:
     return item
 
 
-def theme_icon_svg(icon: str, x: float, y: float, size: float, primary: str, secondary: str) -> str:
-    """Return an original, dependency-free SVG mark for a built-in theme."""
-    shapes = {
-        "star": '<path d="M50 5 61 37 95 38 68 58 77 91 50 72 23 91 32 58 5 38 39 37Z" fill="url(#g)"/><circle cx="32" cy="45" r="5" fill="#08111f"/><circle cx="68" cy="45" r="5" fill="#08111f"/>',
-        "anime": '<circle cx="50" cy="50" r="27" fill="url(#g)"/><path d="M50 4v17M50 79v17M4 50h17M79 50h17M18 18l12 12M70 70l12 12M82 18 70 30M30 70 18 82" stroke="currentColor" stroke-width="7"/><path d="M28 53q22-30 44 0-22 27-44 0Z" fill="#08111f"/><circle cx="50" cy="49" r="9" fill="currentColor"/>',
-        "horror": '<path d="M17 24q33-24 66 0l-6 48-18 18H41L23 72Z" fill="url(#g)"/><path d="m27 46 18-7-4 18-15-2m47-9-18-7 4 18 15-2M43 70h14l-3 13h-8Z" fill="#08111f"/>',
-        "action": '<path d="m57 3-39 53h25L34 97l48-60H58Z" fill="url(#g)"/><path d="M8 20h27M4 32h22M74 69h22M66 81h29" stroke="currentColor" stroke-width="6"/>',
-        "planet": '<circle cx="50" cy="49" r="29" fill="url(#g)"/><ellipse cx="50" cy="50" rx="47" ry="17" fill="none" stroke="currentColor" stroke-width="7" transform="rotate(-14 50 50)"/><circle cx="66" cy="34" r="6" fill="#08111f"/>',
-        "smile": '<circle cx="50" cy="50" r="42" fill="url(#g)"/><circle cx="35" cy="40" r="6" fill="#08111f"/><circle cx="65" cy="40" r="6" fill="#08111f"/><path d="M25 57q25 30 50 0" fill="none" stroke="#08111f" stroke-width="8" stroke-linecap="round"/>',
-        "drama": '<path d="M8 18h39v50Q28 96 8 68Z" fill="url(#g)"/><path d="M53 10h39v58Q73 94 53 68Z" fill="currentColor" opacity=".8"/><circle cx="21" cy="39" r="4" fill="#08111f"/><circle cx="35" cy="39" r="4" fill="#08111f"/><path d="M19 55q9 10 18 0M64 47q9-9 18 0" fill="none" stroke="#08111f" stroke-width="5"/>',
-        "cassette": '<rect x="5" y="20" width="90" height="62" rx="8" fill="url(#g)"/><rect x="15" y="29" width="70" height="31" rx="6" fill="#08111f"/><circle cx="34" cy="45" r="10" fill="none" stroke="currentColor" stroke-width="5"/><circle cx="66" cy="45" r="10" fill="none" stroke="currentColor" stroke-width="5"/><path d="m27 70 8-8h30l8 8" fill="none" stroke="#08111f" stroke-width="6"/>',
-        "television": '<rect x="8" y="20" width="84" height="65" rx="13" fill="url(#g)"/><rect x="18" y="30" width="54" height="44" rx="8" fill="#08111f"/><circle cx="82" cy="42" r="6" fill="#08111f"/><circle cx="82" cy="61" r="6" fill="#08111f"/><path d="m36 20-15-17m43 17L79 3" stroke="currentColor" stroke-width="6"/>',
-        "clapper": '<path d="M8 28h84v58H8Z" fill="url(#g)"/><path d="M5 10h88v25H5Z" fill="currentColor"/><path d="m18 11-10 23m35-23L33 34m35-23L58 34m35-23L83 34" stroke="#08111f" stroke-width="8"/><path d="M25 55h50M25 70h31" stroke="#08111f" stroke-width="6"/>',
-        "ball": '<circle cx="50" cy="50" r="44" fill="url(#g)"/><path d="m50 25 17 12-7 20H40l-7-20Zm0 0V7M33 37 15 30m52 7 18-7M40 57 28 78m32-21 12 21" fill="none" stroke="#08111f" stroke-width="6"/>',
-        "globe": '<circle cx="50" cy="50" r="43" fill="url(#g)"/><path d="M8 50h84M50 7c26 23 26 63 0 86M50 7c-26 23-26 63 0 86M15 29h70M15 71h70" fill="none" stroke="#08111f" stroke-width="5"/>',
-        "search": '<circle cx="42" cy="40" r="28" fill="none" stroke="url(#g)" stroke-width="12"/><path d="m62 61 30 30" stroke="currentColor" stroke-width="14" stroke-linecap="round"/><path d="M31 40h22" stroke="currentColor" stroke-width="5"/>',
-        "crown": '<path d="m10 30 20 18 20-35 20 35 20-18-9 55H19Z" fill="url(#g)"/><circle cx="50" cy="66" r="7" fill="#08111f"/>',
-        "mountain": '<circle cx="75" cy="25" r="15" fill="currentColor"/><path d="M3 87 35 28l17 29 12-17 33 47Z" fill="url(#g)"/><path d="m24 49 11-21 10 18-9-4Z" fill="#f5f7fb"/>',
-        "badge": '<path d="M50 4 89 20v32q0 29-39 44Q11 81 11 52V20Z" fill="url(#g)"/><path d="m50 22 8 17 19 3-14 13 4 19-17-9-17 9 4-19-14-13 19-3Z" fill="#08111f"/>',
-        "music": '<path d="M38 19v54q0 15-17 15Q5 88 5 76t19-14q4 0 7 1V12L90 3v55q0 15-17 15-16 0-16-12t19-14q4 0 7 1V25Z" fill="url(#g)"/>',
-        "leaf": '<path d="M89 9Q22 10 13 58q-5 28 24 31 48 5 52-80Z" fill="url(#g)"/><path d="M20 84Q45 51 78 25M43 57l-5-24m18 10 21 2" fill="none" stroke="#08111f" stroke-width="6"/>',
-        "chef": '<path d="M23 45Q4 42 8 25q4-15 23-10Q40-2 51 13q17-10 25 5 20-1 17 18-2 12-17 11v39H23Z" fill="url(#g)"/><path d="M23 66h53M35 48v15m13-15v15m13-15v15" stroke="#08111f" stroke-width="6"/>',
-        "snowflake": '<path d="M50 4v92M10 27l80 46M10 73l80-46M50 4l-9 14m9-14 9 14M10 27l17 1m-17-1 8-15m-8 61 17-1m-17 1 8 15m72-61-17 1m17-1-8-15m8 61-17-1m17 1-8 15M50 96l-9-14m9 14 9-14" stroke="url(#g)" stroke-width="8" stroke-linecap="round"/>',
-    }
-    shape = shapes.get(icon, shapes["star"])
-    return f'<g transform="translate({x-size/2} {y-size/2}) scale({size/100})" color="{primary}">{shape}</g>'
-
-
-def default_asset_svg(label: str, kind: str, primary: str, secondary: str, icon: str = "star") -> bytes:
-    dimensions = {"logo": (1200, 675), "guide-background": (1920, 1080), "corner-bug": (600, 600)}
-    width, height = dimensions[kind]
-    safe_label = html.escape(label.upper())
-    if kind == "guide-background":
-        icons = "".join(theme_icon_svg(icon, width*(.12+i*.18), height*(.2+(i%2)*.18), height*.19, primary, secondary) for i in range(5))
-        body = f'<path d="M0 {height*.75} Q {width*.28} {height*.45} {width*.55} {height*.7} T {width} {height*.48} V {height} H0Z" fill="url(#g)" opacity=".34"/><g opacity=".16">{icons}</g>{theme_icon_svg(icon,width*.82,height*.57,height*.52,primary,secondary)}'
-        title_y, title_size = height * .86, 54
-    elif kind == "corner-bug":
-        body = f'<circle cx="{width/2}" cy="{height/2}" r="{height*.43}" fill="url(#g)" opacity=".95"/><circle cx="{width/2}" cy="{height/2}" r="{height*.35}" fill="#08111f"/>{theme_icon_svg(icon,width/2,height*.42,height*.34,primary,secondary)}'
-        title_y, title_size = height * .72, 34
-    else:
-        body = f'<rect x="{width*.06}" y="{height*.12}" width="{width*.88}" height="{height*.76}" rx="68" fill="url(#g)"/><rect x="{width*.085}" y="{height*.16}" width="{width*.83}" height="{height*.68}" rx="48" fill="#08111f"/>{theme_icon_svg(icon,width*.29,height*.5,height*.47,primary,secondary)}'
-        title_y, title_size = height * .49, max(32, 70-len(label)*2)
-    text_x = "62%" if kind == "logo" else "50%"
-    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="{primary}"/><stop offset="1" stop-color="{secondary}"/></linearGradient><filter id="glow"><feGaussianBlur stdDeviation="8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><rect width="100%" height="100%" fill="#08111f"/><circle cx="82%" cy="18%" r="24%" fill="{secondary}" opacity=".13"/>{body}<text x="{text_x}" y="{title_y}" text-anchor="middle" fill="#f7fbff" font-family="Arial,sans-serif" font-size="{title_size}" font-weight="900" letter-spacing="3" filter="url(#glow)">{safe_label}</text></svg>'''
-    return svg.encode("utf-8")
-
-
 def install_default_assets() -> None:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     values = asset_manifest()
-    expected_ids = {f"builtin-{slug}-{kind}" for slug in DEFAULT_ASSET_THEMES for kind in ("logo", "guide-background", "corner-bug")}
-    retired = [item for item in values if item.get("built_in") and item.get("id") not in expected_ids]
-    for item in retired:
-        (ASSETS_DIR / Path(str(item.get("filename", ""))).name).unlink(missing_ok=True)
-    if retired:
-        values = [item for item in values if item not in retired]
-    known = {item.get("id"): item for item in values}
-    changed = bool(retired)
-    for slug, (label, primary, secondary, icon) in DEFAULT_ASSET_THEMES.items():
-        for kind in ("logo", "guide-background", "corner-bug"):
-            asset_id = f"builtin-{slug}-{kind}"
-            filename = f"{asset_id}.svg"
-            if asset_id not in known:
-                values.append({"id": asset_id, "name": f"{label} {kind.replace('-', ' ').title()}", "kind": kind, "filename": filename, "content_type": "image/svg+xml", "built_in": True, "created_at": "2026-11-19T00:00:00+00:00"})
-                changed = True
-            elif known[asset_id].get("built_in"):
-                expected_name = f"{label} {kind.replace('-', ' ').title()}"
-                if known[asset_id].get("name") != expected_name:
-                    known[asset_id]["name"] = expected_name
-                    changed = True
+    active_legacy = {
+        channel.get(field, "") for channel in channels()
+        for field in ("logo_asset_id", "background_asset_id", "corner_bug_asset_id")
+    }
+    active_legacy.add(config()["creator_profile"].get("logo_asset_id", ""))
+    kinds = ("logo", "guide-background", "corner-bug")
+    new_ids = {f"builtin-studio-{style}-{kind}" for style in studio_branding.STYLES for kind in kinds}
+    new_ids.update(f"builtin-ambience-{sound}" for sound in studio_branding.AMBIENCE)
+    keep = []
+    for item in values:
+        asset_id = item.get("id")
+        if not item.get("built_in") or asset_id in new_ids:
+            keep.append(item)
+        elif asset_id in active_legacy:
+            keep.append({**item, "retired": True})
+        else:
+            name = Path(str(item.get("filename", ""))).name
+            if name.startswith("builtin-"):
+                (ASSETS_DIR / name).unlink(missing_ok=True)
+    known = {item["id"] for item in keep}
+    for style, (label, _, _) in studio_branding.STYLES.items():
+        for kind in kinds:
+            asset_id = f"builtin-studio-{style}-{kind}"
+            filename = asset_id + ".png"
             path = ASSETS_DIR / filename
-            content = default_asset_svg(label, kind, primary, secondary, icon)
-            if not path.exists() or path.read_bytes() != content:
-                path.write_bytes(content)
-    if changed:
-        atomic_json(ASSETS_DIR / "manifest.json", values)
+            if not path.is_file():
+                studio_branding.default_art(style, kind).save(path, optimize=True)
+            if asset_id not in known:
+                keep.append({"id": asset_id, "name": f"{label} {kind.replace('-', ' ').title()}",
+                             "kind": kind, "filename": filename, "content_type": "image/png", "built_in": True})
+    for sound, label in studio_branding.AMBIENCE.items():
+        asset_id = f"builtin-ambience-{sound}"
+        filename = asset_id + ".wav"
+        path = ASSETS_DIR / filename
+        if not path.is_file():
+            studio_branding.write_ambience(path, sound)
+        if asset_id not in known:
+            keep.append({"id": asset_id, "name": label, "kind": "ambience", "filename": filename,
+                         "content_type": "audio/wav", "built_in": True})
+    if keep != values:
+        atomic_json(ASSETS_DIR / "manifest.json", keep)
 
 
 def generate_asset(payload: dict) -> dict:
@@ -997,6 +956,98 @@ def upload_asset(payload: dict) -> dict:
                 if key.startswith("on") or (key == "href" and str(value).lower().startswith(("http:", "https:", "javascript:"))):
                     raise ValueError("SVG files cannot contain event handlers or external links.")
     return save_asset_record({"name": name, "kind": kind, "extension": allowed[content_type], "content_type": content_type}, content)
+
+
+def upload_ambience(payload: dict) -> dict:
+    name = str(payload.get("name", "")).strip()
+    header, separator, encoded = str(payload.get("data", "")).partition(";base64,")
+    if not name or not separator or not header.startswith("data:audio/"):
+        raise ValueError("Choose an audio file and give it a name.")
+    original = base64.b64decode(encoded, validate=True)
+    if not original or len(original) > 3_500_000:
+        raise ValueError("Ambience files must be smaller than 3.5 MB.")
+    rate = studio_branding.AMBIENCE_RATE
+    limit = studio_branding.AMBIENCE_SECONDS * rate
+    with tempfile.TemporaryDirectory(prefix="channelforge-ambience-") as folder:
+        source, target = Path(folder) / "audio-input", Path(folder) / "ambience.wav"
+        source.write_bytes(original)
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        result = subprocess.run([ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-nostdin",
+                                 "-protocol_whitelist", "file,pipe", "-i", str(source), "-map", "0:a:0",
+                                 "-af", "volume=0.25,alimiter=limit=0.3:level=0", "-ar", str(rate), "-ac", "1",
+                                 "-t", "25.05", "-c:a", "pcm_s16le", str(target)],
+                                capture_output=True, timeout=12, creationflags=flags)
+        if result.returncode or not target.is_file():
+            raise ValueError("Studio could not open that audio file.")
+        with wave.open(str(target), "rb") as audio:
+            samples = audio.getnframes()
+            if not 0 < samples <= limit:
+                raise ValueError("Choose a clip no longer than 25 seconds.")
+            frames = audio.readframes(samples)
+        data = io.BytesIO()
+        with wave.open(data, "wb") as output:
+            output.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+            output.writeframes(frames + bytes((limit - samples) * 2))
+    with LOCK:
+        return save_asset_record({"name": name, "kind": "ambience", "extension": "wav",
+                                  "content_type": "audio/wav"}, data.getvalue())
+
+
+def channel_branding_poster(program: dict):
+    source = program.get("source", "plex")
+    if source == "local":
+        try:
+            return studio_branding.open_artwork(local_image(program["section"], program["id"])[0])
+        except (KeyError, OSError, ValueError):
+            return None
+    fields = ("series_thumb", "thumb") if program.get("series") else ("thumb", "series_thumb")
+    for poster in dict.fromkeys(str(program.get(field) or "") for field in fields):
+        if not poster:
+            continue
+        try:
+            if source == "jellyfin" and jellyfin_id(poster):
+                connection, _ = jellyfin_section(program["section"])
+                data, _ = jellyfin_request(connection, f"/Items/{poster}/Images/Primary?maxWidth=384", image=True)
+            elif source == "plex" and re.fullmatch(r"/library/metadata/\d+/thumb(?:/\d+)?", poster):
+                data, _ = plex_binary(poster, program.get("plex_server_id", ""), "poster")
+            else:
+                continue
+        except (KeyError, OSError, ValueError):
+            continue
+        image = studio_branding.open_artwork(data)
+        if image is not None:
+            return image
+    return None
+
+
+def render_channel_branding_card(branding: dict, channel: dict, program: dict):
+    assets = {record["id"]: record for record in asset_manifest()}
+    logo = None
+    for field in ("corner_bug_asset_id", "logo_asset_id"):
+        asset = assets.get(channel.get(field))
+        if not asset or asset.get("content_type") not in {"image/png", "image/jpeg", "image/webp"}:
+            continue
+        try:
+            with (ASSETS_DIR / Path(asset["filename"]).name).open("rb") as source:
+                data = source.read(8_000_001)
+            if len(data) <= 8_000_000:
+                logo = studio_branding.open_artwork(data, "RGBA")
+        except (KeyError, OSError, ValueError):
+            continue
+        if logo is not None:
+            break
+    return studio_branding.render_card(branding, channel, program, channel_branding_poster(program), logo)
+
+
+def ambience_file(branding):
+    selection = branding["ambience"]
+    asset_id = "builtin-ambience-" + selection if selection in studio_branding.AMBIENCE else selection
+    asset = next((item for item in asset_manifest() if item["id"] == asset_id and item.get("kind") == "ambience"), None)
+    if asset:
+        path = ASSETS_DIR / Path(asset["filename"]).name
+        if path.is_file():
+            return path
+    return None
 
 
 def delete_asset(asset_id: str) -> None:
@@ -1338,9 +1389,7 @@ def media_search_tags(tags, genres, countries) -> list[str]:
     animated = bool(genre_names & {"animation", "anime", "アニメ"})
     japanese = any(str(country).strip().casefold() in {"jp", "japan", "日本"} for country in countries)
     explicit_anime = bool(genre_names & {"anime", "アニメ"})
-    if TESTER_BUILD:
-        explicit_anime |= any(re.search(r"\banime\b|アニメ", tag, re.IGNORECASE) for tag in values)
-    if ((animated and japanese) or (TESTER_BUILD and explicit_anime)) and not any(tag.casefold() == "anime" for tag in values):
+    if animated and japanese and not any(tag.casefold() == "anime" for tag in values):
         values.append("Anime")
     return values
 
@@ -1356,8 +1405,6 @@ def plex_items(section: str) -> list[dict]:
         return [entry.get("tag", "").strip()[:120] for entry in node.findall(tag)[:limit] if entry.get("tag", "").strip()]
 
     def provider_tags(node):
-        if TESTER_BUILD:
-            return [value for kind in ("Label", "Collection", "Mood", "Style") for value in credit_names(node, kind, 96)]
         return credit_names(node, "Label") + credit_names(node, "Collection")
 
     # TV libraries must expose playable episodes, but Plex normally keeps genres,
@@ -1377,7 +1424,6 @@ def plex_items(section: str) -> list[dict]:
                 "rating": show.get("rating", ""),
                 "genres": sorted({genre.get("tag", "").strip() for genre in show.findall("Genre") if genre.get("tag", "").strip()}),
                 "tags": provider_tags(show),
-                "aliases": [show.get(key, "") for key in ("originalTitle", "titleSort")] if TESTER_BUILD else [],
                 "countries": credit_names(show, "Country"),
                 "actors": credit_names(show, "Role"),
                 "directors": credit_names(show, "Director"),
@@ -1407,6 +1453,7 @@ def plex_items(section: str) -> list[dict]:
         parent_metadata = show_metadata.get(str(node.get("grandparentRatingKey", ""))) or show_metadata_by_title.get(str(series_title).casefold(), {})
         episode_genres = sorted({genre.get("tag", "").strip() for genre in node.findall("Genre") if genre.get("tag", "").strip()})
         genres = list(dict.fromkeys(episode_genres + parent_metadata.get("genres", [])))
+        tags = provider_tags(node)
         result.append({
             "id": rating_key,
             "title": (f'{node.get("grandparentTitle", "")} · S{int(node.get("parentIndex", "0") or 0):02d}E{int(node.get("index", "0") or 0):02d} · {node.get("title", "Untitled")}' if node.get("type") == "episode" else node.get("title", "Untitled")),
@@ -1420,12 +1467,14 @@ def plex_items(section: str) -> list[dict]:
             "series_art": node.get("grandparentArt", "") or parent_metadata.get("art", ""),
             "art": node.get("art", "") or node.get("grandparentArt", "") or parent_metadata.get("art", ""),
             "summary": (node.get("summary", "") or parent_metadata.get("summary", ""))[:600],
+            "program_summary": node.get("summary", "")[:600],
             "content_rating": node.get("contentRating", "") or parent_metadata.get("content_rating", ""),
             "rating": node.get("rating", "") or parent_metadata.get("rating", ""),
             "genres": genres,
-            "tags": media_search_tags(provider_tags(node) + parent_metadata.get("tags", []),
+            "tags": media_search_tags(tags + parent_metadata.get("tags", []),
                                       genres, credit_names(node, "Country") + parent_metadata.get("countries", [])),
-            **({"aliases": [node.get(key, "") for key in ("originalTitle", "titleSort")] + parent_metadata.get("aliases", [])} if TESTER_BUILD else {}),
+            "program_tags": tags,
+            "program_aliases": [str(node.get(key, ""))[:120] for key in ("originalTitle", "titleSort") if node.get(key)],
             "actors": list(dict.fromkeys(credit_names(node, "Role") + parent_metadata.get("actors", []))),
             "directors": list(dict.fromkeys(credit_names(node, "Director") + parent_metadata.get("directors", []))),
             "series": series_title,
@@ -1633,8 +1682,6 @@ def jellyfin_items(section):
     connection, parent_id = jellyfin_section(section)
     query = {"userId": connection["user_id"], "parentId": parent_id, "recursive": "true", "includeItemTypes": "Movie,Episode,Video,Series",
              "fields": "Overview,Genres,People,MediaStreams,Tags,ProductionLocations", "limit": 200, "sortBy": "SortName"}
-    if TESTER_BUILD:
-        query["fields"] += ",OriginalTitle"
     result = []
     series_metadata = {}
     offset = 0
@@ -1665,6 +1712,8 @@ def jellyfin_items(section):
                 title = f"{series} · S{season:02d}E{episode:02d} · {title}"
             result.append({"id": identity, "title": title, "section": section, "source": "jellyfin",
                            "type": kind, "duration_ms": duration, "year": row.get("ProductionYear") or "", "summary": row.get("Overview") or "",
+                           "program_tags": (row.get("Tags") or [])[:96],
+                           "program_aliases": [str(row["OriginalTitle"])[:120]] if row.get("OriginalTitle") else [],
                            "added_at": row.get("DateCreated", ""),
                            "thumb": identity if art.get("Primary") else "", "series_thumb": series_id if row.get("SeriesPrimaryImageTag") else "",
                            "art": identity if row.get("BackdropImageTags") else "",
@@ -1672,8 +1721,7 @@ def jellyfin_items(section):
                            "series": series, "series_id": series_id, "season": season,
                            "episode": episode, "genres": row.get("Genres") or [], "content_rating": row.get("OfficialRating") or "",
                            "tags": media_search_tags(row.get("Tags") or [], row.get("Genres") or [], row.get("ProductionLocations") or []),
-                           **({"aliases": [row.get("OriginalTitle")] if row.get("OriginalTitle") else []} if TESTER_BUILD else {}),
-                           "actors": [person["Name"] for person in (row.get("People") or []) if person.get("Type") == "Actor" and person.get("Name")],
+                                          "actors": [person["Name"] for person in (row.get("People") or []) if person.get("Type") == "Actor" and person.get("Name")],
                            "directors": [person["Name"] for person in (row.get("People") or []) if person.get("Type") == "Director" and person.get("Name")],
                            "video_codec": video.get("Codec") or "", "height": video.get("Height") or 0})
         offset += len(rows)
@@ -1685,8 +1733,6 @@ def jellyfin_items(section):
             genres, tags, countries, original_title = inherited
             item["genres"] = list(dict.fromkeys(item["genres"] + genres))
             item["tags"] = media_search_tags(item["tags"] + tags, item["genres"], countries)
-            if TESTER_BUILD and original_title and original_title not in item["aliases"]:
-                item["aliases"].append(original_title)
     return result
 
 
@@ -1938,10 +1984,10 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         "id": existing_id or secrets.token_hex(8), "name": name[:100], "number": number[:12],
         "section": section, "items": normalized, "channel_rating": channel_rating,
         "broadcast_height": broadcast_height, "broadcast_kbps": broadcast_kbps,
-        "logo_asset_id": str(payload.get("logo_asset_id", ""))[:80],
-        "background_asset_id": str(payload.get("background_asset_id", ""))[:80],
-        "corner_bug_asset_id": str(payload.get("corner_bug_asset_id", ""))[:80],
-        "playback_mode": str(payload.get("playback_mode", "ordered")) if str(payload.get("playback_mode", "ordered")) in {"ordered", "shuffle", "shuffle_in_order", "marathon", "franchise"} else "ordered",
+        **{field: str(payload.get(field, "" if existing_id else asset_id))[:80]
+           for field, asset_id in DEFAULT_CHANNEL_ARTWORK.items()},
+        "branding": studio_branding.settings(payload.get("branding")),
+        "playback_mode": str(payload.get("playback_mode", "ordered")) if str(payload.get("playback_mode", "ordered")) in {"custom", "ordered", "shuffle", "shuffle_in_order", "marathon", "franchise"} else "ordered",
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "schedule_anchor": str(payload.get("schedule_anchor") or datetime.now(timezone.utc).isoformat()),
     }
@@ -1950,18 +1996,21 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
 def save_channel(payload: dict, channel_id: str = "") -> dict:
     global SYNCED_CHANNEL_NUMBERS
     with PUBLISH_LOCK:
+        payload = dict(payload)
+        if not channel_id:
+            payload.setdefault("branding", {"enabled": True})
         values = channels()
         previous = next((value for value in values if value.get("id") == channel_id), None)
         if channel_id and not previous:
             raise ValueError("Channel not found.")
         if previous:
-            payload = dict(payload)
             if not payload.get("schedule_anchor"):
                 payload["schedule_anchor"] = previous.get("schedule_anchor")
             payload.setdefault("channel_rating", previous.get("channel_rating", ""))
             height, bitrate = broadcast_settings(previous)
             payload.setdefault("broadcast_height", height)
             payload.setdefault("broadcast_kbps", bitrate)
+            payload.setdefault("branding", previous.get("branding"))
         item = clean_channel(payload, channel_id)
         number = channel_number_key(item["number"])
         changed = not previous or number != channel_number_key(previous["number"])
@@ -1999,15 +2048,20 @@ def write_channel(payload: dict, channel_id: str, item: dict) -> dict:
             manual_order = payload.get("lineup_reordered") is True and mode in {"ordered", "marathon", "franchise"}
             if previous.get("shuffle_seed") and not (restore or manual_order) and mode == previous.get("playback_mode", "ordered"):
                 item["shuffle_seed"] = previous["shuffle_seed"]
-            old_end = parse_timestamp(previous["air_until"])
-            item["air_until"] = (old_end if run_finished(previous) else
-                                 old_end - lineup_duration(previous) + lineup_duration(item)).isoformat()
+            item["repeat_on_air"] = not run_finished(previous)
+            item["air_until"] = "" if item["repeat_on_air"] else previous["air_until"]
+            if "branding" not in payload:
+                item["branding"] = studio_branding.settings(previous.get("branding"))
             if restore and not run_finished(previous):
                 now = datetime.now(timezone.utc)
                 item["schedule_anchor"] = now.isoformat()
-                item["air_until"] = (now + lineup_duration(item)).isoformat()
         else:
-            item["air_until"] = current_run_end(item).isoformat()
+            item["repeat_on_air"] = True
+            item["air_until"] = ""
+            requested_branding = payload.get("branding")
+            if not isinstance(requested_branding, dict) or "ambience" not in requested_branding:
+                item["branding"]["ambience"] = studio_branding.DEFAULT_AMBIENCE
+            item["branding"].update(enabled=True, seconds=studio_branding.DEFAULT_CARD_SECONDS)
         if channel_id:
             index = next((i for i, value in enumerate(values) if value.get("id") == channel_id), None)
             if index is None:
@@ -2092,6 +2146,12 @@ def scheduled_slot(items, index, start, stop, offset_ms, availability):
         return availability[path]
 
     item = items[index]
+    if item.get("source") == "interstitial":
+        for step in range(1, len(items)):
+            upcoming = items[(index + step) % len(items)]
+            if upcoming.get("source") != "interstitial" and present(upcoming):
+                item = {**item, "next_program": upcoming, "title": "Up Next · " + studio_branding.programme_title(upcoming)}
+                break
     if not present(item):
         # Fill only the missing slot with the upcoming playable media. A viewer
         # joining halfway uses the same UTC offsets as one already watching.
@@ -2099,7 +2159,7 @@ def scheduled_slot(items, index, start, stop, offset_ms, availability):
         cycle_ms = 0
         for step in range(1, len(items)):
             candidate = items[(index + step) % len(items)]
-            if present(candidate):
+            if candidate.get("source") != "interstitial" and present(candidate):
                 duration = max(1000, int(candidate.get("duration_ms", 1800000)))
                 replacements.append((candidate, duration))
                 cycle_ms += duration
@@ -2132,7 +2192,7 @@ def schedule_position(channel: dict, moment: datetime | None = None, *, items: l
     """Resolve a deterministic 24/7 channel position for any UTC moment."""
     moment = (moment or datetime.now(timezone.utc)).astimezone(timezone.utc)
     if items is None:
-        items = scheduled_items(channel)
+        items = timeline_items(channel)
     if not items:
         raise ValueError("This channel has no scheduled titles.")
     durations = [max(1000, int(item.get("duration_ms", 1_800_000))) for item in items]
@@ -2153,8 +2213,8 @@ def schedule_position(channel: dict, moment: datetime | None = None, *, items: l
 
 def schedule_window(channel: dict, start: datetime, end: datetime, *, items: list[dict] | None = None) -> list[dict]:
     if items is None:
-        items = scheduled_items(channel)
-    if channel.get("air_until"):
+        items = timeline_items(channel)
+    if channel.get("air_until") and not channel.get("repeat_on_air"):
         finish = parse_timestamp(channel["air_until"])
         end = min(end, finish)
         start = max(start, finish - lineup_duration(channel, items=items))
@@ -2211,6 +2271,12 @@ def franchise_block_order(family: str, title: str, year: object, original: int) 
         exact = next((rank for name, rank in timeline.items() if normalized.startswith(name + " ")), None)
     parsed_year = int(year) if str(year).isdigit() else 9999
     return (0, exact, original) if exact is not None else (1, parsed_year, normalized, original)
+
+
+def timeline_items(channel: dict) -> list[dict]:
+    programmes = scheduled_items(channel)
+    return studio_branding.with_interstitials(programmes, studio_branding.settings(channel.get("branding")),
+                                             looping=bool(channel.get("repeat_on_air")))
 
 
 def scheduled_items(channel: dict) -> list[dict]:
@@ -2439,6 +2505,65 @@ def stop_relay_process(process: subprocess.Popen) -> None:
             process.wait()
 
 
+def retire_orphaned_relay(identity: Path, remote_port: int) -> None:
+    """Release a verified older Studio's dead forward before replacing it."""
+    if remote_port in CHECKED_RELAY_PORTS:
+        return
+    CHECKED_RELAY_PORTS.add(remote_port)
+    forward = f"127.0.0.1:{remote_port}:127.0.0.1:"
+    if sys.platform == "win32":
+        # Match this Studio identity, its assigned VPS port and a dead parent.
+        command = r'''
+$identity = $env:CHANNELFORGE_STUDIO_SSH_KEY
+$forward = $env:CHANNELFORGE_STUDIO_SSH_FORWARD
+$re = '(?:^|\s)-R\s+"?' + [regex]::Escape($forward) + '(\d+)(?:"|\s|$)'
+foreach ($p in (Get-CimInstance Win32_Process -Filter "Name = 'ssh.exe'")) {
+    if (!$p.CommandLine -or !$p.CommandLine.Contains($identity)) { continue }
+    if ($p.CommandLine -notmatch $re) { continue }
+    $port = [int]$Matches[1]
+    $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $($p.ParentProcessId)"
+    if ($parent -and $parent.CreationDate -le $p.CreationDate) { continue }
+    if (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue) { continue }
+    $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($p.ProcessId)"
+    if ($current -and $current.CreationDate -eq $p.CreationDate -and $current.CommandLine -eq $p.CommandLine) {
+        Stop-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+    }
+}
+'''
+        try:
+            subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4,
+                           creationflags=subprocess.CREATE_NO_WINDOW,
+                           env={**os.environ, "CHANNELFORGE_STUDIO_SSH_KEY": str(identity),
+                                "CHANNELFORGE_STUDIO_SSH_FORWARD": forward})
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    elif sys.platform.startswith("linux"):
+        import signal
+        for proc in Path("/proc").iterdir():
+            if not proc.name.isdigit():
+                continue
+            try:
+                stat = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+                if stat[1] != "1" or proc.stat().st_uid != os.getuid():
+                    continue
+                args = (proc / "cmdline").read_bytes().decode("utf-8", "replace").rstrip("\0").split("\0")
+                if Path(args[0]).name != "ssh" or "-i" not in args or args[args.index("-i") + 1] != str(identity) or "-R" not in args:
+                    continue
+                target = args[args.index("-R") + 1]
+                if not target.startswith(forward):
+                    continue
+                port = int(target[len(forward):])
+                with socket.socket() as connection:
+                    connection.settimeout(0.1)
+                    if connection.connect_ex((HOST, port)) == 0:
+                        continue
+                if (proc / "stat").read_text().rsplit(")", 1)[1].split()[19] == stat[19]:
+                    os.kill(int(proc.name), signal.SIGTERM)
+            except (OSError, IndexError, ValueError):
+                continue
+
+
 def set_community_relay(connection: CommunityRelayConnection | None) -> None:
     global COMMUNITY_RELAY
     with TUNNEL_LOCK:
@@ -2525,6 +2650,7 @@ def relay_tls_bytes(local: socket.socket, encrypted: ssl.SSLSocket) -> None:
 
 def connect_community_relay(profile: CommunityRelayProfile) -> CommunityRelayConnection:
     """Start a candidate forward and prove it reaches this Studio over HTTPS."""
+    global RELAY_JOB
     with TUNNEL_LOCK:
         if SHUTTING_DOWN.is_set() or PUBLIC_MEDIA_SERVER is None:
             raise InterruptedError("The read-only media server is unavailable.")
@@ -2537,6 +2663,7 @@ def connect_community_relay(profile: CommunityRelayProfile) -> CommunityRelayCon
         identity = DATA_DIR / "community-relay-identity"
         if not ssh or not identity.is_file():
             raise ValueError("Install OpenSSH and provision this Studio's community relay key.")
+        retire_orphaned_relay(identity, profile.remote_port)
         host = profile.ssh_host if profile.ssh_port == 22 else f"[{profile.ssh_host}]:{profile.ssh_port}"
         trust = f"{host} {profile.host_key}\n"
         known_hosts = DATA_DIR / f"community-host-{hashlib.sha256(trust.encode()).hexdigest()[:24]}"
@@ -2560,9 +2687,17 @@ def connect_community_relay(profile: CommunityRelayProfile) -> CommunityRelayCon
             process = None
             accepted = False
             try:
-                process = subprocess.Popen([*arguments, *target], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                command = [*arguments, *target]
+                if sys.platform.startswith("linux"):
+                    child = Path(__file__).with_name("relay_child.py")
+                    command = [sys.executable, str(child), str(os.getpid()), *command]
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                            stderr=subprocess.DEVNULL,
                                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                if sys.platform == "win32":
+                    if RELAY_JOB is None:
+                        RELAY_JOB = relay_process_job()
+                    RELAY_JOB(process)
                 deadline = time.monotonic() + 16
                 while not SHUTTING_DOWN.is_set() and process.poll() is None and time.monotonic() < deadline:
                     if relay_reaches_this_creator(profile.origin):
@@ -2891,11 +3026,11 @@ def copyable_local_video(path, modified_ns, size):
         return False
 
 
-def playback_audio_track(item: dict, media_input: str, input_options=()) -> tuple[int, bool | None]:
+def playback_audio_track(item: dict, media_input: str, input_options=(), *, preflight=False) -> tuple[int, bool | None]:
     """Resolve the preferred audio track and whether the source has audio."""
     recorded_language = str(item.get("audio_language", "")).casefold()
     recorded_index = max(0, int(item.get("audio_stream_index", 0) or 0))
-    if recorded_language in {"en", "eng"} or recorded_language.startswith("english"):
+    if not preflight and (recorded_language in {"en", "eng"} or recorded_language.startswith("english")):
         return recorded_index, True
     identity = hashlib.sha256(f'{item.get("source")}:{item.get("id")}:{media_input}'.encode()).hexdigest()
     with LOCK:
@@ -3071,28 +3206,12 @@ def channel_activity(include_program=False):
     with LOCK:
         feeds = list(LIVE_PLAYOUT.values())
         encoder_counts = {}
-        if TESTER_BUILD:
-            for session in FFMPEG_SESSIONS.values():
-                feed = session.get("feed")
-                if feed and session["process"].poll() is None:
-                    encoder_counts[feed] = encoder_counts.get(feed, 0) + 1
     activity = {}
     for feed in feeds:
         detail = feed.activity()
         if include_program:
             with feed.condition:
                 detail["program"] = (feed.source or {}).get("title", "")
-        if TESTER_BUILD:
-            with feed.condition:
-                now = time.monotonic()
-                detail.update(
-                    encoders=encoder_counts.get(feed, 0),
-                    program=(feed.source or {}).get("title", ""),
-                    segments=feed.sequence,
-                    uptime_seconds=max(0, int(now - feed.started_at)),
-                    cooldown_seconds=max(0, int((LIVE_LEGACY_IDLE if feed.last_anonymous_request == feed.last_request
-                                                else LIVE_VIEWER_TTL + LIVE_VIEWER_GRACE) - (now - feed.last_request))),
-                )
         activity[feed.channel_id] = detail
     return activity
 
@@ -3283,7 +3402,7 @@ def requested_playback_bandwidth(query: str) -> int:
 
 
 def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool, video_limit_kbps: int | None = None,
-                           *, constrained=False, on_demand=False, limits=BROADCAST_DEFAULT) -> tuple[list[str], list[str], dict[str, int]]:
+                           *, constrained=False, on_demand=False, limits=BROADCAST_DEFAULT, audio_input=0) -> tuple[list[str], list[str], dict[str, int]]:
     renditions = relay_renditions(constrained, on_demand=on_demand, limits=limits)
     inputs = "".join(f"[{name}_in]" for name, *_ in renditions)
     filters = [f"[0:v:0]{DEINTERLACE_VIDEO},split={len(renditions)}{inputs}"]
@@ -3302,7 +3421,7 @@ def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool, v
                  f"-threads:v:{index}", str(threads)]
         variant = f"v:{index}"
         if has_audio:
-            maps += ["-map", f"0:a:{audio_index}"]
+            maps += ["-map", f"{audio_input}:a:{audio_index}"]
             variant += f",a:{index}"
         variants.append(f"{variant},name:{name}")
     maps = ["-filter_complex_threads", "2", "-filter_complex", ";".join(filters), *maps]
@@ -3385,40 +3504,67 @@ def reserve_encoder(identity, channel, budget, minimum=None):
         return granted
 
 
+def encoder_source(item):
+    if item.get("source") == "local":
+        return str(local_media_path(item)), [], ""
+    if item.get("source") == "jellyfin":
+        connection, _ = jellyfin_section(item.get("section", ""))
+        identity_id = jellyfin_id(item.get("id"))
+        if not identity_id:
+            raise ValueError("The selected Jellyfin title is invalid.")
+        media_input = f'{connection["url"]}/Videos/{identity_id}/stream?static=true'
+        return media_input, ["-headers", f"Authorization: {jellyfin_authorization(connection)}\r\n"], connection["token"]
+    credentials = plex_credentials(str(item.get("plex_server_id", "")))
+    if not credentials["token"]:
+        raise ValueError("This channel uses Plex media, but Plex is not connected.")
+    media_input = credentials["url"] + plex_part_key(item)
+    separator = "&" if "?" in media_input else "?"
+    return media_input + separator + urllib.parse.urlencode({"X-Plex-Token": credentials["token"]}), [], ""
+
+
+def preflight_upcoming_source(feed, item):
+    if not feed.active() or not NEXT_SOURCE_SLOTS.acquire(blocking=False):
+        return
+
+    def prepare():
+        try:
+            if not feed.active() or SHUTTING_DOWN.is_set():
+                return
+            media_input, source_options, _ = encoder_source(item)
+            _, has_audio = playback_audio_track(item, media_input, source_options, preflight=True)
+            outcome = "ready" if has_audio is not None else "deferred"
+            record_broadcast_event(feed.channel_id, "up_next_preflight", outcome)
+        except (OSError, ValueError) as exc:
+            record_broadcast_event(feed.channel_id, "up_next_preflight", broadcast_failure_reason(exc))
+        finally:
+            NEXT_SOURCE_SLOTS.release()
+
+    threading.Thread(target=prepare, daemon=True, name="channel-next-source").start()
+
+
 def launch_encoder(identity, channel, position, profile, relay, budget, *, software_retry=False, generation=None,
                    reuse_key=None):
     item = position["item"]
     on_demand = bool(channel.get("on_demand"))
     public_delivery = profile != "standard"
     constrained_live = profile == "constrained"
-    source_options = []
-    jellyfin_token = ""
-    if item.get("source") == "local":
-        media_input = str(local_media_path(item))
-    elif item.get("source") == "jellyfin":
-        connection, _ = jellyfin_section(item.get("section", ""))
-        identity_id = jellyfin_id(item.get("id"))
-        if not identity_id:
-            raise ValueError("The selected Jellyfin title is invalid.")
-        media_input = f'{connection["url"]}/Videos/{identity_id}/stream?static=true'
-        jellyfin_token = connection["token"]
-        source_options = ["-headers", f"Authorization: {jellyfin_authorization(connection)}\r\n"]
-    else:
-        credentials = plex_credentials(str(item.get("plex_server_id", "")))
-        if not credentials["token"]:
-            raise ValueError("This channel uses Plex media, but Plex is not connected.")
-        media_input = credentials["url"] + plex_part_key(item)
-        separator = "&" if "?" in media_input else "?"
-        media_input += separator + urllib.parse.urlencode({"X-Plex-Token": credentials["token"]})
-    # Keep the previous program's buffered segments available during the handoff.
+    interstitial = item.get("source") == "interstitial"
+    audio_input = 1 if interstitial else 0
     directory = STREAM_DIR / f"{identity}-{secrets.token_hex(6)}"
+    if interstitial:
+        media_input, source_options, jellyfin_token = str(directory / "studio-up-next.png"), [], ""
+    else:
+        media_input, source_options, jellyfin_token = encoder_source(item)
+    # Keep the previous program's buffered segments available during the handoff.
     remaining = max(0.1, (position["stop"] - position["start"]).total_seconds() - position["offset_ms"] / 1000)
     input_timing = ["-re"] if on_demand else ["-re", "-ss", f'{position["offset_ms"] / 1000:.3f}']
     if on_demand and public_delivery:
         # Rebuild headroom after a congested interval. Keep disk reservations
         # and idle eviction identical to the realtime producer.
         input_timing = ["-readrate", "1.25"]
-    if item.get("source") != "local":
+    if interstitial:
+        input_timing = ["-re", "-loop", "1", "-framerate", "24"]
+    elif item.get("source") != "local":
         # Plex media parts support byte ranges. Resume an interrupted read at
         # the missing byte while leaving normal end-of-file handling intact.
         input_timing += ["-rw_timeout", "7000000", "-reconnect", "1", "-reconnect_delay_max", "2"]
@@ -3433,7 +3579,7 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
                    ["-hls_list_size", "12" if relay else "5", "-hls_delete_threshold", "45" if constrained_live else "90",
                     "-hls_flags", "independent_segments+temp_file+delete_segments"])
     audio_index, has_audio = (playback_audio_track(item, media_input, source_options) if source_options
-                              else playback_audio_track(item, media_input))
+                              else (0, True) if interstitial else playback_audio_track(item, media_input))
     duration = (position["stop"] - position["start"]).total_seconds()
     media_rate = int((budget - 8 * 1024**2) * 8 / max(1, duration) / 1000 * 0.82) if on_demand else None
     audio_rate = 64 if has_audio is not False else 0
@@ -3448,9 +3594,10 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
     elif relay and len(renditions) > 1 and has_audio is not None and (media_rate is None or media_rate >= 750):
         video_limit = media_rate - 3 * audio_rate if media_rate is not None else None
         encoding, output, peaks = adaptive_relay_options(directory, audio_index, has_audio, video_limit,
-                                                         constrained=constrained_live, on_demand=on_demand, limits=limits)
+                                                         constrained=constrained_live, on_demand=on_demand, limits=limits,
+                                                         audio_input=audio_input)
     else:
-        encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?"]
+        encoding = ["-map", "0:v:0", "-map", f"{audio_input}:a:{audio_index}?"]
         if not on_demand:
             _, width, height, target, maximum, _, _ = renditions[-1]
             encoding += ["-vf", f"{DEINTERLACE_VIDEO},{square_pixel_scale(width, height)}",
@@ -3495,9 +3642,16 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
         video += ["-pix_fmt", "yuv420p", "-force_key_frames", f"expr:gte(t,n_forced*{segment_duration})"]
         if relay:
             video += ["-level:v", "4.1", "-fpsmax:v", "60"]
+    additional_inputs = []
+    if interstitial:
+        ambience = ambience_file(studio_branding.settings(channel.get("branding")))
+        if ambience:
+            additional_inputs = ["-ss", f'{position["offset_ms"] / 1000:.3f}', "-i", str(ambience)]
+        else:
+            additional_inputs = ["-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono"]
     command = [
         executable, "-hide_banner", "-loglevel", "error", "-nostdin", "-nostats", "-progress", "pipe:1",
-        *input_timing, "-i", media_input, *output_timing,
+        *input_timing, "-i", media_input, *additional_inputs, *output_timing,
         *encoding, *video,
         *audio,
         "-f", "hls", "-hls_time", segment_duration, *hls_options,
@@ -3517,6 +3671,10 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
                "audio_codec": "aac" if audio else "none", "segment_seconds": int(segment_duration), "variant_peaks": peaks,
                "media_start": position["start"] + timedelta(milliseconds=position["offset_ms"])}
     try:
+        if interstitial:
+            branding = studio_branding.settings(channel.get("branding"))
+            upcoming = item["next_program"]
+            render_channel_branding_card(branding, channel, upcoming).save(media_input)
         with LOCK:
             if SHUTTING_DOWN.is_set() or (generation is not None and generation != ENCODER_GENERATION):
                 raise InterruptedError("The studio is shutting down.")
@@ -3632,7 +3790,7 @@ def remove_encoder_files(directory):
     if directory.is_symlink() or not directory.is_dir():
         return
     for file in directory.iterdir():
-        if encoder_file(file.name) and file.is_file() and not file.is_symlink():
+        if (encoder_file(file.name) or file.name == "studio-up-next.png") and file.is_file() and not file.is_symlink():
             try:
                 file.unlink()
             except OSError:
@@ -4200,7 +4358,7 @@ def fetch_plex_stream(url: str, range_header: str = "", channel_id: str = "") ->
 
 
 def generate_exports(values: list[dict] | None = None) -> dict:
-    global EXPORT_CHANNEL_IDS
+    global EXPORT_CHANNEL_IDS, EXPORT_REFRESHED_AT
     values = values if values is not None else channels()
     values = [channel for channel in values if not run_finished(channel)]
     settings = config()
@@ -4213,8 +4371,8 @@ def generate_exports(values: list[dict] | None = None) -> dict:
         logo = next((item for item in asset_manifest() if item.get("id") == channel.get("logo_asset_id")), None)
         if logo:
             ET.SubElement(node, "icon", {"src": f"{server_base(settings)}/user-assets/{logo['filename']}"})
-    start = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(hours=2)
-    end = start + timedelta(hours=settings["guide_hours"])
+    start = datetime.now(timezone.utc)
+    end = start + timedelta(hours=GUIDE_HOURS)
     for channel in values:
         for slot in schedule_window(channel, start, end):
             item, cursor, stop = slot["item"], slot["start"], slot["stop"]
@@ -4245,6 +4403,7 @@ def generate_exports(values: list[dict] | None = None) -> dict:
     playlist_path = EXPORT_DIR / "channels.m3u"
     playlist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     EXPORT_CHANNEL_IDS = tuple(channel["id"] for channel in values)
+    EXPORT_REFRESHED_AT = time.monotonic()
     return {"guide": str(guide_path), "playlist": str(playlist_path), "channels": len(values)}
 
 
@@ -4383,12 +4542,13 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
     base = base or server_base()
     moment = datetime.now(timezone.utc)
     start = moment - timedelta(hours=1) if extended else moment
-    end = moment + timedelta(hours=12 if extended else 3)
+    end = moment + timedelta(hours=GUIDE_HOURS if extended else 3)
     assets = {item.get("id"): item for item in asset_manifest()}
     result = []
     settings = config()
     jellyfin_sources = {row["id"] for row in jellyfin_connections()}
     def image_url(item: dict, channel: dict, *fields: str) -> str:
+        item = item.get("next_program", item)
         field = next((field for field in fields if item.get(field)), "")
         if not field:
             return ""
@@ -4407,7 +4567,7 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
             continue
         current = {}
         try:
-            items = scheduled_items(channel)
+            items = timeline_items(channel)
             position = schedule_position(channel, moment, items=items)
             current = position["item"]
             if brief:
@@ -4420,7 +4580,9 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
             slots = []
         status = broadcast_health(channel.get("id"))
         try:
-            if current.get("source") == "local":
+            if current.get("source") == "interstitial":
+                online = True
+            elif current.get("source") == "local":
                 online = Path(str(current.get("file_path", ""))).is_file()
             elif current.get("source") == "jellyfin":
                 parts = str(current.get("section", "")).split(":")
@@ -4653,6 +4815,8 @@ class Handler(BaseHTTPRequestHandler):
                     if broadcast_failure_reason(exc) in ("invalid_program", "media_part_missing"):
                         quarantine_unplayable_source(position["item"])
                     raise
+                if not warm and position["item"].get("source") == "interstitial":
+                    preflight_upcoming_source(feed, position["item"]["next_program"])
                 with LOCK:
                     if not warm:
                         PLAYBACK_ERRORS.pop(channel_id, None)
@@ -4778,32 +4942,28 @@ class Handler(BaseHTTPRequestHandler):
                 name = settings["creator_profile"].get("name") or settings["plex_profile"].get("server_name")
                 self.send_json(200, {"app": APP_NAME, "version": DISCOVERY_VERSION, "name": name, "channel_count": sum(not run_finished(row) for row in channels()),
                                      "creator_id": settings["creator_id"], "public_url": settings["public_url"]})
-            elif TESTER_BUILD and parsed.path == "/api/tester/automatic":
-                from tester_diagnostics import automatic_reports
-                return self.send_json(200, {"enabled": automatic_reports()})
-            elif TESTER_BUILD and parsed.path == "/api/tester/studio-report":
-                from tester_diagnostics import clean_report
-                with LOCK:
-                    traces = list(STREAM_TRACES)[-24:]
-                activity = studio_system_activity()
-                return self.send_json(200, clean_report({
-                    "app": VERSION, "component": "studio", "platform": "windows" if sys.platform == "win32" else "linux",
-                    "build_revision": json.loads(TESTER_CONFIG.read_text(encoding="utf-8")).get("revision"),
-                    "stream_traces": traces, "channels": len(channels()), **activity,
-                    "relay_constrained": constrained_public_relay()
-                }))
-            elif TESTER_BUILD and parsed.path == "/studio-tester.js":
-                return self.send_bytes(200, (WEB_DIR / "studio-tester.js").read_bytes(), "text/javascript")
-            elif TESTER_BUILD and parsed.path in {"/tester-updates.js", "/tester-report-ui.js", "/tester-report-ui.css"}:
-                content_type = "text/css" if parsed.path.endswith(".css") else "text/javascript"
-                return self.send_bytes(200, (WEB_DIR / parsed.path[1:]).read_bytes(), content_type)
-            elif TESTER_BUILD and parsed.path in {"/api/tester-update", "/api/tester-update/progress", "/api/tester-update/installed"}:
-                from tester_updates import local_update
-                return self.send_json(*local_update("GET", parsed.path, self.headers, self.server.server_port, component="studio"))
-            elif parsed.path == "/api/studio/activity" or (TESTER_BUILD and parsed.path == "/api/tester/activity"):
+            elif parsed.path == "/api/studio/activity":
                 return self.send_json(200, studio_system_activity(include_playback=True))
-            elif TESTER_BUILD and parsed.path == "/studio-tester.css":
-                return self.send_bytes(200, (WEB_DIR / "studio-tester.css").read_bytes(), "text/css")
+            elif parsed.path == "/api/branding/preview":
+                query = urllib.parse.parse_qs(parsed.query)
+                channel_id = query.get("channel", [""])[0]
+                channel = next((row for row in channels() if row["id"] == channel_id), None)
+                program = {"title": "Your next programme"}
+                if channel is None:
+                    channel = {"name": "ChannelForge", "number": "1"}
+                elif not run_finished(channel):
+                    position = schedule_position(channel)
+                    upcoming = position["item"].get("next_program")
+                    if upcoming is not None:
+                        program = upcoming
+                    elif not run_finished(channel, position["stop"]):
+                        next_slot = schedule_position(channel, position["stop"])
+                        program = next_slot["item"].get("next_program", next_slot["item"])
+                style = studio_branding.settings({"style": query.get("style", ["studio"])[0]})
+                image = render_channel_branding_card(style, channel, program)
+                output = io.BytesIO()
+                image.save(output, "JPEG", quality=87)
+                return self.send_bytes(200, output.getvalue(), "image/jpeg")
             elif parsed.path == "/api/diagnostics":
                 with LOCK:
                     traces = list(STREAM_TRACES)
@@ -4873,7 +5033,7 @@ class Handler(BaseHTTPRequestHandler):
                 error = playback_error(channel_id)
                 self.send_json(200, {"ok": not bool(error), "error": error})
             elif parsed.path == "/api/guide":
-                offset = max(-24, min(168, int(urllib.parse.parse_qs(parsed.query).get("offset", ["0"])[0])))
+                offset = max(-24, min(GUIDE_HOURS - 6, int(urllib.parse.parse_qs(parsed.query).get("offset", ["0"])[0])))
                 moment = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(hours=offset)
                 guide = []
                 for channel in channels():
@@ -4943,9 +5103,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.send_json(200, {"instance": RELAY_INSTANCE})
             elif parsed.path == "/api/update":
-                release = ({"current_version": VERSION, "update_available": False,
-                            "notes": "Go to System and select Check for Update."}
-                           if TESTER_BUILD else latest_release())
+                release = (latest_release())
                 release.pop("assets", None)
                 self.send_json(200, release)
             elif parsed.path == "/api/update/progress":
@@ -4965,7 +5123,8 @@ class Handler(BaseHTTPRequestHandler):
                 path = EXPORT_DIR / requested
                 with LOCK:
                     values = channels()
-                    if not path.exists() or EXPORT_CHANNEL_IDS != tuple(c["id"] for c in values if not run_finished(c)):
+                    if (not path.exists() or time.monotonic() - EXPORT_REFRESHED_AT >= 60
+                            or EXPORT_CHANNEL_IDS != tuple(c["id"] for c in values if not run_finished(c))):
                         generate_exports(values)
                     body = path.read_bytes()
                 self.send_bytes(200, body, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
@@ -5032,7 +5191,7 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path.startswith("/user-assets/"):
                 filename = Path(parsed.path).name
                 match = next((item for item in asset_manifest() if item.get("filename") == filename), None)
-                if not match:
+                if not match or (isinstance(self, PublicMediaHandler) and match.get("kind") == "ambience"):
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
             elif parsed.path == "/creator-sidebar.png":
@@ -5041,21 +5200,6 @@ class Handler(BaseHTTPRequestHandler):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
                 body = path.read_bytes()
-                if TESTER_BUILD and name == "index.html":
-                    body = body.replace(b"<html", b"<html data-tester", 1)
-                    body = body.replace(b"<title>ChannelForge Studio</title>", b"<title>ChannelForge Studio Tester</title>")
-                    body = body.replace(b"<h1>ChannelForge Studio</h1>", b"<h1>ChannelForge Studio Tester</h1>")
-                    body = body.replace(b"</head>", b'<link rel="stylesheet" href="/studio-tester.css">'
-                                        b'<link rel="stylesheet" href="/tester-report-ui.css"></head>')
-                    body = body.replace(b' data-open-diagnostics>Diagnostics', b' data-view="developer">Developer')
-                    body = body.replace(b'</main>', b'<section id="developer" class="view"><div class="page-heading">'
-                                        b'<div><h2>Developer</h2><p>Private Tester build</p></div>'
-                                        b'<button data-view="system">Back to System</button></div></section></main>')
-                    body = body.replace(b'<script src="/playback-diagnostics.js"></script>', b'')
-                    body = body.replace(b'>Checking for updates', b'>Ready to check for updates', 1)
-                    body = body.replace(b'>Check for updates</button>', b'>Check for Update</button>')
-                    body = body.replace(b"</body>", b'<script src="/tester-report-ui.js"></script>'
-                                        b'<script src="/studio-tester.js"></script><script src="/tester-updates.js"></script></body>')
                 self.send_bytes(200, body, mimetypes.guess_type(name)[0] or "text/plain")
             else:
                 self.send_json(404, {"error": "Not found"})
@@ -5069,39 +5213,6 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urllib.parse.urlparse(self.path)
-            if TESTER_BUILD and parsed.path.startswith("/api/tester-update/"):
-                from tester_updates import local_update
-                return self.send_json(*local_update("POST", parsed.path, self.headers, self.server.server_port))
-            if TESTER_BUILD and parsed.path.startswith("/api/update/"):
-                return self.send_json(403, {"error": "Open the Tester launcher to check for private updates."})
-            if TESTER_BUILD and parsed.path == "/api/tester/automatic":
-                from tester_diagnostics import automatic_reports
-                data = self.body()
-                if self.headers.get("X-ChannelForge-Tester") != "studio" or not isinstance(data.get("agreed"), bool):
-                    return self.send_json(403, {"error": "Open the Developer settings inside Studio Tester."})
-                return self.send_json(200, {"enabled": automatic_reports(data["agreed"])})
-            if TESTER_BUILD and parsed.path == "/api/tester/plex/signout":
-                if self.headers.get("X-ChannelForge-Tester") != "studio":
-                    return self.send_json(403, {"error": "Open Media sources inside Studio Tester."})
-                with LOCK:
-                    settings = load_json(CONFIG_FILE, {})
-                    settings.update(plex_token="", plex_profile={})
-                    atomic_json(CONFIG_FILE, settings)
-                    PLEX_RESOURCE_CACHE.update(expires=0.0, servers={})
-                return self.send_json(200, {"ok": True})
-            if TESTER_BUILD and parsed.path == "/api/tester/studio-report":
-                from tester_diagnostics import post_report
-                if self.headers.get("X-ChannelForge-Tester") != "studio":
-                    return self.send_json(403, {"error": "Open the Developer settings inside Studio Tester."})
-                config_file = WEB_DIR.parent / "assets/tester-config.json"
-                target = json.loads(config_file.read_text(encoding="utf-8")).get("report_url", "")
-                report = self.body()
-                report["platform"] = "windows" if sys.platform == "win32" else "linux"
-                report["component"] = "studio"
-                receipt = post_report(target, report)
-                if receipt:
-                    return self.send_json(201, {"receipt": receipt})
-                return self.send_json(502, {"error": "Could not send the Studio report. Check the Tester link and try again."})
             if parsed.path == "/api/local/upload":
                 query = urllib.parse.parse_qs(parsed.query)
                 result = upload_local_media(self, query.get("section", [""])[0], self.headers.get("X-File-Name", ""))
@@ -5120,10 +5231,10 @@ class Handler(BaseHTTPRequestHandler):
                     current = config()
                     updated = {
                         **current, **plex_settings,
-                        "guide_hours": max(1, min(168, int(payload.get("guide_hours", current["guide_hours"])))),
+                        "guide_hours": GUIDE_HOURS,
                         "bind_host": str(payload.get("bind_host", current["bind_host"])).strip() or HOST,
-                        "public_url": str(payload.get("public_url", current["public_url"])).strip().rstrip("/"),
-                        "directory_url": str(payload.get("directory_url", current["directory_url"])).strip().rstrip("/"),
+                        "public_url": current["public_url"] if current["managed_relay"] else str(payload.get("public_url", current["public_url"])).strip().rstrip("/"),
+                        "directory_url": current["directory_url"] if current["managed_relay"] else str(payload.get("directory_url", current["directory_url"])).strip().rstrip("/"),
                     }
                     atomic_json(CONFIG_FILE, updated)
                 generate_exports()
@@ -5184,6 +5295,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"asset": generate_asset(payload)})
             elif parsed.path == "/api/assets/upload":
                 self.send_json(200, {"asset": upload_asset(payload)})
+            elif parsed.path == "/api/assets/ambience":
+                self.send_json(200, {"asset": upload_ambience(payload)})
             elif parsed.path == "/api/update/download":
                 result = download_verified_update()
                 if payload.get("launch") and result["can_launch"]:
@@ -5200,6 +5313,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         try:
+            if re.fullmatch(r"/api/channels/[a-f0-9]{16}/branding", self.path):
+                channel_id = self.path.split("/")[3]
+                branding = self.body(8192)
+                with PUBLISH_LOCK:
+                    channel = next((row for row in channels() if row["id"] == channel_id), None)
+                    if channel is None:
+                        raise FileNotFoundError("Channel not found.")
+                    saved = save_channel({**channel, "branding": branding}, channel_id)
+                return self.send_json(200, {"channel": saved})
             if not self.path.startswith("/api/channels/"):
                 return self.send_json(404, {"error": "Not found"})
             channel_id = self.path.rsplit("/", 1)[-1]
@@ -5402,6 +5524,22 @@ def ensure_files() -> None:
         for channel in migrated:
             if not channel.get("schedule_anchor"):
                 channel["schedule_anchor"] = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
+                changed = True
+            if "repeat_on_air" not in channel and channel.get("items") and not run_finished(channel):
+                channel["repeat_on_air"] = True
+                channel["air_until"] = ""
+                changed = True
+            if channel.get("items") and not isinstance(channel.get("branding"), dict):
+                position = None if run_finished(channel) else schedule_position(channel)
+                channel["branding"] = studio_branding.settings({"ambience": studio_branding.DEFAULT_AMBIENCE}, enabled=True)
+                for field, asset_id in DEFAULT_CHANNEL_ARTWORK.items():
+                    if not channel.get(field):
+                        channel[field] = asset_id
+                if position is not None:
+                    # Keep the current slot and offset as the new cards extend the cycle.
+                    prefix = timeline_items(channel)[:2 * position["index"]]
+                    start = position.get("slot_start", position["start"])
+                    channel["schedule_anchor"] = (start - lineup_duration(channel, items=prefix)).isoformat()
                 changed = True
             for item in channel.get("items", []):
                 if not item.get("key") and item.get("id"):
@@ -5656,6 +5794,10 @@ def restore_public_sharing() -> None:
 
 def shut_down_creator_host(server, *, serving_in_background=True):
     """Release this host's listeners and child processes, preserving published configuration."""
+    if ALPHA_REPORTS is not None:
+        metrics = studio_system_activity()
+        metrics["movie_sessions"] = sum(row["viewers"] for row in movie_activity())
+        ALPHA_REPORTS.submit(metrics)
     SHUTTING_DOWN.set()
     PUBLISH_CHANGED.set()
     if REGISTERED_ORIGIN and PUBLISH_LOCK.acquire(timeout=0.25):
@@ -5725,9 +5867,6 @@ def run_windows_studio(url, server=None) -> None:
             PUBLISH_CHANGED.set()
         window.destroy()
 
-    if TESTER_BUILD:
-        from tester_updates import watch_restart
-        window.events.loaded += lambda: watch_restart(exit_application)
 
     def minimize_to_tray(*_event):
         if state["quitting"] or UPDATE_EXITING:
@@ -5769,7 +5908,7 @@ def run_windows_studio(url, server=None) -> None:
 
 
 def main() -> None:
-    global APP_WINDOW, PUBLIC_MEDIA_PORT
+    global APP_WINDOW, PUBLIC_MEDIA_PORT, ALPHA_REPORTS
     parser = argparse.ArgumentParser(description="Public_ChannelForge standalone TV server")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--public-media-port", type=int, choices=range(1, 65536), metavar="PORT",
@@ -5777,18 +5916,18 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--data-dir", action="store_true", help="Open the application data directory and exit")
     args = parser.parse_args()
-    if TESTER_BUILD and sys.platform == "win32" and args.no_browser:
-        parser.error("Open Windows Studio Tester normally so hosting can be managed from its tray icon.")
     ensure_files()
-    if sys.platform == "win32" and getattr(sys, "frozen", False) and not TESTER_BUILD:
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
         threading.Thread(target=clean_windows_update_cache, args=(VERSION,), daemon=True).start()
+    elif sys.platform.startswith("linux"):
+        clean_linux_update_cache(DATA_DIR / "updates", VERSION)
     if args.data_dir:
         open_data_folder()
         return
     if not args.no_browser and not claim_creator_desktop():
         return
     port = args.port or config()["port"]
-    bind_host = HOST if TESTER_BUILD else config()["bind_host"]
+    bind_host = config()["bind_host"]
     url = f"http://{HOST if bind_host in {'0.0.0.0', '::'} else bind_host}:{port}"
     try:
         server = ThreadingHTTPServer((bind_host, port), Handler)
@@ -5812,13 +5951,15 @@ def main() -> None:
         try:
             import webview
             APP_WINDOW = webview.create_window(APP_TITLE, url=url, width=1500, height=920, min_size=(760, 480), background_color="#08111f")
-            start_webview(webview, application_id="public-channelforge-tester" if TESTER_BUILD else "public-channelforge",
+            start_webview(webview, application_id="public-channelforge",
                           icon=CREATOR_ICON)
         except ImportError:
             webbrowser.open(url)
         return
     print(f"{APP_NAME} {VERSION} is running at {url}")
     print(f"Data directory: {DATA_DIR}")
+    from public_diagnostics import PublicDiagnostics
+    ALPHA_REPORTS = PublicDiagnostics(DATA_DIR / "diagnostics", "studio", VERSION)
     if args.public_media_port:
         PUBLIC_MEDIA_PORT = args.public_media_port
         start_public_media_server()
@@ -5836,20 +5977,14 @@ def main() -> None:
             thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server")
             thread.start()
             APP_WINDOW = webview.create_window(APP_TITLE, url=url, width=1500, height=920, min_size=(760, 480), background_color="#08111f")
-            if TESTER_BUILD:
-                from tester_updates import watch_restart
-                APP_WINDOW.events.loaded += lambda: watch_restart(APP_WINDOW.destroy)
             try:
-                start_webview(webview, application_id="public-channelforge-tester" if TESTER_BUILD else "public-channelforge",
+                start_webview(webview, application_id="public-channelforge",
                               icon=CREATOR_ICON)
             finally:
                 shut_down_creator_host(server)
             return
         except ImportError:
             threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    if TESTER_BUILD:
-        from tester_updates import watch_restart
-        watch_restart(server.shutdown)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

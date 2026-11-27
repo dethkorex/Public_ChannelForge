@@ -150,6 +150,8 @@ class RelayEnrollmentTests(unittest.TestCase):
             working = mock.Mock(poll=mock.Mock(return_value=None))
             with (mock.patch.object(app, "DATA_DIR", Path(root)),
                   mock.patch.object(app, "PUBLIC_MEDIA_SERVER", mock.Mock(server_port=8789)),
+                  mock.patch.object(app, "RELAY_JOB", mock.Mock()),
+                  mock.patch.object(app, "retire_orphaned_relay"),
                   mock.patch.object(app, "openssh_tool", return_value="ssh"),
                   mock.patch.object(app, "start_relay_tls_bridge", return_value=bridge) as tls,
                   mock.patch.object(app, "relay_reaches_this_creator", return_value=True),
@@ -176,6 +178,8 @@ class RelayEnrollmentTests(unittest.TestCase):
             direct, fallback = [mock.Mock(poll=mock.Mock(return_value=None)) for _ in range(2)]
             with (mock.patch.object(app, "DATA_DIR", Path(root)),
                   mock.patch.object(app, "PUBLIC_MEDIA_SERVER", mock.Mock(server_port=8789)),
+                  mock.patch.object(app, "RELAY_JOB", mock.Mock()),
+                  mock.patch.object(app, "retire_orphaned_relay"),
                   mock.patch.object(app, "openssh_tool", return_value="ssh"),
                   mock.patch.object(app, "start_relay_tls_bridge", return_value=bridge),
                   mock.patch.object(app, "relay_reaches_this_creator", return_value=True),

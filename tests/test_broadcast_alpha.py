@@ -14,6 +14,8 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from PIL import Image
+
 from tests.creator_fixture import app
 
 
@@ -25,7 +27,8 @@ class BroadcastTests(unittest.TestCase):
             items = [{"id": str(index), "title": f"Title {index}", "type": "movie" if index % 2 else "episode",
                       "duration_ms": 1_800_000, "summary": "x" * 600} for index in range(8_000)]
             payload = {"name": "Long lineup", "number": "31", "items": items,
-                       "schedule_anchor": (moment - app.timedelta(minutes=30*7_000)).isoformat()}
+                       "branding": {"enabled": False},
+                       "schedule_anchor": (moment - app.timedelta(seconds=1818*7_000)).isoformat()}
             body = json.dumps(payload).encode()
             self.assertGreater(len(body), 5_000_000)
             handler = object.__new__(app.Handler)
@@ -39,6 +42,10 @@ class BroadcastTests(unittest.TestCase):
                   patch.object(app, "start_ffmpeg_session") as encoder):
                 saved = app.save_channel(handler.body(app.CHANNEL_SAVE_BODY_BYTES))
                 self.assertEqual(len(saved["items"]), len(items))
+                self.assertEqual(saved["branding"], {"enabled": True, "seconds": 18, "style": "studio", "ambience": "soft-synth"})
+                self.assertEqual(saved["logo_asset_id"], "builtin-studio-studio-logo")
+                self.assertEqual(saved["background_asset_id"], "builtin-studio-studio-guide-background")
+                self.assertEqual(saved["corner_bug_asset_id"], "builtin-studio-studio-corner-bug")
                 catalog = app.public_channel_catalog("https://studio.example", extended=True)
                 scheduled = catalog["channels"][0]["programs"]
                 self.assertTrue(any(row["title"] == "Title 7023" for row in scheduled))
@@ -46,6 +53,78 @@ class BroadcastTests(unittest.TestCase):
                 self.assertGreaterEqual(end, moment + app.timedelta(hours=12))
                 self.assertTrue((directory / "exports" / "guide.xml").is_file())
                 encoder.assert_not_called()
+
+    def test_native_up_next_follows_the_full_episode_and_repeats_in_utc(self):
+        anchor = app.datetime(2026, 11, 27, tzinfo=app.timezone.utc)
+        episode = {"id":"ep-7", "title":"A visit on Christmas Eve", "series":"Sample Show", "duration_ms":1_800_000}
+        movie = {"id":"movie-1", "title":"Holiday Home", "duration_ms":3_600_000}
+        channel = {"id":"candidate", "schedule_anchor":anchor.isoformat(), "repeat_on_air":True,
+                   "playback_mode":"custom", "items":[episode,movie], "branding":{"enabled":True,"seconds":25}}
+        first = app.schedule_position(channel, anchor + app.timedelta(minutes=29,seconds=59))
+        self.assertEqual((first["item"]["id"], first["stop"]), ("ep-7", anchor + app.timedelta(minutes=30)))
+        card = app.schedule_position(channel, first["stop"])
+        self.assertEqual(card["item"]["next_program"], movie)
+        self.assertEqual(card["stop"] - card["start"], app.timedelta(seconds=25))
+        following = app.schedule_position(channel, card["stop"])
+        self.assertEqual((following["item"], following["offset_ms"]), (movie,0))
+        final = app.schedule_position(channel, following["stop"])
+        self.assertEqual(final["item"]["next_program"], episode)
+        self.assertEqual(app.schedule_position(channel, final["stop"])["item"], episode)
+        self.assertFalse(app.run_finished(channel, anchor + app.timedelta(days=10)))
+
+    def test_upgrade_adds_default_card_without_moving_the_current_programme(self):
+        moment = app.datetime.now(app.timezone.utc)
+        anchor = moment - app.timedelta(seconds=3600 * 21 + 2025)
+        lineup = [{"id": "one", "title": "First Programme", "duration_ms": 1_800_000},
+                  {"id": "two", "title": "Second Programme", "duration_ms": 1_800_000}]
+        old = {"id": "legacy", "name": "Legacy", "number": "41", "items": lineup, "repeat_on_air": True,
+               "logo_asset_id": "my-existing-logo", "schedule_anchor": anchor.isoformat()}
+        custom = {**old, "id": "configured", "number": "42", "branding": {"enabled": False, "style": "midnight"}}
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+            with (patch.object(app, "CHANNELS_FILE", folder / "channels.json"),
+                  patch.object(app, "CONFIG_FILE", folder / "config.json"),
+                  patch.object(app, "ASSETS_DIR", folder / "assets"),
+                  patch.object(app, "EXPORT_DIR", folder / "exports"),
+                  patch.object(app, "PLUGINS_DIR", folder / "plugins"),
+                  patch.object(app, "generate_exports"), patch.object(app, "persistent_client_identifier")):
+                app.atomic_json(app.CHANNELS_FILE, [old, custom])
+                expected = app.schedule_position(old, moment)
+                app.ensure_files()
+                current, configured = app.channels()
+                self.assertEqual(current["branding"], {"enabled": True, "seconds": 18, "style": "studio", "ambience": "soft-synth"})
+                self.assertEqual(current["logo_asset_id"], "my-existing-logo")
+                self.assertEqual(current["background_asset_id"], "builtin-studio-studio-guide-background")
+                actual = app.schedule_position(current, moment)
+                self.assertEqual((actual["item"]["id"], actual["offset_ms"]), (expected["item"]["id"], expected["offset_ms"]))
+                self.assertEqual(configured["branding"], custom["branding"])
+                app.ensure_files()
+                self.assertEqual(app.channels()[0], current)
+
+    def test_up_next_matches_playback_when_the_scheduled_movie_is_missing(self):
+        anchor = app.datetime(2026, 11, 27, tzinfo=app.timezone.utc)
+        first = {"id": "ep-7", "title": "A visit on Christmas Eve", "duration_ms": 1_800_000}
+        missing = {"id": "unavailable", "title": "Missing movie", "source": "local", "duration_ms": 3_600_000}
+        available = {"id": "available", "title": "Holiday Home", "duration_ms": 3_600_000}
+        channel = {"schedule_anchor": anchor.isoformat(), "repeat_on_air": True,
+                   "items": [first, missing, available], "branding": {"enabled": True}}
+        card = app.schedule_position(channel, anchor + app.timedelta(minutes=30))
+        self.assertEqual(card["item"]["next_program"], available)
+        self.assertEqual(card["item"]["title"], "Up Next · Holiday Home")
+        self.assertEqual(app.schedule_position(channel, card["stop"])["item"], available)
+
+    def test_up_next_uses_series_poster_then_falls_back_to_valid_episode_art(self):
+        series = "/library/metadata/11/thumb/1"
+        episode = "/library/metadata/42/thumb/1"
+        upcoming = {"id": "42", "series": "Sample Show", "series_thumb": series,
+                    "thumb": episode, "plex_server_id": "source-b"}
+        output = io.BytesIO()
+        Image.new("RGB", (160, 90), "#36bad2").save(output, "PNG")
+        with patch.object(app, "plex_binary", side_effect=[(b"invalid", "image/png"), (output.getvalue(), "image/png")]) as fetch:
+            poster = app.channel_branding_poster(upcoming)
+        self.assertEqual([call.args for call in fetch.call_args_list], [(series, "source-b", "poster"), (episode, "source-b", "poster")])
+        self.assertEqual(poster.size, (160, 90))
+        self.assertEqual(poster.getpixel((80, 45)), (54, 186, 210))
 
     def test_known_viewers_move_from_starting_through_live_and_cooldown(self):
         with patch.object(app.time, "monotonic", return_value=100) as clock:

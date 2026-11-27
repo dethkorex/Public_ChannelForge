@@ -4,6 +4,24 @@ import {mkdtemp, readFile, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {Miniflare} from "miniflare";
+import {shutdownReport} from "../src/diagnostics.js";
+
+test("public Alpha diagnostics keep allowlisted health measurements and reject oversized reports", async () => {
+  let captured;
+  const env = {STUDIO_INDEX:{getByName(name) {
+    assert.equal(name,"alpha-health:fire-tv");
+    return {recordAlphaHealth(report){captured = report; return true;}};
+  }}};
+  const send = payload => shutdownReport(new Request("https://example.com/v1/diagnostics/exit", {
+    method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(payload)
+  }), env);
+  const report = {platform:"fire-tv", component:"tv", app:"4.5.5", report_type:"exit", width:1280, height:720,
+    firstFrameMs:2140, delivery_path:"managed-vps", title:"Private movie", path:"C:/private/movie.mkv",
+    trace_id:"0123456789abcdef0123456789abcdef", url:"https://private.example/stream?token=secret"};
+  assert.equal((await send(report)).status,204);
+  assert.deepEqual(Object.keys(captured).sort(), ["platform","component","app","report_type","width","height","firstFrameMs","delivery_path"].sort());
+  assert.equal((await send({...report, title:"A".repeat(5000)})).status,413);
+});
 
 // Run the real Worker, KV binding and SQLite Durable Object. The harness only
 // supplies a clock and invokes cron deterministically; the studio HTTP origin
@@ -26,7 +44,7 @@ test("registration survives origin outages, missing heartbeats and directory res
         return directory.fetch(request, env);
       }
     };`},
-    ...await Promise.all(["index","worker"].map(async name => ({
+    ...await Promise.all(["index","worker","diagnostics"].map(async name => ({
       type:"ESModule",path:"src/"+name+".js",contents:await readFile(new URL("../src/"+name+".js",import.meta.url),"utf8")
     })))];
   let healthy = true, cinemaAvailable = false, version = "3.6.2";

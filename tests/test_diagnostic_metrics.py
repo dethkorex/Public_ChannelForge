@@ -1,23 +1,9 @@
-from pathlib import Path
-import tempfile
 import unittest
-from unittest.mock import patch
 
-import tester_diagnostics as diagnostics
+import diagnostic_metrics as diagnostics
 
 
-class TesterDiagnosticsTests(unittest.TestCase):
-    def test_opt_in_is_reversible_and_clears_pending_reports(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
-            with patch.object(diagnostics, "preferences_dir", return_value=folder):
-                self.assertFalse(diagnostics.automatic_reports())
-                self.assertTrue(diagnostics.automatic_reports(True))
-                pending = folder / "crash-studio.json"
-                pending.write_text("test")
-                self.assertFalse(diagnostics.automatic_reports(False))
-                self.assertFalse(pending.exists())
-
+class DiagnosticMetricsTests(unittest.TestCase):
     def test_crash_report_keeps_class_and_code_but_excludes_sensitive_fields(self):
         report = {"report_type": "crash", "platform": "linux", "app": "4.0.0", "crash_area": "studio",
                   "crash_kind": "RuntimeError", "crash_line": 221, "url": "https://private.example", "message": "private",

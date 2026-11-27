@@ -118,7 +118,6 @@ public class MainActivity extends Activity {
     private ProgressBar bufferSpinner;
     private TextView bufferLabel;
     private TextView touchRetry, touchDebugger;
-    private JSONObject lastPlaybackReport;
     private String streamTitle = "";
     private int channelIndex = 0;
     private boolean guideVisible = true;
@@ -180,7 +179,6 @@ public class MainActivity extends Activity {
     private boolean movieFinished;
     private int movieRetries, playGeneration;
     private long resumePosition, lastFrameChange, firstFrameMs = -1, tuneStarted;
-    private long routeRecoveryStarted;
     private int lastFrameCount = -1, lastErrorCode, lastHttpCode, totalRetries;
     private int segmentLoads, segmentErrors, manifestErrors;
     private long segmentLoadMs, segmentLoadBytes, slowestSegmentMs, slowestManifestMs;
@@ -192,13 +190,6 @@ public class MainActivity extends Activity {
     private long directoryChecked, lastCpuTime, lastCpuTick;
     private int cpuPercent = -1;
     private final ArrayDeque<String> recentEvents = new ArrayDeque<>();
-    private final ArrayDeque<JSONObject> testerTimeline = new ArrayDeque<>();
-    private static final String TESTER_CONSENT = TesterApplication.TESTER_CONSENT;
-    private static final String TESTER_NOTICE = "This private alpha can buffer, stop, or crash. "
-            + "Only agree if you want ChannelForge to collect app diagnostics on this device. "
-            + "Use Developer to review the data and choose whether to send it. Reports include timing, "
-            + "buffering, stream errors, and the device model. They exclude accounts and media titles. "
-            + "This build provides no remote device access.";
     private String pendingReport;
     private static final int EXPORT_REPORT = 22;
     private DefaultBandwidthMeter bandwidth;
@@ -321,7 +312,7 @@ public class MainActivity extends Activity {
     private LinearLayout movieShelf;
     private TextView moreMovies;
     private String selectedPlaylist = "";
-    private static final String PREFS = TesterUpdateReceiver.PREFS;
+    private static final String PREFS = "channel_forge_tv";
     private static final String PAIRED_CREATOR = "paired_creator_url";
     private static final long DIRECTORY_REFRESH_MS = 60_000L;
     private static final long DIRECTORY_RETRY_MS = 10_000L;
@@ -345,35 +336,22 @@ public class MainActivity extends Activity {
         menuSounds.setOnLoadCompleteListener((pool, sample, status) -> menuSoundReady = status == 0);
         menuTick = menuSounds.load(this, R.raw.navigation, 1);
         PackageManager features = getPackageManager();
-        phoneLayout = BuildConfig.PHONE_TESTER || (!BuildConfig.TESTER_BUILD
-                && features.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+        phoneLayout = features.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
                 && !features.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
-                && !features.hasSystemFeature("android.hardware.type.television"));
-        tvTheme = !phoneLayout && (BuildConfig.TESTER_BUILD || features.hasSystemFeature("amazon.hardware.fire_tv")
+                && !features.hasSystemFeature("android.hardware.type.television");
+        tvTheme = !phoneLayout && (features.hasSystemFeature("amazon.hardware.fire_tv")
                 || features.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
                 || features.hasSystemFeature("android.hardware.type.television"));
         if (phoneLayout) {
-            if (!BuildConfig.PHONE_TESTER) setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
             getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
         } else getWindow().getDecorView().setSystemUiVisibility(5894);
         guideCache = new GuideCache(getFilesDir());
         buildUi();
         registerUpdateResult();
-        if (BuildConfig.TESTER_BUILD && !testerConsented()) {
-            new AlertDialog.Builder(this).setTitle("ChannelForge TV Tester").setMessage(TESTER_NOTICE)
-                    .setCancelable(false).setNegativeButton("Decline", (box, button) -> finish())
-                    .setPositiveButton("I agree", (box, button) -> {
-                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(TESTER_CONSENT, true).apply();
-                        startViewer();
-                    }).show();
-        } else startViewer();
-    }
-
-    private void startViewer() {
         loadDirectory();
         guide.postDelayed(directoryRefresh, DIRECTORY_REFRESH_MS);
-        if (!BuildConfig.TESTER_BUILD) checkUpdates(false);
-        if (BuildConfig.TESTER_BUILD) updateLoader.execute(((TesterApplication) getApplication())::sendPendingCrash);
+        checkUpdates(false);
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag") // Earlier Fire OS versions use the signature permission.
@@ -497,8 +475,8 @@ public class MainActivity extends Activity {
             touchRetry = focusButton("↻  Retry");
             touchRetry.setOnClickListener(v -> retrySelection());
             bufferPanel.addView(touchRetry);
-            touchDebugger = focusButton("Developer");
-            touchDebugger.setOnClickListener(v -> showTesterTools());
+            touchDebugger = focusButton("Diagnostics");
+            touchDebugger.setOnClickListener(v -> showDiagnostics());
             bufferPanel.addView(touchDebugger);
         }
         bufferPanel.setVisibility(View.GONE);
@@ -542,8 +520,6 @@ public class MainActivity extends Activity {
             }
 
             @Override public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_BUFFERING) testerEvent("buffering");
-                if (state == Player.STATE_ENDED) testerEvent("ended");
                 if (guideVisible || recovering || ejectingTape || playbackFailed) return;
                 if (state == Player.STATE_BUFFERING) {
                     if (renderedFrame && player.getPlayWhenReady() && rebufferStarted == 0) {
@@ -581,10 +557,9 @@ public class MainActivity extends Activity {
                 renderedFrame = true;
                 if (firstFrameMs < 0) {
                     firstFrameMs = SystemClock.elapsedRealtime() - tuneStarted;
-                    testerEvent("first-frame");
+                    android.util.Log.i("ChannelForgePlayback", "First frame in " + firstFrameMs
+                            + " ms via " + deliveryPath);
                 }
-                if (BuildConfig.TESTER_BUILD) android.util.Log.i("ChannelForgePlayback",
-                        usingPreferredRelay ? "First frame via preferred media relay" : "First frame via registered media route");
                 if (player.getPlayWhenReady()) hidePlaybackBuffer();
                 if (tunedChannel != null) showChannelBanner(tunedChannel);
                 showUpcomingIfPlaying();
@@ -648,13 +623,13 @@ public class MainActivity extends Activity {
         menu.setOnClickListener(v -> toggleMenu());
         header.addView(menu);
         ImageView logo=new ImageView(this);
-        logo.setImageResource(BuildConfig.TESTER_BUILD ? R.drawable.channel_forge_tv_tester_icon : R.drawable.channel_forge_viewer_brand);
+        logo.setImageResource(R.drawable.channel_forge_viewer_brand);
         logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
         int logoSize = dp(phoneLayout || compact || tvTheme ? 36 : 40);
         logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         header.addView(logo,new LinearLayout.LayoutParams(logoSize,logoSize));
         LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);
-        TextView brand=text(BuildConfig.TESTER_BUILD && !phonePortrait ? "CHANNELFORGE TV TESTER" : "CHANNELFORGE TV",
+        TextView brand=text("CHANNELFORGE TV",
                 compact ? 16 : 20, true);
         brand.setTextColor(color("#FFF229"));brand.setLetterSpacing(compact ? .08f : .16f);
         brand.setSingleLine(true);
@@ -806,7 +781,7 @@ public class MainActivity extends Activity {
             columns.addView(channelsPanel, new LinearLayout.LayoutParams(0, -1, 1f));
         }
         syncStudioScreen();
-        setMenuCollapsed(phoneLayout || !BuildConfig.TESTER_BUILD && compactTouchLayout);
+        setMenuCollapsed(phoneLayout || compactTouchLayout);
         if (height >= 420 && !touchDevice && !tvTheme) {
             TextView help = text("↑↓  SURF CHANNELS     •     OK  WATCH / GUIDE     •     BACK  RETURN TO GUIDE", 10, true);
             help.setTextColor(color("#7184A9"));
@@ -884,7 +859,7 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
         ImageView logo = new ImageView(this);
-        logo.setImageResource(BuildConfig.TESTER_BUILD ? R.drawable.channel_forge_tv_tester_icon : R.drawable.channel_forge_viewer_brand);
+        logo.setImageResource(R.drawable.channel_forge_viewer_brand);
         logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         row.addView(logo, new LinearLayout.LayoutParams(dp(46), dp(46)));
         TextView brand = text("", 16, true);
@@ -920,10 +895,8 @@ public class MainActivity extends Activity {
             if (movieShelfLoaded && currentStudio != null && currentStudio.cinemaSupported) renderMovies(currentStudio);
             showLoadedChannels();
         }
-        if (testerConsented()) {
-            guide.postDelayed(directoryRefresh, DIRECTORY_REFRESH_MS);
-            if (directoryStale) guide.postDelayed(directoryRetry, DIRECTORY_RETRY_MS);
-        }
+        guide.postDelayed(directoryRefresh, DIRECTORY_REFRESH_MS);
+        if (directoryStale) guide.postDelayed(directoryRetry, DIRECTORY_RETRY_MS);
         bufferPanel.getLayoutParams().width = playbackPanelWidth();
         bufferPanel.requestLayout();
     }
@@ -933,11 +906,8 @@ public class MainActivity extends Activity {
                 ? Math.min(dp(360), dp(getResources().getConfiguration().screenWidthDp - 24)) : dp(360);
     }
 
-    private String testerVersionLabel() { return alphaVersionLabel(BuildConfig.VERSION_NAME); }
-
     private String installedVersionLabel() {
-        return BuildConfig.TESTER_BUILD ? testerVersionLabel()
-                : alphaVersionLabel(BuildConfig.VERSION_NAME).replace("Alpha V", "Alpha Version ");
+        return alphaVersionLabel(BuildConfig.VERSION_NAME).replace("Alpha V", "Alpha Version ");
     }
 
     private static String alphaVersionLabel(String version) {
@@ -971,8 +941,6 @@ public class MainActivity extends Activity {
     }
 
     private void loadDirectory() {
-        if (BuildConfig.TESTER_BUILD && !testerConsented()) return;
-        testerEvent("guide");
         if(directoryLoading)return;
         directoryLoading=true;
         if (creators.isEmpty()) status.setText("Scanning the public ChannelForge directory…");
@@ -1558,13 +1526,11 @@ public class MainActivity extends Activity {
     }
 
     private void openSystemUpdates() {
-        if (BuildConfig.TESTER_BUILD && testerConsented()) checkUpdates(true);
-        else selectUpdate();
+        selectUpdate();
     }
 
     private void openSystemDiagnostics() {
-        if (BuildConfig.TESTER_BUILD) showTesterTools();
-        else showDiagnostics();
+        showDiagnostics();
     }
 
     private void buildSystemPage() {
@@ -1573,12 +1539,8 @@ public class MainActivity extends Activity {
         options.addView(sectionTitle("SYSTEM", "#53EFFF"));
         options.addView(homeTile("↻", "Check for Update", "Find a newer version of ChannelForge TV", this::openSystemUpdates));
         addGap(options, 7);
-        options.addView(homeTile("◇", BuildConfig.TESTER_BUILD ? "Developer" : "Diagnostics",
+        options.addView(homeTile("◇", "Diagnostics",
                 "View playback and connection details", this::openSystemDiagnostics));
-        if (BuildConfig.TESTER_BUILD) {
-            addGap(options, 7);
-            options.addView(homeTile("＋", "Pair a Studio", "Connect to a Studio by its address", this::showPairingDialog));
-        }
         auxiliaryPage.addView(options);
     }
 
@@ -3470,23 +3432,10 @@ public class MainActivity extends Activity {
     }
 
     private void selectUpdate() {
-        if (BuildConfig.TESTER_BUILD) {
-            showTesterNotes(testerVersionLabel(), BuildConfig.TESTER_RELEASE_NOTES,
-                    "Open System → Check for Update to look for a newer build.");
-            return;
-        }
         if (updateBusy) return;
         if (latestUpdateNotes.isEmpty()) {
             checkUpdates(true);
         } else showUpdateNotes();
-    }
-
-    private void showTesterNotes(String label, String notes, String status) {
-        new AlertDialog.Builder(this)
-                .setTitle(label + " patch notes")
-                .setMessage(notes.isEmpty() ? status : notes + "\n\n" + status)
-                .setPositiveButton("Done", null)
-                .show();
     }
 
     private void showUpdateNotes() {
@@ -3562,24 +3511,7 @@ public class MainActivity extends Activity {
                     pendingUpdate = release;
                     latestUpdateNotes = notes.toString();
                     finishUpdate("");
-                    if (requested && BuildConfig.TESTER_BUILD) {
-                        if (release == null) {
-                            showTesterNotes(testerVersionLabel(), BuildConfig.TESTER_RELEASE_NOTES,
-                                    "You’re on the latest Tester build.");
-                        } else {
-                            if (canInstallUpdates()) {
-                                showTesterNotes(alphaVersionLabel(release.version), latestUpdateNotes, "Downloading the update…");
-                                downloadUpdate();
-                            } else {
-                                new AlertDialog.Builder(this)
-                                        .setTitle(alphaVersionLabel(release.version) + " patch notes")
-                                        .setMessage(latestUpdateNotes)
-                                        .setNegativeButton("Later", null)
-                                        .setPositiveButton("Install update", (dialog, which) -> installSelectedUpdate())
-                                        .show();
-                            }
-                        }
-                    } else if (requested) showUpdateNotes();
+                    if (requested) showUpdateNotes();
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
@@ -3629,10 +3561,6 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 31) flags |= PendingIntent.FLAG_MUTABLE;
         PendingIntent result = PendingIntent.getBroadcast(this, updateSession, callback, flags);
         try (PackageInstaller.Session session = installer.openSession(updateSession)) {
-            if (BuildConfig.TESTER_BUILD && pendingUpdate != null && !getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .edit().putInt(TesterUpdateReceiver.REOPEN_AFTER_UPDATE, pendingUpdate.testerRevision).commit()) {
-                throw new IOException("Could not save the update restart state.");
-            }
             session.commit(result.getIntentSender());
             sessionCommitted = true;
         } catch (IOException | RuntimeException error) {
@@ -3664,9 +3592,6 @@ public class MainActivity extends Activity {
     }
 
     private void finishUpdate(String message) {
-        if (BuildConfig.TESTER_BUILD && !message.isEmpty() && pendingUpdate != null) {
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(TesterUpdateReceiver.REOPEN_AFTER_UPDATE).apply();
-        }
         updateBusy = sessionCommitted = installerOpened = false;
         updateSession = -1;
         installConfirmation = null;
@@ -4015,7 +3940,6 @@ public class MainActivity extends Activity {
         totalRebufferMs = rebufferCount = 0;
         setBitrateCap(Integer.MAX_VALUE);
         totalRetries = liveRetries = movieRetries = lastErrorCode = lastHttpCode = 0;
-        routeRecoveryStarted = 0;
         lastHttpResource = null;
         segmentLoads = segmentErrors = manifestErrors = 0;
         segmentLoadMs = segmentLoadBytes = slowestSegmentMs = slowestManifestMs = 0;
@@ -4025,7 +3949,6 @@ public class MainActivity extends Activity {
         lastReason = "none";
         tuneStarted = SystemClock.elapsedRealtime();
         firstFrameMs = -1;
-        testerEvent("load");
     }
 
     private static String responseHeader(Map<String, List<String>> headers, String name) {
@@ -4069,7 +3992,6 @@ public class MainActivity extends Activity {
         lastReason = reason;
         if (recentEvents.size() == 16) recentEvents.removeFirst();
         recentEvents.addLast(System.currentTimeMillis() + " " + reason + " (HTTP " + lastHttpCode + ")");
-        testerEvent("retry");
         if (activeMovie != null && (renderedFrame || player.getCurrentPosition() > 0))
             resumePosition = Math.max(0, player.getCurrentPosition());
         int generation = ++playGeneration;
@@ -4086,23 +4008,16 @@ public class MainActivity extends Activity {
             return;
         }
         int attempt = channel != null ? ++liveRetries : ++movieRetries;
-        if (attempt == 1) routeRecoveryStarted = SystemClock.elapsedRealtime();
         final Creator source = channel == null && film != null && !film.studioId.isEmpty()
                 ? studioById(film.studioId) : channel == null ? currentStudio : studioById(channel.studioId);
         final String studioId = source != null ? source.id : film != null ? film.studioId : channel != null ? channel.studioId : "";
-        boolean replacementOnly = BuildConfig.TESTER_BUILD && attempt == 4 && !studioId.isEmpty()
-                && (channel != null && !channel.id.isEmpty() || film != null && !film.id.isEmpty());
-        if (attempt > 3 && !replacementOnly) {
+        if (attempt > 3) {
             failRecovery(reason);
             return;
         }
         totalRetries++;
-        showBuffering(replacementOnly ? "Checking for the Studio’s backup connection…"
-                : reason + ". Reconnecting (" + attempt + "/3)…", true);
-        boolean startupLookup = BuildConfig.TESTER_BUILD && deadlineExpired && channel != null
-                && attempt == 1 && segmentLoads == 0 && !renderedFrame;
-        boolean shortGuide = startupLookup || replacementOnly;
-        boolean refreshRoute = startupLookup || attempt > 1 || lastHttpCode == 404 || lastHttpCode == 410
+        showBuffering(reason + ". Reconnecting (" + attempt + "/3)…", true);
+        boolean refreshRoute = attempt > 1 || lastHttpCode == 404 || lastHttpCode == 410
                 || lastHttpCode == 502 || lastHttpCode == 504;
         video.postDelayed(() -> {
             if (generation != playGeneration || guideVisible || isDestroyed()) return;
@@ -4114,8 +4029,7 @@ public class MainActivity extends Activity {
             Runnable routeDeadline = () -> {
                 if (generation == playGeneration && !guideVisible && !isDestroyed()) {
                     ++playGeneration;
-                    if (replacementOnly) failRecovery(reason);
-                    else resumeAfterRecovery(channel, film);
+                    resumeAfterRecovery(channel, film);
                 }
             };
             video.postDelayed(routeDeadline, 8000);
@@ -4133,16 +4047,12 @@ public class MainActivity extends Activity {
                     }
                     if (channel != null && origin != null && !origin.channelStatus.isEmpty()) {
                         Uri status = Uri.parse(origin.channelStatus);
-                        Uri previous = Uri.parse(channel.guideUrl).buildUpon().clearQuery().fragment(null).build();
-                        // A first startup timeout only needs a short guide from a replacement origin.
-                        if (!shortGuide || !status.buildUpon().clearQuery().fragment(null).build().equals(previous)) {
-                            String address = status.buildUpon().appendQueryParameter("guide", shortGuide ? "brief" : "extended").build().toString();
-                            for (Channel row : parseOnlineChannels(get(address), address)) {
-                                if ((!channel.id.isEmpty() && channel.id.equals(row.id)) || channel.url.equals(row.url)) {
-                                    row.guideUrl = status.buildUpon().appendQueryParameter("guide", "extended").build().toString();
-                                    fresh = row;
-                                    break;
-                                }
+                        String address = status.buildUpon().appendQueryParameter("guide", "extended").build().toString();
+                        for (Channel row : parseOnlineChannels(get(address), address)) {
+                            if ((!channel.id.isEmpty() && channel.id.equals(row.id)) || channel.url.equals(row.url)) {
+                                row.guideUrl = status.buildUpon().appendQueryParameter("guide", "extended").build().toString();
+                                fresh = row;
+                                break;
                             }
                         }
                     } else if (film != null && origin != null && !origin.vault.isEmpty()) {
@@ -4170,16 +4080,12 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     video.removeCallbacks(routeDeadline);
                     if (generation != playGeneration || guideVisible || isDestroyed()) return;
-                    if (replacementOnly && replacement == null && (movieUrl.isEmpty() || film == null || movieUrl.equals(film.url))) {
-                        failRecovery(reason);
-                        return;
-                    }
                     if (channel != null) {
                         if (replacement != null) {
                             channel.url = replacement.url;
                             channel.continuousUrl = replacement.continuousUrl;
                             channel.fireTvUrl = replacement.fireTvUrl;
-                            if (!shortGuide || channel.programs == null) channel.programs = replacement.programs;
+                            channel.programs = replacement.programs;
                             channel.guideUrl = replacement.guideUrl;
                             channel.state = replacement.state;
                             channel.airUntil = replacement.airUntil;
@@ -4190,7 +4096,7 @@ public class MainActivity extends Activity {
                     resumeAfterRecovery(channel, film);
                 });
             });
-        }, replacementOnly ? Math.max(750, 30_000 - (SystemClock.elapsedRealtime() - routeRecoveryStarted)) : 750L << (attempt - 1));
+        }, 750L << (attempt - 1));
     }
 
     private void failRecovery(String reason) {
@@ -4377,115 +4283,6 @@ public class MainActivity extends Activity {
         return super.dispatchKeyEvent(event);
     }
 
-    private boolean testerConsented() {
-        return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(TESTER_CONSENT, false);
-    }
-
-    private void testerEvent(String kind) {
-        if (!BuildConfig.TESTER_BUILD || !testerConsented()) return;
-        try {
-            if (testerTimeline.size() == 40) testerTimeline.removeFirst();
-            testerTimeline.addLast(new JSONObject().put("kind", kind).put("ms", SystemClock.elapsedRealtime()));
-            ((TesterApplication) getApplication()).rememberTimeline(new JSONArray(testerTimeline));
-        } catch (JSONException invalid) { throw new IllegalStateException(invalid); }
-    }
-
-    private void showTesterTools() {
-        if (!testerConsented()) return;
-        TesterApplication tester = (TesterApplication) getApplication();
-        String current = tester.automaticReports() ? "Enabled" : "Off";
-        new AlertDialog.Builder(this).setTitle("Developer").setItems(
-                new String[]{"Review playback report", "Review saved crash report", "Automatic crash reports · " + current, "Stop testing"},
-                (dialog, selection) -> {
-                    if (selection == 0) showTesterReport();
-                    else if (selection == 1) showSavedCrash(tester);
-                    else if (selection == 2) new AlertDialog.Builder(this).setTitle("Automatic crash reports")
-                            .setMessage("After an app crash, send its error type, build, device model, and recent playback events when you reopen ChannelForge. You can turn this off here.")
-                            .setNegativeButton("Close", null)
-                            .setPositiveButton(tester.automaticReports() ? "Turn off" : "Enable",
-                                    (box, button) -> tester.setAutomaticReports(!tester.automaticReports())).show();
-                    else {
-                        tester.setAutomaticReports(false);
-                        tester.clearSavedCrash();
-                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(TESTER_CONSENT).apply();
-                        testerTimeline.clear();
-                        finish();
-                    }
-                }).setNegativeButton("Close", null).show();
-    }
-
-    private void showSavedCrash(TesterApplication tester) {
-        String report = tester.savedCrash();
-        if (report == null) {
-            new AlertDialog.Builder(this).setTitle("Crash reports")
-                    .setMessage("There is no saved app crash report. Send a playback report for a channel that won’t load.")
-                    .setNegativeButton("Close", null).setPositiveButton("Playback report", (dialog, which) -> showTesterReport())
-                    .show();
-            return;
-        }
-        AlertDialog review = new AlertDialog.Builder(this).setTitle("Saved crash report").setMessage(report)
-                .setNegativeButton("Close", null).setPositiveButton("Send crash report", null).show();
-        Button send = review.getButton(AlertDialog.BUTTON_POSITIVE);
-        send.setOnClickListener(view -> deliverTesterReport(report, review, send, () -> tester.sendSavedCrash(report)));
-    }
-
-    private JSONObject snapshotForSharing() throws JSONException {
-        JSONObject snapshot = diagnosticSnapshot();
-        JSONObject shared = new JSONObject();
-        for (String key : ("app engine sdk model trace_id directoryCached studioCount staleGuides firstFrameMs "
-                + "bufferMs positionMs playing bandwidthEstimateBps retries temporaryBitrateCapBps "
-                + "postStartRebuffers postStartRebufferMs playerErrorCode httpError http_resource build_revision width height "
-                + "videoBitrateBps videoMime audioMime audioChannels renderedFrames droppedFrames "
-                + "delivery_route delivery_path segment_loads segment_errors manifest_errors slowest_segment_ms slowest_manifest_ms segment_rate_bps "
-                + "relay_cache_hits relay_cache_misses slowest_relay_upstream_ms slowest_studio_response_ms").split(" ")) {
-            if (snapshot.has(key)) shared.put(key, snapshot.get(key));
-        }
-        shared.put("platform", TesterApplication.platform())
-                .put("kind", activeMovie != null ? "movie" : tunedChannel != null ? "live" : JSONObject.NULL)
-                .put("timeline", new JSONArray(testerTimeline));
-        return shared;
-    }
-
-    private void showTesterReport() {
-        try {
-            JSONObject shared = guideVisible && lastPlaybackReport != null ? lastPlaybackReport : snapshotForSharing();
-            AlertDialog.Builder tools = new AlertDialog.Builder(this).setTitle("Developer")
-                    .setMessage(TESTER_NOTICE + "\n\n" + shared.toString(2))
-                    .setNegativeButton("Close", null);
-            if (!BuildConfig.TESTER_REPORT_URL.isEmpty()) {
-                tools.setPositiveButton("Send report", null);
-            }
-            AlertDialog review = tools.show();
-            Button send = review.getButton(AlertDialog.BUTTON_POSITIVE);
-            if (send != null) send.setOnClickListener(view -> sendTesterReport(shared.toString(), review, send));
-        } catch (JSONException invalid) { throw new IllegalStateException(invalid); }
-    }
-
-    private void sendTesterReport(String report, AlertDialog dialog, Button button) {
-        deliverTesterReport(report, dialog, button, () -> TesterApplication.post(report.getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private interface ReportSender { String send(); }
-
-    private void deliverTesterReport(String report, AlertDialog dialog, Button button, ReportSender sender) {
-        if (!testerConsented()) return;
-        button.setEnabled(false);
-        button.setText("Sending…");
-        updateLoader.execute(() -> {
-            String receipt = sender.send();
-            String result = receipt == null ? "Could not send the report. The testing link may have expired."
-                    : "Report sent. ID " + receipt;
-            runOnUiThread(() -> {
-                if (dialog.isShowing()) {
-                    dialog.setMessage(result + "\n\n" + report);
-                    button.setText(receipt == null ? "Retry report" : "Sent ✓");
-                    button.setEnabled(receipt == null);
-                    if (receipt != null) dialog.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus();
-                } else Toast.makeText(this, result, Toast.LENGTH_LONG).show();
-            });
-        });
-    }
-
     private JSONObject diagnosticSnapshot() {
         JSONObject result = new JSONObject();
         try {
@@ -4562,7 +4359,6 @@ public class MainActivity extends Activity {
         if (key == KeyEvent.KEYCODE_MENU) {
             if (event.getRepeatCount() == 0) {
                 if (!guideVisible) choosePlaybackQuality();
-                else if (BuildConfig.TESTER_BUILD) showTesterTools();
                 else showDiagnostics();
             }
             return true;
@@ -4636,6 +4432,10 @@ public class MainActivity extends Activity {
         super.onPause();
     }
     @Override protected void onStop() {
+        if (isFinishing()) {
+            JSONObject metrics = guideVisible && lastPublicPlayback != null ? lastPublicPlayback : diagnosticSnapshot();
+            new AlphaDiagnostics(this).submit(metrics, null);
+        }
         returnToGuide();
         super.onStop();
     }
@@ -4751,12 +4551,7 @@ public class MainActivity extends Activity {
         boolean refreshAfterStall = !guideVisible && resumed
                 && (playbackFailed || playbackWaiting || liveRetries > 0 || movieRetries > 0);
         if (tunedChannel != null || activeMovie != null) {
-            if (BuildConfig.TESTER_BUILD && testerConsented()) {
-                try { lastPlaybackReport = snapshotForSharing(); }
-                catch (JSONException ignored) { lastPlaybackReport = null; }
-            } else {
-                lastPublicPlayback = diagnosticSnapshot();
-            }
+            lastPublicPlayback = diagnosticSnapshot();
         }
         ++playGeneration;
         recovering = false;

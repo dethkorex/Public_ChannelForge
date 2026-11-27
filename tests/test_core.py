@@ -28,6 +28,8 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(value["token_saved"])
 
     def test_guide_settings_save_while_the_existing_plex_connection_is_down(self):
+        origin = "https://relay.example.net/studio/123456789012abcd"
+        app.atomic_json(app.CONFIG_FILE, {**app.load_json(app.CONFIG_FILE, {}), "managed_relay": True, "public_url": origin})
         with (app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler) as local,
               mock.patch.object(app, "plex_request", side_effect=ValueError("Plex is offline")) as plex):
             threading.Thread(target=local.serve_forever, daemon=True).start()
@@ -38,14 +40,17 @@ class CoreTests(unittest.TestCase):
                     response = client.getresponse()
                     return response.status, json.loads(response.read())
 
-                status, result = save({"guide_hours": 36, "plex_token": ""})
+                status, result = save({"guide_hours": 36, "plex_token": "", "public_url": "http://stale.local",
+                                       "directory_url": "https://old-directory.example.net"})
                 self.assertEqual(status, 200)
-                self.assertEqual(result["config"]["guide_hours"], 36)
+                self.assertEqual(result["config"]["guide_hours"], 12)
+                self.assertEqual(app.config()["public_url"], origin)
+                self.assertEqual(app.config()["directory_url"], app.DEFAULT_DIRECTORY_URL)
                 plex.assert_not_called()
                 status, result = save({"guide_hours": 48, "plex_token": "new-token"})
                 self.assertEqual((status, result["error"]), (400, "Plex is offline"))
                 plex.assert_called_once()
-                self.assertEqual(app.config()["guide_hours"], 36)
+                self.assertEqual(app.config()["guide_hours"], 12)
                 self.assertEqual(app.config()["plex_token"], "test")
             finally:
                 client.close()
@@ -115,8 +120,6 @@ class CoreTests(unittest.TestCase):
                 handler.redirect("/ffmpeg-stream/" + "c" * 20 + "/index_hd.m3u8?viewer=" + viewer_id)
 
         with app.open_public_media_server(0) as server, mock.patch.object(app.Handler, "broadcast", respond):
-            worker = threading.Thread(target=server.serve_forever, daemon=True)
-            worker.start()
             client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
             try:
                 client.request("GET", master)
@@ -138,7 +141,6 @@ class CoreTests(unittest.TestCase):
             finally:
                 client.close()
                 server.shutdown()
-                worker.join(timeout=5)
 
     def test_movie_activity_counts_playback_sessions_until_their_lease_expires(self):
         item_id, viewer, other_viewer = "a" * 24, "b" * 32, "c" * 32
@@ -207,16 +209,16 @@ class CoreTests(unittest.TestCase):
 
     def test_saved_funnel_requires_a_verified_funnel_address(self):
         app.atomic_json(app.CONFIG_FILE, {"public_url": "https://old.app.lhr.life", "public_tunnel": True})
-        with (mock.patch.object(app, "TESTER_BUILD", False), mock.patch.object(app, "TUNNEL_URL", ""),
+        with (mock.patch.object(app, "TUNNEL_URL", ""),
               mock.patch.object(app.subprocess, "run") as run):
             with self.assertRaisesRegex(ValueError, "saved Tailscale media origin"):
                 app.start_public_tunnel()
             run.assert_not_called()
 
-    def test_tester_can_verify_saved_funnel_without_cli_status(self):
+    def test_studio_can_verify_saved_funnel_without_cli_status(self):
         origin = "https://studio.example.ts.net:8443"
         app.atomic_json(app.CONFIG_FILE, {"public_url": origin})
-        with (mock.patch.object(app, "TESTER_BUILD", True), mock.patch.object(app, "TUNNEL_URL", ""),
+        with (mock.patch.object(app, "TUNNEL_URL", ""),
               mock.patch.object(app.subprocess, "run") as run,
               mock.patch.object(app, "stage_media_funnel") as verify):
             self.assertEqual(app.start_public_tunnel(), origin)
@@ -228,7 +230,7 @@ class CoreTests(unittest.TestCase):
         candidate_origin = "https://studio.example.ts.net"
         app.atomic_json(app.CONFIG_FILE, {"public_url": accepted})
         previous, candidate = mock.Mock(server_port=48600), mock.Mock(server_port=18790)
-        with (mock.patch.object(app, "TESTER_BUILD", True), mock.patch.object(app, "PUBLIC_MEDIA_PORT", 18790),
+        with (mock.patch.object(app, "PUBLIC_MEDIA_PORT", 18790),
               mock.patch.object(app, "PUBLIC_MEDIA_SERVER", previous),
               mock.patch.object(app, "open_public_media_server", return_value=candidate),
               mock.patch.object(app, "relay_reaches_this_creator", return_value=True) as check,
@@ -411,7 +413,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("X-Plex-Token", json.dumps(public))
         brief = app.public_channel_catalog(brief=True)["channels"][0]
         self.assertEqual(brief["stream_url"], public["stream_url"])
-        self.assertEqual(len(brief["programs"]), 1)
+        self.assertEqual(len(brief["programs"]), 2)
         current = brief["programs"][0]
         self.assertEqual(current["title"], "Example")
         self.assertEqual(set(current), {"title", "start_epoch_ms", "stop_epoch_ms"})
@@ -646,8 +648,12 @@ class CoreTests(unittest.TestCase):
 
     def test_completed_plex_signin_saves_discovered_server(self):
         root = app.ET.fromstring('<MediaContainer friendlyName="Signed In Plex" myPlexUsername="viewer" version="1.2.3"/>')
-        with mock.patch.object(app, "plex_tv_json", return_value={"authToken": "new-token"}), mock.patch.object(app, "discover_plex_server", return_value="https://plex.example:32400"), mock.patch.object(app, "plex_request", return_value=root), mock.patch.object(app, "generate_exports"):
+        with (mock.patch.object(app, "plex_tv_json", return_value={"authToken": "new-token"}),
+              mock.patch.object(app, "discover_plex_server", return_value="https://plex.example:32400"),
+              mock.patch.object(app, "plex_request", return_value=root), mock.patch.object(app, "generate_exports"),
+              mock.patch.object(app, "sync_plex_movies_async") as sync_movies):
             result = app.poll_plex_signin(42)
+        sync_movies.assert_called_once_with()
         saved = app.config()
         self.assertTrue(result["complete"])
         self.assertEqual(saved["plex_token"], "new-token")
@@ -764,16 +770,17 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("Fish", content)
 
     def test_installs_complete_neutral_starter_asset_pack(self):
-        self.assertEqual(len(app.DEFAULT_ASSET_THEMES), 20)
         app.install_default_assets()
         built_ins = [asset for asset in app.asset_manifest() if asset.get("built_in")]
-        self.assertEqual(len(built_ins), len(app.DEFAULT_ASSET_THEMES) * 3)
-        self.assertEqual({asset["kind"] for asset in built_ins}, {"logo", "guide-background", "corner-bug"})
+        self.assertEqual(len(built_ins), len(app.studio_branding.STYLES) * 3 + len(app.studio_branding.AMBIENCE))
+        self.assertEqual({asset["kind"] for asset in built_ins}, {"logo", "guide-background", "corner-bug", "ambience"})
         for asset in built_ins:
-            self.assertTrue((app.ASSETS_DIR / asset["filename"]).is_file())
-            root = app.ET.fromstring((app.ASSETS_DIR / asset["filename"]).read_bytes())
-            self.assertEqual(root.tag.rsplit("}", 1)[-1], "svg")
-            self.assertTrue(any(node.tag.rsplit("}", 1)[-1] in {"path", "circle", "rect", "ellipse"} for node in root.iter()))
+            path = app.ASSETS_DIR / asset["filename"]
+            if asset["kind"] == "ambience":
+                with app.wave.open(str(path), "rb") as track:
+                    self.assertEqual(track.getnframes() / track.getframerate(), 25)
+            else:
+                self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
         with self.assertRaisesRegex(ValueError, "cannot be deleted"):
             app.delete_asset(built_ins[0]["id"])
 
@@ -971,7 +978,7 @@ class CoreTests(unittest.TestCase):
             for _ in range(2):
                 with self.assertRaisesRegex(ValueError, "temporary"):
                     app.publish_studio(profile)
-            self.assertEqual(app.config()["guide_hours"], 42)
+            self.assertEqual(app.config()["guide_hours"], 12)
             self.assertEqual(app.config()["public_url"], "")
             self.assertEqual(request.call_args_list[0], request.call_args_list[1])
             self.assertEqual(len(request.call_args.args[3]), 64)

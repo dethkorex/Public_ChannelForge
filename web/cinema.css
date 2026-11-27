@@ -820,26 +820,17 @@ main.wrap .home-panels { grid-template-columns: minmax(0,1.13fr) minmax(0,1fr); 
 .viewer-shell.cinema-mode .selection #selected-play{background:#16ddea;color:#061522;box-shadow:0 0 12px #15deea40}
 .playback-troubleshooting summary{cursor:pointer;color:#53eaf2;padding:8px 0}
 #playback-troubleshooting-controls{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:8px 0}
-#playback-troubleshooting-controls button,#playback-troubleshooting-controls select,.tester-report button{
+#playback-troubleshooting-controls button,#playback-troubleshooting-controls select{
     color:#eef9ff;background:#101930;border:1px solid #5be8ee;border-radius:8px;padding:8px 12px;
 }
-.tester-report{padding:20px;max-width:760px;margin:auto;text-align:left}
-.tester-report pre{max-height:38vh;overflow:auto;background:#070e22;border:1px solid #345574;border-radius:8px;padding:12px;white-space:pre-wrap}
-.tester-report-actions{display:flex;flex-wrap:wrap;gap:10px}
-.tester-report button:hover,#playback-troubleshooting-controls button:hover{background:#193958}
-.tester-report button:focus-visible,#playback-troubleshooting-controls button:focus-visible{outline:2px solid #ffeb94;outline-offset:2px}
-.tester-report button:active,#playback-troubleshooting-controls button:active{background:#225e71;transform:translateY(1px)}
-.tester-report button:disabled{opacity:.55;cursor:wait}
-.tester-report [role="status"]{min-height:1.5em;color:#9deef7}
-.tester-consent{background:#101529;color:#eef8ff;border:1px solid #53eaf2;border-radius:12px;max-width:min(86vw,560px);padding:24px}
-.tester-consent::backdrop{background:#040818df}
+#playback-troubleshooting-controls button:hover{background:#193958}
+#playback-troubleshooting-controls button:focus-visible{outline:2px solid #ffeb94;outline-offset:2px}
+#playback-troubleshooting-controls button:active{background:#225e71;transform:translateY(1px)}
 [data-open-diagnostics].viewer-system-action{display:grid;grid-template-columns:32px 1fr;align-items:center;text-align:left;width:100%;padding:9px 8px;border:1px solid transparent;border-radius:10px;background:transparent;color:#c3cbe2;font-weight:800;cursor:pointer}
 .viewer-system-action i{font-style:normal;text-align:center}
 .viewer-system-action:is(:focus-visible,:hover){border-color:#ff3eb8;color:#fff;background:#1a1741}
-[data-tester] #continue-list{grid-template-columns:minmax(0,1fr);max-width:980px;margin:auto}
 .watch-list-dialog{width:min(90vw,560px);padding:20px;background:#10213a;color:#f2f9ff;border:1px solid #59e8f1;border-radius:12px}
 .watch-list-dialog::backdrop{background:#030812d0}
 .watch-list-dialog>div{display:flex;flex-wrap:wrap;gap:8px}
 .watch-list-dialog button{color:#f2f9ff;background:#142c46;border:1px solid #52dbe8;border-radius:7px;padding:9px 12px}
 .watch-list-dialog button:focus-visible{outline:2px solid #ffea9e;outline-offset:2px}
-[data-tester] [data-section-block="updates"] .section-placeholder[hidden]{display:none}

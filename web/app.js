@@ -3,6 +3,7 @@ const selectedLineup = new Map();
 let mediaLoadRequest = 0, workspaceLibraryRequest = 0, workspaceMediaRequest = 0;
 let libraryRequest, libraryFetchedAt = 0;
 let builderLibraryKind = "all", builderLibraries = [], builderLibraryRequest = 0;
+let groupedMediaChoices = [], detailedMediaChoices = null;
 const builderLibrarySelections = new Map();
 const builderLibraryPool = "@all";
 let builderPoolSignature = "";
@@ -20,7 +21,7 @@ const nextChannelNumber=()=>String(Math.max(0,...state.channels.map(channel=>Num
 if(window.Hls){Hls.DefaultConfig.manifestLoadingTimeOut=30000;Hls.DefaultConfig.fragLoadingTimeOut=30000}
 async function api(path,options={}){const response=await fetch(path,{headers:{"Content-Type":"application/json"},...options});const data=await response.json();if(!response.ok)throw new Error(data.error||`Request failed (${response.status})`);return data}
 function toast(message,error=false){const el=$("#toast");el.textContent=message;el.className=error?"show error":"show";setTimeout(()=>el.className="",3500)}
-function renderChannels(){const box=$("#channel-list");box.innerHTML=state.channels.length?state.channels.map(c=>{const logo=state.assets.find(a=>a.id===c.logo_asset_id),live=state.now_playing?.[c.id],finished=Date.parse(c.air_until)<=Date.now(),mode={ordered:"In order",shuffle:"Shuffled",shuffle_in_order:"Shuffle shows · episodes in order",marathon:"Series marathon",franchise:"Smart franchise timeline"}[c.playback_mode||"ordered"];return `<article class="channel-card" draggable="true" data-channel-card="${c.id}" data-search="${escapeHtml(`${c.name} ${c.number}`.toLowerCase())}">${logo?`<img class="channel-logo-small" src="/user-assets/${encodeURIComponent(logo.filename)}" alt="">`:""}<span class="drag-handle">⋮⋮</span><span class="channel-number">CH ${escapeHtml(c.number)} · ${finished?"OFFLINE":"LIVE"}</span><h3>${escapeHtml(c.name)}</h3><p class="meta">${finished?"Lineup finished":live?`Now playing: ${escapeHtml(live.title)}`:`${c.items.length} titles in rotation`} · ${mode}</p><div class="actions">${finished?`<button class="primary" data-channel-action="reair" data-id="${c.id}">Put back on TV</button>`:`<button class="primary" data-watch="${c.id}" data-view="watch">Test in player</button>`}<button data-channel-action="refresh" data-id="${c.id}">Refresh guide</button><button data-channel-action="shuffle" data-id="${c.id}">Reshuffle lineup</button><button data-edit="${c.id}">Edit</button><button class="danger" data-delete="${c.id}">Delete</button></div></article>`}).join(""):`<div class="empty">No channels yet. Add a local folder or connect Plex in Media Sources, then create your first channel.</div>`;window.ChannelForgeTesterDecorateChannels?.()}
+function renderChannels(){const box=$("#channel-list");box.innerHTML=state.channels.length?state.channels.map(c=>{const logo=state.assets.find(a=>a.id===c.logo_asset_id),live=state.now_playing?.[c.id],finished=Date.parse(c.air_until)<=Date.now(),mode={custom:"Maximum customization",ordered:"In order",shuffle:"Shuffled",shuffle_in_order:"Shuffle shows · episodes in order",marathon:"Series marathon",franchise:"Smart franchise timeline"}[c.playback_mode||"ordered"];return `<article class="channel-card" draggable="true" data-channel-card="${c.id}" data-search="${escapeHtml(`${c.name} ${c.number}`.toLowerCase())}">${logo?`<img class="channel-logo-small" src="/user-assets/${encodeURIComponent(logo.filename)}" alt="">`:""}<span class="drag-handle">⋮⋮</span><span class="channel-number">CH ${escapeHtml(c.number)} · ${finished?"OFFLINE":"LIVE"}</span><h3>${escapeHtml(c.name)}</h3><p class="meta">${finished?"Lineup finished":live?`Now playing: ${escapeHtml(live.title)}`:`${c.items.length} titles in rotation`} · ${mode}</p><div class="actions">${finished?`<button class="primary" data-channel-action="reair" data-id="${c.id}">Put back on TV</button>`:`<button class="primary" data-watch="${c.id}" data-view="watch">Test in player</button>`}<button data-channel-action="refresh" data-id="${c.id}">Refresh guide</button>${c.playback_mode==="custom"?"":`<button data-channel-action="shuffle" data-id="${c.id}">Reshuffle lineup</button>`}<button data-edit="${c.id}">Edit</button><button class="danger" data-delete="${c.id}">Delete</button></div></article>`}).join(""):`<div class="empty">No channels yet. Add a local folder or connect Plex in Media Sources, then create your first channel.</div>`}
 function builderIsOpen(){return $("#channel-builder").classList.contains("active")}
 function showView(view) {
   const building = view === "channel-builder";
@@ -39,6 +40,9 @@ function showView(view) {
     else button.removeAttribute("aria-current");
   }
   document.body.classList.toggle("building-channel", building);
+  $("#workspace-title").textContent = ({start:"Overview",watch:"Watch TV",channels:"Channels",library:"Library",assets:"Branding",
+    exports:"Guide artwork",setup:"Sources & sharing",system:"System",updates:"Updates",tools:"Community tools",
+    "studio-activity":"Activity","channel-builder":"Channel builder","channel-analytics":"Channel analytics"})[view] || "Studio";
   window.scrollTo({top:0});
 }
 function selectSettingsPanel(panel) {
@@ -147,11 +151,7 @@ async function loadWorkspaceLibraries(force = false) {
 }
 function renderWorkspaceMedia(){
   const query=$("#workspace-library-search").value.trim().toLowerCase();
-  const tester = document.documentElement.hasAttribute("data-tester");
-  const terms = tester ? testerSearchText(query).split(" ").filter(Boolean) : [];
-  const visible=workspaceMedia.filter(item=>tester
-    ? matchesTesterSearch(item.testerSearch ||= testerSearchIndex(item), terms)
-    : `${item.title} ${item.year}`.toLowerCase().includes(query));
+  const visible=workspaceMedia.filter(item=>`${item.title} ${item.year}`.toLowerCase().includes(query));
   const grid=$("#workspace-library-grid"),section=$("#workspace-library").value;
   $("#workspace-library-count").textContent=`${visible.length} playable titles`;
   grid.innerHTML=visible.length?visible.slice(0,workspaceDisplayLimit).map(item=>
@@ -185,8 +185,10 @@ function updateMediaSelection() {
       <button type="button" data-lineup-move="1" aria-label="Move ${escapeHtml(choice.title)} down" ${index === choices.length - 1 ? "disabled" : ""}>↓</button>
       <button type="button" data-remove-media aria-label="Remove ${escapeHtml(choice.title)}">×</button>
     </article>`).join("") : '<div class="muted">No shows or movies selected yet.</div>';
+  const selected = selectedMediaKeys();
   document.querySelectorAll("#media-list input").forEach(input => {
-    input.checked = selectedLineup.has(mediaChoices[Number(input.value)]?.key);
+    const choice=mediaChoices[Number(input.value)];
+    input.checked = Boolean(choice && choice.items.every(item=>selected.has(mediaIdentity(item))));
   });
 }
 async function diagnosePlayback(channelId) {
@@ -224,7 +226,86 @@ function setBuilderStep(step) {
   $("#dialog-title").focus({preventScroll:true});
   window.scrollTo({top:0});
 }
-function renderAssets(){const box=$("#asset-list");box.innerHTML=state.assets.length?state.assets.map(a=>`<article class="asset-card"><img loading="lazy" decoding="async" class="asset-preview" src="/user-assets/${encodeURIComponent(a.filename)}" alt="${escapeHtml(a.name)}"><div class="asset-body"><h4>${escapeHtml(a.name)}</h4><span class="meta">${escapeHtml(a.kind.replaceAll("-"," "))}${a.built_in?" · starter pack":""}</span><div class="actions"><a class="button" href="/user-assets/${encodeURIComponent(a.filename)}" download>Download</a>${a.built_in?"":`<button class="danger" data-delete-asset="${a.id}">Delete</button>`}</div></div></article>`).join(""):`<div class="empty">No artwork yet. Generate a design or upload your own.</div>`}
+function renderAssets(){const box=$("#asset-list"), artwork=state.assets.filter(a=>!a.retired&&a.kind!=="ambience");box.innerHTML=artwork.length?artwork.map(a=>`<article class="asset-card"><img loading="lazy" decoding="async" class="asset-preview" src="/user-assets/${encodeURIComponent(a.filename)}" alt="${escapeHtml(a.name)}"><div class="asset-body"><h4>${escapeHtml(a.name)}</h4><span class="meta">${escapeHtml(a.kind.replaceAll("-"," "))}${a.built_in?" · starter pack":""}</span><div class="actions"><a class="button" href="/user-assets/${encodeURIComponent(a.filename)}" download>Download</a>${a.built_in?"":`<button class="danger" data-delete-asset="${a.id}">Delete</button>`}</div></div></article>`).join(""):`<div class="empty">No artwork yet. Generate a design or upload your own.</div>`;renderBrandingWorkspace()}
+
+function ambienceOptions(selected) {
+  const silent = '<option value="silent">Silent</option>';
+  const clips = state.assets.filter(asset => asset.kind === "ambience" && asset.id !== "builtin-ambience-silent");
+  return silent + clips.map(asset => `<option value="${escapeHtml(asset.id)}"${asset.id === selected || asset.id === `builtin-ambience-${selected}` ? " selected" : ""}>${escapeHtml(asset.name)}</option>`).join("");
+}
+function readBranding(form) {
+  return {enabled:form.querySelector('[name="up-next-enabled"]').checked,
+    style:form.querySelector('[name="up-next-style"]').value,
+    seconds:Number(form.querySelector('[name="up-next-duration"]').value),
+    ambience:form.querySelector('[name="up-next-ambience"]').value};
+}
+function refreshAmbiencePreview(form) {
+  const audio=form.querySelector("audio"), selected=form.querySelector('[name="up-next-ambience"]').value;
+  const clip=state.assets.find(asset=>asset.id===selected&&asset.kind==="ambience");
+  const source=clip?`/user-assets/${encodeURIComponent(clip.filename)}`:"";
+  if (audio.getAttribute("src")!==source) {
+    audio.pause();
+    if (source) audio.src=source;
+    else {audio.removeAttribute("src");audio.load()}
+  }
+  audio.hidden=!clip;
+}
+function brandingPreviewUrl(channel, style) {
+  return "/api/branding/preview?" + new URLSearchParams({channel:channel || "", style});
+}
+function renderBrandingWorkspace() {
+  const grid=$("#channel-branding-grid");
+  if (!state.channels.length) {
+    grid.innerHTML='<p class="empty">Create a channel to preview and configure its Up Next card.</p>';
+    return;
+  }
+  const styles=[["studio","Clean Studio"],["rewind","Rewind"],["midnight","Midnight"]];
+  grid.innerHTML=state.channels.map(channel=>{
+    const branding=channel.branding||{};
+    const currentStyle=branding.style || "studio";
+    const image=brandingPreviewUrl(channel.id,currentStyle);
+    return `<article class="brand-card" data-brand-channel="${escapeHtml(channel.id)}">
+      <img src="${escapeHtml(image)}" loading="lazy" alt="Up Next preview for ${escapeHtml(channel.name)}">
+      <div class="brand-card-body"><span class="channel-number">CH ${escapeHtml(channel.number)}</span><h3>${escapeHtml(channel.name)}</h3>
+      <details><summary>Settings &amp; audio <small>${branding.enabled ? branding.seconds + "s post-roll" : "Post-roll off"}</small></summary>
+      <form class="brand-card-controls" data-branding-form><label class="wide"><input type="checkbox" name="up-next-enabled"${branding.enabled?" checked":""}> Air after each programme</label>
+      <label>Card style<select name="up-next-style">${styles.map(([key,label])=>`<option value="${key}"${key===currentStyle?" selected":""}>${label}</option>`).join("")}</select></label>
+      <label>Duration in seconds<input type="number" min="5" max="25" name="up-next-duration" value="${branding.seconds||18}" required></label>
+      <label>Ambience<select name="up-next-ambience">${ambienceOptions(branding.ambience)}</select></label>
+      <button type="button" data-preview-branding>Full preview</button><audio controls hidden preload="none" aria-label="Preview ambience"></audio>
+      <button type="submit" class="primary wide">Save branding</button></form></details></div></article>`;
+  }).join("");
+  for (const form of grid.querySelectorAll("[data-branding-form]")) refreshAmbiencePreview(form);
+}
+$("#channel-branding-grid").addEventListener("submit", async event => {
+  const form=event.target.closest("[data-branding-form]");
+  if (!form) return;
+  event.preventDefault();
+  const card=form.closest("[data-brand-channel]"), button=form.querySelector('[type="submit"]');
+  button.disabled=true;
+  try {
+    const payload=readBranding(form);
+    const result=await api(`/api/channels/${encodeURIComponent(card.dataset.brandChannel)}/branding`,{method:"PUT",body:JSON.stringify(payload)});
+    state.channels=state.channels.map(channel=>channel.id===result.channel.id?result.channel:channel);
+    card.querySelector("summary small").textContent=payload.enabled?`${payload.seconds}s post-roll`:"Post-roll off";
+    toast("Channel branding saved.");
+  } catch (error) {toast(error.message,true)}
+  finally {button.disabled=false}
+});
+document.addEventListener("change", event=>{
+  const controls=event.target.closest(".brand-card-controls");
+  if (!controls) return;
+  if (event.target.name==="up-next-ambience") refreshAmbiencePreview(controls);
+  const card=controls.closest("[data-brand-channel]");
+  if (card&&event.target.name==="up-next-style") card.querySelector("img").src=brandingPreviewUrl(card.dataset.brandChannel,event.target.value);
+});
+document.addEventListener("click", event=>{
+  const button=event.target.closest("[data-preview-branding]");
+  if (!button) return;
+  const controls=button.closest(".brand-card-controls");
+  const channel=button.closest("[data-brand-channel]")?.dataset.brandChannel || $("#channel-id").value;
+  window.open(brandingPreviewUrl(channel,readBranding(controls).style),"_blank","noopener");
+});
 function renderTools(){const box=$("#tool-list");box.innerHTML=state.tools.length?state.tools.map(t=>`<article><h3>${escapeHtml(t.name)}</h3><p>${escapeHtml(t.description)}</p><button data-tool="${t.id}" ${t.disabled?"disabled":""}>Run tool</button></article>`).join(""):`<div class="empty">No tools installed. See PLUGIN_DEVELOPMENT.md to create one.</div>`}
 function renderPlexProfile(){const profile=state.config.plex_profile||{},box=$("#plex-profile");box.innerHTML=state.config.token_saved?`<span class="plex-dot"></span><div><b>${escapeHtml(profile.server_name||"Plex connected")}</b><small>${profile.username?`Signed in as ${escapeHtml(profile.username)} · `:""}${profile.version?`Server ${escapeHtml(profile.version)}`:"Connection verified"}</small></div>`:`<span class="plex-dot offline"></span><div><b>Plex not connected</b><small>Sign in to index movies and build channels.</small></div>`}
 function renderLocalLibraries(){const box=$("#local-library-list"),values=state.config.local_libraries||[];box.innerHTML=values.length?values.map(item=>`<article class="local-library-row"><div><b>${escapeHtml(item.name)}</b><small>${escapeHtml(item.path)}</small></div><button type="button" class="danger" data-delete-local="${item.id}">Remove</button></article>`).join(""):'<p class="muted">No local folders added yet.</p>';const selected=$("#upload-library").value;$("#upload-library").innerHTML='<option value="">Choose a local library</option>'+values.map(item=>`<option value="local:${item.id}">${escapeHtml(item.name)}</option>`).join("");$("#upload-library").value=selected;renderCreatorPublish()}
@@ -341,11 +422,11 @@ function renderJellyfinConnections() {
 }
 async function refresh() {
   state = await api("/api/status");
-  if (!document.documentElement.hasAttribute("data-tester")) $("#version").textContent = `v${state.version}`;
+  $("#version").textContent = `v${state.version}`;
   $("#plex-url").value = state.config.plex_url;
-  $("#guide-hours").value = state.config.guide_hours;
   $("#bind-host").value = state.config.bind_host;
   $("#public-url").value = state.config.public_url;
+  $("#public-url").readOnly = Boolean(state.config.managed_relay);
   $("#token-status").textContent = state.config.token_saved ? "Connected and ready." : "Plex is optional and not connected.";
   const sources = mediaSourceLabels(state.config);
   const sourceSummary = sources.join(" + ");
@@ -358,13 +439,11 @@ async function refresh() {
   $("#m3u-url").textContent = `${base}/exports/channels.m3u`;
   renderChannels(); renderWatchChannels(); renderAssets(); renderTools(); renderPlexProfile();
   renderLocalLibraries(); renderJellyfinConnections(); renderStudioSummary();
-  window.ChannelForgeTesterSources?.();
   renderBroadcasts(state.broadcasts);
   if ($("#watch.active")) loadGuide();
   if (sources.length && $("#plex-onboarding").open) $("#plex-onboarding").close();
 }
 function renderBroadcasts(broadcasts, activityPanel = null) {
-  if (!activityPanel && window.ChannelForgeTesterBroadcasts) return window.ChannelForgeTesterBroadcasts(broadcasts);
   const container = activityPanel || $("#studio-broadcast-list");
   if(!container||!state.channels)return;
   const statusLabels={idle:"Idle",starting:"Starting",live:"Live",cooldown:"Cooling down"};
@@ -426,6 +505,7 @@ function renderMovieActivity(movies) {
 function resetBuilderFilters() {
   $("#media-filter").value = "";
   $("#smart-genre").value = $("#smart-rating").value = "all";
+  $("#smart-holiday").value = $("#smart-series").value = "all";
   $("#smart-year-min").value = $("#smart-year-max").value = "";
 }
 function builderSources() {
@@ -482,22 +562,68 @@ function smartMatches(choice){const genre=$("#smart-genre").value.toLocaleLowerC
 function mediaSearchText(value) {
   return String(value || "").normalize("NFKC").toLocaleLowerCase();
 }
-function testerSearchText(value) {
+function holidaySearchText(value) {
   return String(value ?? "").normalize("NFKD").toLowerCase()
     .replace(/(\p{Script=Latin})\p{M}+/gu, "$1")
     .replace(/['’ʼ＇]/gu, "")
     .replace(/[^\p{L}\p{M}\p{N}]+/gu, " ").trim();
 }
-function testerSearchIndex(item) {
-  const titles = [item.title, item.series, ...(item.aliases || [])].map(testerSearchText).filter(Boolean);
-  const tags = [...(item.genres || []), ...(item.tags || [])].map(testerSearchText).filter(Boolean);
-  const fields = [...titles, ...tags, ...[item.year, item.content_rating, item.summary, item.libraryName,
-    ...(item.credits || []), ...(item.actors || []), ...(item.directors || [])].map(testerSearchText).filter(Boolean)];
-  return {titles, tags, text: fields.join(" "), compact: [...titles, ...tags].map(value => value.replaceAll(" ", ""))};
+const HOLIDAYS = [
+  ["christmas","Christmas",/\b(?:christmas|xmas|yuletide|noel|santa claus|secret santa|krampus|boxing day|north pole|rudolph|nutcracker)\b/,/^(?:home alone|home alone 2 lost in new york|klaus|elf|die hard|die hard 2|gremlins|the polar express|the grinch|the santa clause|a christmas carol)(?: \d{4})?$/],
+  ["halloween","Halloween",/\b(?:halloween|hallowe en|halloweentown|trick or treat(?:ing)?|all hallows eve|jack o lantern|haunted hayride|treehouse of horror|costume party|pumpkin patch)\b/,/^(?:hocus pocus(?: 2)?|the nightmare before christmas|its the great pumpkin charlie brown|beetlejuice|coraline)(?: \d{4})?$/],
+  ["thanksgiving","Thanksgiving",/\b(?:thanksgiving|turkey day|friendsgiving|thanksgiving dinner)\b/,/^(?:planes trains and automobiles|a charlie brown thanksgiving)$/],
+  ["newyear","New Year",/\b(?:new year(?:s)?(?: eve| day)?|auld lang syne|times square ball drop|hogmanay)\b/],
+  ["valentines","Valentine’s Day",/\b(?:valentine(?:s)?(?: day)?|st valentine|valentine card|cupid)\b/],
+  ["easter","Easter",/\b(?:easter(?: sunday| bunny| egg hunt)?|good friday|resurrection sunday)\b/],
+  ["hanukkah","Hanukkah",/\b(?:hanukkah|chanukah|hanukah|chanukkah|menorah|dreidel|festival of lights)\b/],
+  ["kwanzaa","Kwanzaa",/\b(?:kwanzaa|kinara|nguzo saba)\b/],
+  ["lunar","Lunar New Year",/\b(?:lunar new year|chinese new year|spring festival|tet holiday|seollal|year of the dragon)\b/],
+  ["diwali","Diwali",/\b(?:diwali|deepavali|divali|diyas)\b/],
+  ["eid","Ramadan & Eid",/\b(?:ramadan|eid al fitr|eid ul fitr|eid al adha|eid ul adha|iftar|suhur)\b/],
+  ["patrick","St. Patrick’s Day",/\b(?:st patricks day|saint patricks day|leprechaun parade)\b/],
+  ["national","Independence & Canada Day",/\b(?:independence day|fourth of july|4th of july|canada day|dominion day)\b/],
+  ["family","Mother’s & Father’s Day",/\b(?:mothers day|fathers day)\b/],
+  ["passover","Passover",/\b(?:passover|pesach|passover seder)\b/],
+];
+$("#smart-holiday").append(new Option("Any holiday", "any"), ...HOLIDAYS.map(([key,label])=>new Option(label,key)));
+function holidayTags(item) {
+  const isEpisode=item.type==="episode";
+  const displayTitle=String(item.title||"");
+  const prefix=`${item.series} · `;
+  const programTitle=isEpisode&&item.series&&displayTitle.startsWith(prefix)?displayTitle.slice(prefix.length):displayTitle;
+  const title=holidaySearchText(programTitle);
+  const tags=item.program_tags ?? item.tags ?? [];
+  const aliases=item.program_aliases ?? (isEpisode?[]:item.aliases ?? []);
+  const evidence=holidaySearchText([programTitle,item.program_summary ?? item.summary,...tags,...aliases,...(isEpisode?[]:item.genres||[])].join(" "));
+  return HOLIDAYS.filter(([, , words, known])=>words.test(evidence)||known?.test(title)).map(([key])=>key);
 }
-function matchesTesterSearch(index, terms) {
-  return terms.every(term => index.text.includes(term) ||
-    (term.length >= 3 && index.compact.some(value => value.includes(term))));
+function mediaIdentity(item) {return JSON.stringify([item.section,item.plex_server_id || "",String(item.id)]);}
+function selectedMediaKeys() {return new Set([...selectedLineup.values()].flatMap(choice=>choice.items.map(mediaIdentity)));}
+function selectMediaChoice(choice, selected, keys) {
+  if (selected) {
+    const extra=choice.items.filter(item=>!keys.has(mediaIdentity(item)));
+    if (extra.length) {
+      const previous=selectedLineup.get(choice.key);
+      for (const item of extra) keys.add(mediaIdentity(item));
+      selectedLineup.set(choice.key,{...choice,items:[...(previous?.items||[]),...extra]});
+    }
+  } else {
+    const removed=new Set(choice.items.map(mediaIdentity));
+    for (const [key, entry] of selectedLineup) {
+      const remaining=entry.items.filter(item=>!removed.has(mediaIdentity(item)));
+      if (!remaining.length) selectedLineup.delete(key);
+      else if (remaining.length!==entry.items.length) selectedLineup.set(key,{...entry,items:remaining});
+    }
+  }
+}
+function expandSelectedEpisodes() {
+  const choices=[...selectedLineup.values()];
+  if (!choices.some(choice=>choice.type==="show")) return;
+  selectedLineup.clear();
+  for (const choice of choices) {
+    const entries=choice.type==="show"?buildMediaChoices(choice.items,choice.section,"",true):[choice];
+    for(const entry of entries) selectedLineup.set(entry.key,entry);
+  }
 }
 const CHANNEL_RATING_LEVELS = new Map([
   ["TV-Y", 1], ["TV-Y7", 2], ["TV-Y7-FV", 2], ["G", 3], ["TV-G", 3], ["PG", 4], ["TV-PG", 4],
@@ -516,26 +642,10 @@ function showRatingImpact() {
 $("#channel-rating").addEventListener("change", showRatingImpact);
 function filteredMediaChoices() {
   const ceiling = CHANNEL_RATING_LEVELS.get($("#channel-rating").value);
-  const eligible = mediaChoices.filter(choice => !aboveRatingLimit(choice, ceiling));
-  if (document.documentElement.hasAttribute("data-tester")) {
-    const query = testerSearchText($("#media-filter").value);
-    const terms = query.split(" ").filter(Boolean);
-    const genre = testerSearchText($("#smart-genre").value);
-    const rating = testerSearchText($("#smart-rating").value);
-    const min = Number($("#smart-year-min").value) || 0, max = Number($("#smart-year-max").value) || 9999;
-    const matches = eligible.filter(choice => {
-      const year = Number(choice.year) || 0;
-      return (genre === "all" || choice.testerSearch.tags.includes(genre)) &&
-        (rating === "all" || testerSearchText(choice.content_rating || "Unrated") === rating) &&
-        (!year || year >= min && year <= max) && matchesTesterSearch(choice.testerSearch, terms);
-    });
-    if (!terms.length) return matches;
-    const rank = ({testerSearch: {titles, tags}}) => titles.includes(query) ? 0 :
-      titles.some(value => value.startsWith(query)) ? 1 :
-      titles.some(value => value.includes(query) || value.replaceAll(" ", "").includes(query)) ? 2 :
-      tags.includes(query) ? 3 : 4;
-    return matches.map(choice => ({choice, rank: rank(choice)})).sort((a, b) => a.rank - b.rank).map(entry => entry.choice);
-  }
+  const holiday=$("#smart-holiday").value, series=$("#smart-series").value;
+  const eligible = mediaChoices.filter(choice => !aboveRatingLimit(choice, ceiling) &&
+    (series==="all"||choice.series===series) && (holiday==="all" || choice.holidays.includes(holiday) ||
+      holiday==="any"&&choice.holidays.length>0));
   const terms = mediaSearchText($("#media-filter").value).match(/[\p{L}\p{N}]+/gu) || [];
   return eligible.filter(choice => smartMatches(choice) && terms.every(term => choice.searchText.includes(term)));
 }
@@ -544,13 +654,16 @@ function renderMediaChoices() {
   const box = $("#media-list");
   $("#smart-match-count").textContent = `${matches.length.toLocaleString()} ${matches.length === 1 ? "title" : "titles"}`;
   $("#select-all-media").disabled = !matches.length;
+  const selected=selectedMediaKeys();
   box.innerHTML = matches.slice(0, builderDisplayLimit).map(choice => {
-    const meta = [choice.year, choice.content_rating, choice.genres[0] || (choice.type === "show" ? `${choice.items.length} episodes` : "")].filter(Boolean).join(" · ");
-    return `<label class="media-item poster-item" title="${escapeHtml(choice.title)}">
-      <input type="checkbox" value="${choice.index}" aria-label="${escapeHtml(choice.title)}" ${selectedLineup.has(choice.key) ? "checked" : ""}>
+    const topic=choice.holidays.length?HOLIDAYS.find(([key])=>key===choice.holidays[0])?.[1]:"";
+    const meta = [choice.episodeLabel, choice.year, choice.content_rating, topic || choice.genres[0] || (choice.type === "show" ? `${choice.items.length} episodes` : "")].filter(Boolean).join(" · ");
+    const title=choice.type==="episode"&&choice.series?choice.series+" · "+choice.title:choice.title;
+    return `<article class="builder-title-card"><label class="media-item poster-item" title="${escapeHtml(title)}">
+      <input type="checkbox" value="${choice.index}" aria-label="${escapeHtml(title)}" ${choice.items.every(item=>selected.has(mediaIdentity(item))) ? "checked" : ""}>
       <span class="builder-poster"><i aria-hidden="true" class="film-icon"></i>${choice.thumb ? `<img src="${mediaThumb(choice, choice.section)}" alt="" loading="lazy" decoding="async">` : ""}</span>
-      <span class="builder-card-info"><b>${escapeHtml(choice.title)}</b><small>${escapeHtml(meta)}</small></span>
-    </label>`;
+      <span class="builder-card-info"><b>${escapeHtml(title)}</b><small>${escapeHtml(meta)}</small></span>
+    </label>${choice.type==="show"?`<button type="button" data-choose-episodes="${escapeHtml(choice.title)}">Choose episodes</button>`:""}</article>`;
   }).join("");
   if (!matches.length && mediaChoices.length) box.innerHTML = '<div class="empty">No titles match the channel rating, search, and filters.</div>';
   if (matches.length > builderDisplayLimit) {
@@ -568,15 +681,20 @@ function renderMediaChoices() {
   }
 }
 function refreshSmartMatches() {
+  const detailed=$("#builder-detail-toggle").getAttribute("aria-pressed")==="true"||
+    $("#smart-holiday").value!=="all"||$("#smart-series").value!=="all"||$("#playback-mode").value==="custom";
+  if (detailed && !detailedMediaChoices) detailedMediaChoices=buildMediaChoices(groupedMediaChoices.flatMap(choice=>choice.items),"","",true);
+  mediaChoices=detailed?detailedMediaChoices:groupedMediaChoices;
+  mediaChoices.forEach((choice,index)=>{choice.index=index});
   builderDisplayLimit = builderPageSize;
   $("#media-list").scrollTop = 0;
   renderMediaChoices();
 }
-function buildMediaChoices(items, librarySection, libraryName = "") {
+function buildMediaChoices(items, librarySection, libraryName = "", individualEpisodes = false) {
   const groups = new Map();
   for (const item of items) {
     const section = item.section || librarySection;
-    const isShow = item.type === "episode" && Boolean(item.series);
+    const isShow = !individualEpisodes && item.type === "episode" && Boolean(item.series);
     const title = isShow ? item.series : item.title;
     const key = JSON.stringify([section, item.plex_server_id || "", isShow ? "show" : "title", isShow ? item.series_id || item.series : String(item.id)]);
     if (!groups.has(key)) {
@@ -584,7 +702,8 @@ function buildMediaChoices(items, librarySection, libraryName = "") {
         key, section, title, id: item.id, type: isShow ? "show" : item.type,
         thumb: (isShow && item.series_thumb) || item.thumb, source: item.source,
         plex_server_id: item.plex_server_id, summary: item.summary,
-        content_rating: item.content_rating || "Unrated", year: item.year, genres: [], items: []
+        content_rating: item.content_rating || "Unrated", year: item.year, genres: [], items: [],
+        series:item.series || "", episodeLabel:item.type==="episode"&&!isShow ? `S${String(item.season??0).padStart(2,"0")}E${String(item.episode??0).padStart(2,"0")}` : ""
       });
     }
     groups.get(key).items.push({...item, section});
@@ -604,6 +723,7 @@ function buildMediaChoices(items, librarySection, libraryName = "") {
     choice.ratingLevel = highest;
     choice.genres = [...new Set(choice.items.flatMap(item => item.genres || []).filter(Boolean))].sort();
     choice.tags = [...new Set(choice.items.flatMap(item => item.tags || []).filter(Boolean))].sort();
+    choice.holidays=choice.type==="show"?[]:holidayTags(choice.items[0]);
     if ([libraryName,...choice.tags].some(value => /\banime\b|アニメ/iu.test(String(value))) &&
         !choice.tags.some(value => mediaSearchText(value) === "anime")) choice.tags.push("Anime");
     if (choice.type === "show") {
@@ -611,12 +731,8 @@ function buildMediaChoices(items, librarySection, libraryName = "") {
       if (years.length) choice.year = Math.min(...years);
     }
     const credits = new Set(choice.items.flatMap(item => [...(item.actors || []), ...(item.directors || [])]));
-    choice.searchText = mediaSearchText([choice.title, choice.year, choice.content_rating, choice.summary,
+    choice.searchText = mediaSearchText([choice.title, choice.series, choice.episodeLabel, choice.year, choice.content_rating, choice.summary,
       libraryName, ...choice.genres, ...choice.tags, ...credits].join(" "));
-    if (document.documentElement.hasAttribute("data-tester")) {
-      const aliases = [...new Set(choice.items.flatMap(item => item.aliases || []))];
-      choice.testerSearch = testerSearchIndex({...choice, aliases, libraryName, credits});
-    }
   }
   return [...groups.values()];
 }
@@ -624,7 +740,8 @@ function buildMediaChoices(items, librarySection, libraryName = "") {
 async function loadMedia(section) {
   const request = ++mediaLoadRequest;
   const status = $("#media-status");
-  mediaChoices = [];
+  mediaChoices = groupedMediaChoices = [];
+  detailedMediaChoices=null;
   if (!section) {
     status.textContent = builderLibraryKind === "show" ? "No TV show libraries available."
       : builderLibraryKind === "movie" ? "No movie libraries available." : "Choose a media library to add titles.";
@@ -652,14 +769,16 @@ async function loadMedia(section) {
     await Promise.all(Array.from({length: Math.min(3, sources.length)}, fetchTitles));
     if (request !== mediaLoadRequest || !builderIsOpen()) return;
     if (failures.length && failures.length === sources.length) throw new Error(failures[0]);
-    mediaChoices = choices.sort((a,b) => a.title.localeCompare(b.title) || a.section.localeCompare(b.section));
-    mediaChoices.forEach((choice, index) => { choice.index = index; });
+    groupedMediaChoices = choices.sort((a,b) => a.title.localeCompare(b.title) || a.section.localeCompare(b.section));
+    detailedMediaChoices=null;
+    mediaChoices=groupedMediaChoices;
     const genres = [...new Set(mediaChoices.flatMap(choice => [...choice.genres,...choice.tags]))].sort();
     const ratings = [...new Set(mediaChoices.map(choice => choice.content_rating))].sort();
     const options = (title, values) => '<option value="all">' + title + '</option>'
       + values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
     $("#smart-genre").innerHTML = options("All genres and tags", genres);
     $("#smart-rating").innerHTML = options("All ratings", ratings);
+    $("#smart-series").innerHTML=options("All shows",[...new Set(choices.map(choice=>choice.series).filter(Boolean))].sort());
     status.textContent = failures.length ? `${failures.length} ${failures.length === 1 ? "library is" : "libraries are"} temporarily unavailable.`
       : mediaChoices.length ? "" : "No playable titles were found in this selection.";
     refreshSmartMatches();
@@ -687,6 +806,7 @@ for(const control of ["#channel-background","#channel-logo","#channel-corner-bug
 let restorePresetOnSave = false;
 let lineupReordered = false;
 const presetDescriptions = {
+  custom: "Place individual episodes and movies in the exact order you want. Rearrange the selection using drag and drop or arrow buttons.",
   ordered: "Plays the selected titles in the order shown in your lineup.",
   shuffle: "Mixes every individual episode and movie.",
   shuffle_in_order: "Rotates between shows while advancing each show’s episodes in order.",
@@ -696,7 +816,12 @@ const presetDescriptions = {
 function updatePresetDescription() {
   $("#preset-description").textContent = presetDescriptions[$("#playback-mode").value] || "";
 }
-$("#playback-mode").addEventListener("change", updatePresetDescription);
+$("#playback-mode").addEventListener("change", () => {
+  updatePresetDescription();
+  if ($("#playback-mode").value === "custom") expandSelectedEpisodes();
+  refreshSmartMatches();
+  updateMediaSelection();
+});
 $("#restore-preset").onclick = () => {
   restorePresetOnSave = true;
   toast("Save the channel to start its selected preset from the beginning.");
@@ -723,6 +848,15 @@ async function openChannel(channel = null) {
   $("#broadcast-kbps").value = String(channel?.broadcast_kbps ?? 2500);
   $("#playback-mode").value = channel?.playback_mode || "ordered";
   updatePresetDescription();
+  const branding=channel?.branding || {enabled:!channel, seconds:18, style:"studio", ambience:channel?"silent":"soft-synth"};
+  const brandFields=$("#builder-branding");
+  brandFields.querySelector('[name="up-next-enabled"]').checked=branding.enabled;
+  brandFields.querySelector('[name="up-next-enabled"]').disabled=!channel;
+  brandFields.querySelector('[name="up-next-style"]').value=branding.style || "studio";
+  brandFields.querySelector('[name="up-next-duration"]').value=branding.seconds || 18;
+  brandFields.querySelector('[name="up-next-duration"]').readOnly=!channel;
+  brandFields.querySelector('[name="up-next-ambience"]').innerHTML=ambienceOptions(branding.ambience);
+  refreshAmbiencePreview(brandFields);
   for (const [control, kind, fallback, selected] of [
     ["#channel-logo", "logo", "No logo", channel?.logo_asset_id],
     ["#channel-background", "guide-background", "Default background", channel?.background_asset_id],
@@ -730,14 +864,16 @@ async function openChannel(channel = null) {
   ]) {
     const select = $(control);
     select.innerHTML = '<option value="">' + fallback + '</option>' +
-      state.assets.filter(asset => asset.kind === kind)
+      state.assets.filter(asset => asset.kind === kind && (!asset.retired || asset.id===selected))
         .map(asset => '<option value="' + escapeHtml(asset.id) + '">' + escapeHtml(asset.name) + '</option>').join("");
-    select.value = selected || "";
+    select.value = selected || (!channel ? "builtin-studio-studio-" + kind : "");
   }
   ++mediaLoadRequest;
-  mediaChoices = [];
+  mediaChoices = groupedMediaChoices = [];
+  detailedMediaChoices=null;
+  $("#builder-detail-toggle").setAttribute("aria-pressed", String(channel?.playback_mode === "custom"));
   selectedLineup.clear();
-  for (const choice of buildMediaChoices(channel?.items || [], channel?.section || "")) {
+  for (const choice of buildMediaChoices(channel?.items || [], channel?.section || "", "", channel?.playback_mode === "custom")) {
     selectedLineup.set(choice.key, choice);
   }
   builderLibrarySelections.clear();
@@ -766,7 +902,7 @@ function cancelBuilder() {
 }
 
 document.addEventListener("click",async event=>{const button=event.target.closest("button,article[data-watch]");if(!button)return;if(button.dataset.view){showView(button.dataset.view);if(button.dataset.view==="watch")loadGuide();if(button.dataset.view==="library")loadWorkspaceLibraries()}if(button.dataset.watch)watchChannel(button.dataset.watch);if(button.id==="refresh-guide")loadGuide();if(button.id==="new-channel")openChannel();if(button.dataset.edit)openChannel(state.channels.find(c=>c.id===button.dataset.edit));if(button.dataset.delete&&confirm("Delete this channel?")){try{await api(`/api/channels/${button.dataset.delete}`,{method:"DELETE"});await refresh();toast("Channel deleted.")}catch(e){toast(e.message,true)}}if(button.dataset.deleteAsset&&confirm("Delete this artwork? Channels using it will keep working without the logo.")){try{await api(`/api/assets/${button.dataset.deleteAsset}`,{method:"DELETE"});await refresh();toast("Artwork deleted.")}catch(e){toast(e.message,true)}}if(button.dataset.tool){try{const data=await api(`/api/tools/${button.dataset.tool}`,{method:"POST",body:"{}"});toast(typeof data.result==="string"?data.result:"Tool finished.")}catch(e){toast(e.message,true)}}});
-$("#setup-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/setup",{method:"POST",body:JSON.stringify({plex_url:$("#plex-url").value,plex_token:$("#plex-token").value,guide_hours:$("#guide-hours").value,bind_host:$("#bind-host").value,public_url:$("#public-url").value})});$("#plex-token").value="";await refresh();toast("Creator settings saved.")}catch(e){toast(e.message,true)}});
+$("#setup-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/setup",{method:"POST",body:JSON.stringify({plex_url:$("#plex-url").value,plex_token:$("#plex-token").value,bind_host:$("#bind-host").value,public_url:$("#public-url").value})});$("#plex-token").value="";await refresh();toast("Creator settings saved.")}catch(e){toast(e.message,true)}});
 async function publishStudio(event){
   event.preventDefault();
   const status=$("#creator-publish-status"),button=$("#publish-creator");
@@ -814,7 +950,8 @@ $("#channel-form").addEventListener("submit", async event => {
     broadcast_height: Number($("#broadcast-height").value),
     broadcast_kbps: Number($("#broadcast-kbps").value || 2500),
     playback_mode: $("#playback-mode").value, logo_asset_id: $("#channel-logo").value,
-    background_asset_id: $("#channel-background").value, corner_bug_asset_id: $("#channel-corner-bug").value, items
+    background_asset_id: $("#channel-background").value, corner_bug_asset_id: $("#channel-corner-bug").value,
+    branding: readBranding($("#builder-branding")), items
   };
   if (id && restorePresetOnSave) payload.restore_preset = true;
   if (id && lineupReordered) payload.lineup_reordered = true;
@@ -839,6 +976,21 @@ $("#channel-form").addEventListener("submit", async event => {
 });
 $("#generate-asset").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/assets/generate",{method:"POST",body:JSON.stringify({name:$("#asset-name").value,kind:$("#asset-kind").value,primary:$("#asset-primary").value,secondary:$("#asset-secondary").value})});await refresh();toast("Original artwork generated.")}catch(e){toast(e.message,true)}});
 $("#upload-asset").addEventListener("submit",async event=>{event.preventDefault();const file=$("#upload-file").files[0];if(!file)return;try{const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error("Could not read that file."));reader.readAsDataURL(file)});await api("/api/assets/upload",{method:"POST",body:JSON.stringify({name:$("#upload-name").value,kind:$("#upload-kind").value,data})});event.target.reset();await refresh();toast("Artwork added to your library.")}catch(e){toast(e.message,true)}});
+$("#upload-ambience").addEventListener("submit", async event=>{
+  event.preventDefault();
+  const form=event.currentTarget, file=form.elements.clip.files[0], button=form.querySelector("button");
+  if (!file) return;
+  if (file.size > 3500000) {toast("Choose an audio file under 3.5 MB.",true);return}
+  button.disabled=true;
+  try {
+    const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error("Could not read the clip."));reader.readAsDataURL(file)});
+    await api("/api/assets/ambience",{method:"POST",body:JSON.stringify({name:form.elements.name.value,data})});
+    form.reset();
+    await refresh();
+    toast("Ambience added to your library.");
+  } catch (error) {toast(error.message,true)}
+  finally {button.disabled=false}
+});
 $("#cancel-dialog").onclick = cancelBuilder;
 $("#regenerate").onclick=()=>api("/api/exports",{method:"POST",body:"{}"}).then(()=>toast("Exports regenerated.")).catch(e=>toast(e.message,true));
 $("#check-update").onclick=()=>checkForUpdate(false);$("#install-update").onclick=()=>installUpdate(false);$("#plex-signin").onclick=startPlexSignin;
@@ -896,7 +1048,7 @@ $("#movie-upload-form").addEventListener("submit",event=>{event.preventDefault()
 document.addEventListener("click",async event=>{const button=event.target.closest("[data-delete-local]");if(!button||!confirm("Remove this local library? Existing channels keep their lineup, but files cannot play until the folder is added again."))return;try{await api(`/api/local/libraries/${button.dataset.deleteLocal}`,{method:"DELETE"});await refresh();await loadWorkspaceLibraries(true);toast("Local library removed.")}catch(error){toast(error.message,true)}});
 $("#guide-earlier").onclick=()=>{guideOffsetHours=Math.max(-24,guideOffsetHours-6);loadGuide()};
 $("#guide-now").onclick=()=>{guideOffsetHours=0;loadGuide()};
-$("#guide-later").onclick=()=>{guideOffsetHours=Math.min(168,guideOffsetHours+6);loadGuide()};
+$("#guide-later").onclick=()=>{guideOffsetHours=Math.min(6,guideOffsetHours+6);loadGuide()};
 $("#test-plex").onclick=async()=>{const result=$("#setup-result");result.className="connection-result wide";result.textContent="Testing Plex server and library access…";try{const data=await api("/api/plex/test",{method:"POST",body:JSON.stringify({plex_url:$("#plex-url").value,plex_token:$("#plex-token").value})});result.classList.add("success");result.textContent=`Connected to ${data.profile.server_name||"Plex"}. ${data.libraries} libraries are available.`}catch(error){result.classList.add("error");result.textContent=`Connection failed: ${error.message}`}};
 $("#media-filter").addEventListener("input",refreshSmartMatches);
 for(const selector of ["#smart-genre","#smart-year-min","#smart-year-max","#smart-rating"])$(selector).addEventListener("input",refreshSmartMatches);
@@ -910,9 +1062,37 @@ $("#selection-count").onclick = () => {
   if (expanded) $("#selected-media-list button:not(:disabled)")?.focus({preventScroll:true});
 };
 $("#select-all-media").onclick = () => {
-  for (const choice of filteredMediaChoices()) selectedLineup.set(choice.key, choice);
+  const keys=selectedMediaKeys();
+  for (const choice of filteredMediaChoices()) selectMediaChoice(choice,true,keys);
   updateMediaSelection();
 };
+function openEpisodeView(series) {
+  $("#builder-detail-toggle").setAttribute("aria-pressed","true");
+  if (series) {
+    $("#smart-series").value=series;
+    $("#media-filter").value="";
+    setBuilderPanel("builder-filter-toggle","builder-filters",true);
+  }
+  if ($("#playback-mode").value==="ordered") {$("#playback-mode").value="custom";updatePresetDescription()}
+  expandSelectedEpisodes();
+  refreshSmartMatches();
+  updateMediaSelection();
+}
+$("#builder-detail-toggle").onclick = event => {
+  if (event.currentTarget.getAttribute("aria-pressed")==="false") return openEpisodeView("");
+  event.currentTarget.setAttribute("aria-pressed","false");
+  $("#smart-series").value=$("#smart-holiday").value="all";
+  if ($("#playback-mode").value==="custom") {$("#playback-mode").value="ordered";updatePresetDescription()}
+  refreshSmartMatches();
+};
+$("#media-list").addEventListener("click",event=>{
+  const button=event.target.closest("[data-choose-episodes]");
+  if (button) {openEpisodeView(button.dataset.chooseEpisodes);$("#media-filter").focus()}
+});
+for (const id of ["#smart-holiday","#smart-series"]) $(id).addEventListener("change", event=>{
+  if (event.target.value!=="all") openEpisodeView("");
+  else refreshSmartMatches();
+});
 $("#clear-media").onclick = () => {
   selectedLineup.clear();
   updateMediaSelection();
@@ -922,8 +1102,7 @@ $("#media-list").addEventListener("change", event => {
   if (!input.matches('input[type="checkbox"]')) return;
   const choice = mediaChoices[Number(input.value)];
   if (!choice) return;
-  if (input.checked) selectedLineup.set(choice.key, choice);
-  else selectedLineup.delete(choice.key);
+  selectMediaChoice(choice,input.checked,selectedMediaKeys());
   updateMediaSelection();
 });
 $("#media-list").addEventListener("error", event => {
@@ -1025,7 +1204,7 @@ $("#tv-player").addEventListener("playing",()=>{$("#playback-status").className=
 $("#tv-player").addEventListener("error",()=>showPlaybackError(activeChannel,"Playback failed. Check that the media source is online, then select the channel again."));
 $("#manual-plex-setup").onclick=()=>{clearInterval(plexSigninTimer);plexSigninTimer=0;$("#plex-onboarding").close();showView("setup")};
 $("#add-local-onboarding").onclick=()=>{$("#plex-onboarding").close();showView("setup");selectSettingsPanel("sources");$("#local-library-path").focus()};
-refresh().then(()=>{$("#installed-version").textContent=$("#version").textContent;if(!document.documentElement.hasAttribute("data-tester"))checkForUpdate(true)}).catch(e=>toast(e.message,true));
+refresh().then(()=>{$("#installed-version").textContent=$("#version").textContent;checkForUpdate(true)}).catch(e=>toast(e.message,true));
 document.addEventListener("click",event=>{const target=event.target.closest("[data-watch]");if(target?.dataset.watch===activeChannel)diagnosePlayback(activeChannel);});
 $("#channel-list").addEventListener("click", async event => {
   const button = event.target.closest("button[data-channel-action]");
