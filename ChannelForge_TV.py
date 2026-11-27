@@ -2185,12 +2185,19 @@ function renderHome(){
         const picks=movieRecords(creator,value).slice(0,6);
         if(picks.length&&picks.every(movie=>Number(movie.added_at)>0))$('#home-rewind h2').textContent='Recently Added to Rewind';
         for(const movie of picks){
-            const card=document.createElement('button'), art=movie.backdrop_url||movie.poster_url||movie.thumbnail_url;
+            const card=document.createElement('button'), cover=movie.poster_url||movie.thumbnail_url;
+            const art=movie.backdrop_url||cover;
             card.type='button';card.className='home-movie';card.title=movie.title;
             card.innerHTML='<span class="home-movie-art" aria-hidden="true">'+esc(Array.from(movie.title)[0]||'')
                 +(art?'<img src="'+esc(art)+'" alt="" loading="lazy">':'')
                 +'</span><span class="home-movie-label"><b>'+esc(movie.title)+'</b><small aria-hidden="true">VHS</small></span>';
-            watchArtwork(card.querySelector('img'),movie.poster_url||movie.thumbnail_url);
+            const image=card.querySelector('img');
+            if(image){
+                const useActualAspect=()=>image.classList.toggle('portrait-art',image.naturalHeight>image.naturalWidth);
+                image.addEventListener('load',useActualAspect);
+                if(image.complete&&image.naturalWidth>0)useActualAspect();
+                watchArtwork(image,cover);
+            }
             card.onclick=async()=>{
                 selectedCreator=creator;
                 const loading=studio(creator);
@@ -2384,7 +2391,8 @@ body.viewer-shell main.wrap{margin-left:var(--viewer-sidebar);min-width:0;max-wi
 #home-rewind .home-shelf-items:empty{display:none}
 .home-shelf .home-movie{position:relative;display:grid;min-height:0;align-content:start;overflow:hidden;border:1px solid #d7a967;border-radius:7px;background:#16182a}
 .home-movie-art{position:relative;display:grid;place-items:center;width:100%;aspect-ratio:2.15;overflow:hidden;background:linear-gradient(145deg,#342041,#1e172a);color:#c9aedc;font:italic 24px Georgia,serif}
-.home-movie-art img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 35%;opacity:0}
+.home-movie-art img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:0}
+.home-movie-art img.portrait-art{object-fit:contain}
 .home-movie-art img.loaded{opacity:1}
 .home-movie-label{position:absolute;inset:auto 0 0;display:flex;align-items:end;justify-content:space-between;gap:6px;padding:10px 7px 6px;
     background:linear-gradient(transparent,#0c0d14bf)}

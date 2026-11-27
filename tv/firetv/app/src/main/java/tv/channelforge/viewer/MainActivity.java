@@ -209,7 +209,7 @@ public class MainActivity extends Activity {
     private GuideCache guideCache;
     private final ExecutorService posterLoader = Executors.newFixedThreadPool(3);
     private final ExecutorService movieCatalogLoader = Executors.newSingleThreadExecutor();
-    private final ExecutorService movieCoverLoader = Executors.newSingleThreadExecutor();
+    private final ExecutorService movieCoverLoader = Executors.newFixedThreadPool(2);
     private final ExecutorService studioLoader = Executors.newFixedThreadPool(4);
     private final ExecutorService recoveryLoader = Executors.newSingleThreadExecutor();
     private final ExecutorService updateLoader = Executors.newSingleThreadExecutor();
@@ -1866,11 +1866,14 @@ public class MainActivity extends Activity {
             size.setMarginEnd(dp(7));
             row.addView(card, size);
             if (!item.poster.isEmpty() || !item.fullPoster.isEmpty() || !item.backdrop.isEmpty()) movieCoverLoader.execute(() -> {
-                Bitmap backdrop = posterBitmap(item.backdrop.isEmpty() ? item.fullPoster : item.backdrop);
-                Bitmap image = backdrop == null ? moviePoster(item) : backdrop;
+                Bitmap backdrop = posterBitmap(item.backdrop, true);
+                Bitmap cover = backdrop == null ? posterBitmap(item.fullPoster, true) : backdrop;
+                Bitmap image = cover == null ? moviePoster(item) : cover;
                 if (image != null) runOnUiThread(() -> {
-                    if (poster.isAttachedToWindow()) {
+                    if (poster.getParent() == card) {
                         placeholder.setVisibility(View.GONE);
+                        poster.setScaleType(image.getHeight() > image.getWidth()
+                                ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
                         poster.setImageBitmap(image);
                     }
                 });
@@ -3338,7 +3341,13 @@ public class MainActivity extends Activity {
     }
 
     private Bitmap posterBitmap(String address) {
-        Bitmap cached = posters.get(address);
+        return posterBitmap(address, false);
+    }
+
+    private Bitmap posterBitmap(String address, boolean fullArtwork) {
+        if (address.isEmpty()) return null;
+        String cacheKey = fullArtwork ? "full\n" + address : address;
+        Bitmap cached = posters.get(cacheKey);
         if (cached != null) return cached;
         HttpURLConnection connection = null;
         try {
@@ -3351,9 +3360,20 @@ public class MainActivity extends Activity {
             connection.setRequestProperty("Accept", "image/jpeg, image/png, image/webp, image/*");
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inSampleSize = 2;
-            try (InputStream input = connection.getInputStream()) {
+            try (BufferedInputStream input = new BufferedInputStream(connection.getInputStream())) {
+                if (fullArtwork) {
+                    input.mark(512 * 1024);
+                    BitmapFactory.Options bounds = new BitmapFactory.Options();
+                    bounds.inJustDecodeBounds = true;
+                    BitmapFactory.decodeStream(input, null, bounds);
+                    input.reset();
+                    int longestEdge = Math.max(bounds.outWidth, bounds.outHeight);
+                    if (longestEdge <= 0) return null;
+                    options.inSampleSize = 1;
+                    while (longestEdge / options.inSampleSize > 960) options.inSampleSize *= 2;
+                }
                 Bitmap image = BitmapFactory.decodeStream(input, null, options);
-                if (image != null) posters.put(address, image);
+                if (image != null) posters.put(cacheKey, image);
                 return image;
             }
         } catch (Exception ignored) {

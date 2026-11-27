@@ -9,11 +9,19 @@ sub changed()
   m.fallback = item.hdPosterUrl
   art = m.fallback
   if item.landscapeArtwork <> invalid and item.landscapeArtwork <> "" then art = item.landscapeArtwork
+  if art = m.fallback
+    m.poster.loadDisplayMode = "scaleToFit"
+  else
+    m.poster.loadDisplayMode = "scaleToZoom"
+  end if
   m.poster.uri = art
   m.top.findNode("title").text = item.title
 end sub
 sub posterChanged()
-  if m.poster.loadStatus = "failed" and m.fallback <> invalid and m.poster.uri <> m.fallback then m.poster.uri = m.fallback
+  if m.poster.loadStatus = "failed" and m.fallback <> invalid and m.poster.uri <> m.fallback
+    m.poster.loadDisplayMode = "scaleToFit"
+    m.poster.uri = m.fallback
+  end if
 end sub
 
 sub focused()
