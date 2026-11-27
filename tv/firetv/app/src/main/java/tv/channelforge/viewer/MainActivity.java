@@ -13,17 +13,26 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageInstaller;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
+import android.media.SoundPool;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.text.SpannableString;
+import android.text.TextUtils;
+import android.text.style.ForegroundColorSpan;
 import android.util.LruCache;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -44,8 +53,11 @@ import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.exoplayer.source.LoadEventInfo;
+import androidx.media3.exoplayer.source.MediaLoadData;
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter;
 import androidx.media3.ui.PlayerView;
+import androidx.media3.ui.AspectRatioFrameLayout;
 import org.json.*;
 import java.io.*;
 import java.net.*;
@@ -57,9 +69,15 @@ import java.util.concurrent.Executors;
 
 @UnstableApi
 public class MainActivity extends Activity {
+    private final String viewerLease = UUID.randomUUID().toString().replace("-", "");
+    private SoundPool menuSounds;
+    private int menuTick;
+    private boolean menuSoundReady;
+    private long lastMenuSound;
     private final List<Creator> creators = new ArrayList<>();
     private final List<Channel> channels = new ArrayList<>();
     private final List<VaultItem> vaultItems = new ArrayList<>();
+    private final List<View> navGroupLabels = new ArrayList<>();
     private String movieDecade = "all", movieSearch = "", movieGenre = "", movieRating = "";
     private JSONArray movieGenres = new JSONArray(), movieRatings = new JSONArray();
     private PlayerView video;
@@ -70,9 +88,12 @@ public class MainActivity extends Activity {
     private boolean ejectingTape;
     private LinearLayout movieDetails;
     private TextView insertMovie;
+    private TextView touchGuideButton;
+    private boolean compactTouchLayout, touchDevice, phoneLayout, phonePortrait, tvTheme;
+    private View phoneMenuShade, phoneContent, phoneHeader, phoneHeaderLine;
     private ExoPlayer player;
     private boolean renderedFrame;
-    private enum Page { HOME, LIVE, CINEMA, CONTINUE, FAVORITES }
+    private enum Page { HOME, LIVE, CINEMA, CONTINUE, FAVORITES, SYSTEM }
     private Page activePage = Page.HOME;
     private Page renderedAuxiliary;
     private final Map<Page, TextView> navButtons = new EnumMap<>(Page.class);
@@ -80,10 +101,12 @@ public class MainActivity extends Activity {
     private boolean menuCollapsed;
     private int navigationWidth;
 
-    private TextView status, banner, updateButton, navigationUpdates;
+    private TextView status, banner, updateButton;
     private LinearLayout bufferPanel, bannerPanel;
     private ProgressBar bufferSpinner;
     private TextView bufferLabel;
+    private TextView touchRetry, touchDebugger;
+    private JSONObject lastPlaybackReport;
     private String streamTitle = "";
     private int channelIndex = 0;
     private boolean guideVisible = true;
@@ -109,6 +132,7 @@ public class MainActivity extends Activity {
     private long rebufferStarted, totalRebufferMs;
     private final ArrayDeque<Long> recentLiveStalls = new ArrayDeque<>();
     private boolean recovering;
+    private boolean usingPreferredRelay, skipPreferredRelay;
     private final Runnable lowerQuality = this::lowerQualityDuringStall;
     private final Runnable resetPlaybackRetries = () -> {
         liveRetries = 0;
@@ -119,11 +143,21 @@ public class MainActivity extends Activity {
     private boolean movieFinished;
     private int movieRetries, playGeneration;
     private long resumePosition, lastFrameChange, firstFrameMs = -1, tuneStarted;
+    private long routeRecoveryStarted;
     private int lastFrameCount = -1, lastErrorCode, lastHttpCode, totalRetries;
-    private String lastReason = "none", decoderName = "unknown";
+    private int segmentLoads, segmentErrors, manifestErrors;
+    private long segmentLoadMs, segmentLoadBytes, slowestSegmentMs, slowestManifestMs;
+    private String lastReason = "none", decoderName = "unknown", lastHttpResource;
     private long directoryChecked, lastCpuTime, lastCpuTick;
     private int cpuPercent = -1;
     private final ArrayDeque<String> recentEvents = new ArrayDeque<>();
+    private final ArrayDeque<JSONObject> testerTimeline = new ArrayDeque<>();
+    private static final String TESTER_CONSENT = TesterApplication.TESTER_CONSENT;
+    private static final String TESTER_NOTICE = "This private alpha can buffer, stop, or crash. "
+            + "Only agree if you want ChannelForge to collect app diagnostics on this device. "
+            + "Use Developer to review the data and choose whether to send it. Reports include timing, "
+            + "buffering, stream errors, and the device model. They exclude accounts and media titles. "
+            + "This build provides no remote device access.";
     private String pendingReport;
     private static final int EXPORT_REPORT = 22;
     private DefaultBandwidthMeter bandwidth;
@@ -153,23 +187,27 @@ public class MainActivity extends Activity {
     private final LruCache<String, Bitmap> posters = new LruCache<String, Bitmap>(6 * 1024 * 1024) {
         @Override protected int sizeOf(String address, Bitmap image) { return image.getByteCount(); }
     };
-    private final Runnable playbackDeadline = () -> recover("Studio did not deliver video before the deadline");
+    private final Runnable playbackDeadline = () -> recover("Studio did not deliver video before the deadline", true);
     private final Runnable continueLive = () -> {
         if (tunedChannel != null && !guideVisible) {
             trackLiveProgram();
             if (!hasUpcomingProgram) refreshOnAirGuide(tunedChannel);
             showBuffering("Connecting to the studio…", true);
             waitForPlayback();
-            startStream(tunedChannel.continuousUrl.isEmpty() ? tunedChannel.url : tunedChannel.continuousUrl, true);
+            startStream(tunedChannel.liveUrl(liveRetries, phoneLayout), true);
         }
     };
     private boolean directoryLoading = false;
     private boolean readInitialCache = true;
     private boolean directoryStale;
     private final Set<String> staleGuides = new HashSet<>();
+    private final Set<String> unreachableStudios = new HashSet<>();
     private GuideCache guideCache;
     private final ExecutorService posterLoader = Executors.newFixedThreadPool(3);
+    private final ExecutorService movieCatalogLoader = Executors.newSingleThreadExecutor();
+    private final ExecutorService movieCoverLoader = Executors.newSingleThreadExecutor();
     private final ExecutorService studioLoader = Executors.newFixedThreadPool(4);
+    private final ExecutorService recoveryLoader = Executors.newSingleThreadExecutor();
     private final ExecutorService updateLoader = Executors.newSingleThreadExecutor();
     private static final String UPDATE_RESULT = BuildConfig.APPLICATION_ID + ".UPDATE_RESULT";
     private static final String UPDATE_PERMISSION = BuildConfig.APPLICATION_ID + ".permission.UPDATE_RESULT";
@@ -209,16 +247,17 @@ public class MainActivity extends Activity {
     private final Map<String, List<Channel>> channelsByStudio = new HashMap<>();
     private final Set<String> loadingGuides = new HashSet<>();
     private String guideStudio = "", guideSearch = "";
+    private boolean guideSortByRating;
     private int guideOffset;
     private TextView programTitle, programTime, programElapsed, programDuration;
     private ProgressBar programProgress;
-    private ImageView programArtwork;
+    private ImageView programArtwork, landscapeProgramArtwork;
     private Channel previewChannel;
     private final Runnable previewClock = new Runnable() {
         @Override public void run() {
             if (!resumed || !guideVisible || activePage != Page.LIVE || previewChannel == null) return;
             updateProgram(previewChannel);
-            programArtwork.postDelayed(this, 1000);
+            programArtwork.postDelayed(this, phoneLayout ? 3000 : 1000);
         }
     };
     private TextView screenSwitcher;
@@ -230,7 +269,7 @@ public class MainActivity extends Activity {
     private LinearLayout movieShelf;
     private TextView moreMovies;
     private String selectedPlaylist = "";
-    private static final String PREFS = "channel_forge_tv";
+    private static final String PREFS = TesterUpdateReceiver.PREFS;
     private static final String PAIRED_CREATOR = "paired_creator_url";
     private static final long DIRECTORY_REFRESH_MS = 60_000L;
     private static final long DIRECTORY_RETRY_MS = 10_000L;
@@ -247,13 +286,42 @@ public class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        getWindow().getDecorView().setSystemUiVisibility(5894);
+        menuSounds = new SoundPool.Builder().setMaxStreams(1)
+                .setAudioAttributes(new android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION).build()).build();
+        menuSounds.setOnLoadCompleteListener((pool, sample, status) -> menuSoundReady = status == 0);
+        menuTick = menuSounds.load(this, R.raw.navigation, 1);
+        PackageManager features = getPackageManager();
+        phoneLayout = BuildConfig.PHONE_TESTER || (!BuildConfig.TESTER_BUILD
+                && features.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+                && !features.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+                && !features.hasSystemFeature("android.hardware.type.television"));
+        tvTheme = !phoneLayout && (BuildConfig.TESTER_BUILD || features.hasSystemFeature("amazon.hardware.fire_tv")
+                || features.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+                || features.hasSystemFeature("android.hardware.type.television"));
+        if (phoneLayout) {
+            if (!BuildConfig.PHONE_TESTER) setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
+            getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        } else getWindow().getDecorView().setSystemUiVisibility(5894);
         guideCache = new GuideCache(getFilesDir());
         buildUi();
         registerUpdateResult();
+        if (BuildConfig.TESTER_BUILD && !testerConsented()) {
+            new AlertDialog.Builder(this).setTitle("ChannelForge TV Tester").setMessage(TESTER_NOTICE)
+                    .setCancelable(false).setNegativeButton("Decline", (box, button) -> finish())
+                    .setPositiveButton("I agree", (box, button) -> {
+                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(TESTER_CONSENT, true).apply();
+                        startViewer();
+                    }).show();
+        } else startViewer();
+    }
+
+    private void startViewer() {
         loadDirectory();
         guide.postDelayed(directoryRefresh, DIRECTORY_REFRESH_MS);
-        checkUpdates(false);
+        if (!BuildConfig.TESTER_BUILD) checkUpdates(false);
+        if (BuildConfig.TESTER_BUILD) updateLoader.execute(((TesterApplication) getApplication())::sendPendingCrash);
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag") // Earlier Fire OS versions use the signature permission.
@@ -290,10 +358,11 @@ public class MainActivity extends Activity {
                 .setUserAgent("ChannelForge-TV/" + BuildConfig.VERSION_NAME)
                 .setConnectTimeoutMs(6000).setReadTimeoutMs(10000);
         // Start around SD until the first transfers yield an estimate for this network.
-        bandwidth = new DefaultBandwidthMeter.Builder(this).setInitialBitrateEstimate(1_000_000L).build();
+        bandwidth = new DefaultBandwidthMeter.Builder(this)
+                .setInitialBitrateEstimate(phoneLayout ? 380_000L : 1_000_000L).build();
         player = new ExoPlayer.Builder(this, new DefaultRenderersFactory(this).setEnableDecoderFallback(true))
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(http))
-                .setLoadControl(new DefaultLoadControl.Builder().setBufferDurationsMs(15000, 35000, 3500, 6000).build())
+                .setLoadControl(new DefaultLoadControl.Builder().setBufferDurationsMs(20000, 45000, 3500, 6000).build())
                 .setBandwidthMeter(bandwidth)
                 .setAudioAttributes(AudioAttributes.DEFAULT, true)
                 .build();
@@ -303,110 +372,47 @@ public class MainActivity extends Activity {
             @Override public void onVideoDecoderInitialized(EventTime time, String name, long timestamp, long duration) {
                 decoderName = name;
             }
+
+            @Override public void onLoadCompleted(EventTime time, LoadEventInfo load, MediaLoadData media) {
+                if (!BuildConfig.TESTER_BUILD || guideVisible || !testerConsented()) return;
+                if (media.dataType == C.DATA_TYPE_MEDIA && load.bytesLoaded > 0) {
+                    segmentLoads++;
+                    segmentLoadBytes += load.bytesLoaded;
+                    segmentLoadMs += load.loadDurationMs;
+                    slowestSegmentMs = Math.max(slowestSegmentMs, load.loadDurationMs);
+                } else if (media.dataType == C.DATA_TYPE_MANIFEST) {
+                    slowestManifestMs = Math.max(slowestManifestMs, load.loadDurationMs);
+                }
+            }
+
+            @Override public void onLoadError(EventTime time, LoadEventInfo load, MediaLoadData media,
+                                              IOException error, boolean canceled) {
+                if (!BuildConfig.TESTER_BUILD || guideVisible || canceled || !testerConsented()) return;
+                if (media.dataType == C.DATA_TYPE_MEDIA) segmentErrors++;
+                else if (media.dataType == C.DATA_TYPE_MANIFEST) manifestErrors++;
+            }
         });
         video.setPlayer(player);
+        video.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
         video.setUseController(false);
         video.setKeepContentOnPlayerReset(true);
         video.setFocusable(false);
         video.setVisibility(View.GONE);
         root.addView(video, new FrameLayout.LayoutParams(-1, -1));
-        int width = getResources().getConfiguration().screenWidthDp;
-        int height = getResources().getConfiguration().screenHeightDp;
-        boolean compact = width < 800 || height < 450;
-        guide = new LinearLayout(this); guide.setOrientation(LinearLayout.VERTICAL);
-        int inset = dp(compact ? 14 : 19);
-        guide.setPadding(inset,dp(9),inset,dp(compact ? 9 : 13));
-        guide.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                new int[]{color("#050F20"), color("#09152B"), color("#20103D")}));
-        LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(8));
-        TextView menu = focusButton("☰");
-        menu.setContentDescription("Toggle navigation menu");
-        menu.setPadding(dp(12), 0, dp(12), 0);
-        menu.setOnClickListener(v -> toggleMenu());
-        header.addView(menu);
-        ImageView logo=new ImageView(this);logo.setImageResource(R.drawable.channel_forge_viewer_brand);logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        int logoSize = dp(compact ? 36 : 44);
-        header.addView(logo,new LinearLayout.LayoutParams(logoSize,logoSize));
-        LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);
-        TextView brand=text("CHANNELFORGE TV",compact ? 16 : 20,true);
-        brand.setTextColor(color("#FFF229"));brand.setLetterSpacing(compact ? .08f : .16f);
-        brand.setSingleLine(true);
-        brand.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        brand.setPadding(dp(compact ? 5 : 18), dp(3), dp(5), dp(3));
-        brandBox.addView(brand);
-        if (!compact) {
-            TextView subtitle=text("THE COMMUNITY DIAL",11,true);
-            subtitle.setTextColor(color("#55EFFF"));subtitle.setLetterSpacing(.28f);
-            subtitle.setSingleLine(true);
-            subtitle.setPadding(dp(18), 0, dp(5), dp(6));
-            brandBox.addView(subtitle);
+        int deviceMode = getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_TYPE_MASK;
+        touchDevice = !tvTheme && deviceMode != android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+                && getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_TOUCHSCREEN);
+        buildGuideUi(root);
+        if (touchDevice) {
+            touchGuideButton = focusButton("←  LIVE TV GUIDE");
+            touchGuideButton.setContentDescription("Stop live TV and return to the guide");
+            touchGuideButton.setMinHeight(dp(48));
+            touchGuideButton.setVisibility(View.GONE);
+            touchGuideButton.setOnClickListener(view -> returnToGuide());
+            FrameLayout.LayoutParams liveNavigation = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+            liveNavigation.setMargins(dp(12), dp(12), dp(12), 0);
+            root.addView(touchGuideButton, liveNavigation);
         }
-        header.addView(brandBox,new LinearLayout.LayoutParams(0,-2,1));
-        screenSwitcher=focusButton("REWIND CINEMA");
-        screenSwitcher.setOnClickListener(v -> openCinemaScreen(!cinemaScreen));
-        header.addView(screenSwitcher);
-        updateButton=focusButton("UPDATES  •  v"+BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->selectUpdate());LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
-        if (compact) {
-            for (TextView control : new TextView[]{menu, screenSwitcher, updateButton}) {
-                control.setTextSize(11);
-                control.setSingleLine(true);
-                control.setMinHeight(dp(34));
-                control.setPadding(dp(9), 0, dp(9), 0);
-            }
-            updateButton.setMaxWidth(dp(170));
-            updateButton.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        }
-        menu.setId(View.generateViewId());
-        screenSwitcher.setId(View.generateViewId());
-        updateButton.setId(View.generateViewId());
-        menu.setNextFocusRightId(screenSwitcher.getId());
-        screenSwitcher.setNextFocusLeftId(menu.getId());
-        screenSwitcher.setNextFocusRightId(updateButton.getId());
-        updateButton.setNextFocusLeftId(screenSwitcher.getId());
-        View line=new View(this);line.setBackgroundColor(color("#16DFF5"));guide.addView(line,new LinearLayout.LayoutParams(-1,dp(2)));
-        status = text("●  CONNECTING TO THE PUBLIC CHANNEL DIRECTORY…", 12, true); status.setTextColor(color("#77F6A3"));status.setBackground(surface(new int[]{color("#111A3B"),color("#0A0B20")},color("#225E8B"),1,8));LinearLayout.LayoutParams statusLayout=new LinearLayout.LayoutParams(-1,-2);statusLayout.setMargins(0,dp(6),0,dp(6));guide.addView(status,statusLayout);
-        LinearLayout columns = new LinearLayout(this); columns.setOrientation(LinearLayout.HORIZONTAL); guide.addView(columns, new LinearLayout.LayoutParams(-1, 0, 1));
-        menuPanel = new LinearLayout(this);
-        menuPanel.setOrientation(LinearLayout.VERTICAL);
-        menuPanel.setBackground(surface(new int[]{color("#0A0B1C"), color("#150B2B")}, color("#2D365B"), 1, 10));
-        navigationWidth = dp(Math.max(compact ? 116 : 138, Math.min(180, width / 6)));
-        LinearLayout.LayoutParams menuLayout = new LinearLayout.LayoutParams(navigationWidth, -1);
-        menuLayout.setMargins(0, 0, dp(9), 0);
-        columns.addView(menuPanel, menuLayout);
-        ScrollView navigationScroll = new ScrollView(this);
-        navigationScroll.setFillViewport(true);
-        navigationScroll.setVerticalScrollBarEnabled(false);
-        LinearLayout menuContent = new LinearLayout(this);
-        menuContent.setPadding(dp(6), dp(5), dp(6), dp(5));
-        menuContent.setOrientation(LinearLayout.VERTICAL);
-        navigationRail = new LinearLayout(this);
-        navigationRail.setOrientation(LinearLayout.VERTICAL);
-        menuContent.addView(navigationRail);
-        creatorRail = new LinearLayout(this);
-        creatorRail.setOrientation(LinearLayout.VERTICAL);
-        menuContent.addView(creatorRail);
-        navigationScroll.addView(menuContent);
-        menuPanel.addView(navigationScroll, new LinearLayout.LayoutParams(-1, -1));
-        addNavigation("⌂", "Home", Page.HOME);
-        addNavigation("◉", "Live TV Guide", Page.LIVE);
-        addNavigation("▣", "Rewind Cinema", Page.CINEMA);
-        addNavigation("▶", "Continue Watching", Page.CONTINUE);
-        addNavigation("★", "Favorites", Page.FAVORITES);
-        navigationUpdates = navigationButton("↻  Updates");
-        navigationUpdates.setContentDescription("Updates");
-        navigationUpdates.setOnClickListener(v -> selectUpdate());
-        navigationRail.addView(navigationUpdates);
-        LinearLayout channelsPanel=panel();channelRail=new LinearLayout(this);channelRail.setOrientation(LinearLayout.VERTICAL);ScrollView channelScroll=new ScrollView(this);channelScroll.setVerticalScrollBarEnabled(false);channelScroll.addView(channelRail);channelsPanel.addView(channelScroll,new LinearLayout.LayoutParams(-1,0,1));columns.addView(channelsPanel,new LinearLayout.LayoutParams(0,-1,1f));
-        creatorRail.addView(sectionTitle("CREATOR STUDIOS","#5DEEFF"));
-        creatorRail.addView(text("Searching worldwide…",14,false));
-        syncStudioScreen();
-        if (height >= 420) {
-            TextView help = text("↑↓  SURF CHANNELS     •     OK  WATCH / GUIDE     •     BACK  RETURN TO GUIDE", 10, true);
-            help.setTextColor(color("#7184A9"));
-            help.setSingleLine(true);
-            guide.addView(help);
-        }
-        root.addView(guide, new FrameLayout.LayoutParams(-1,-1));
         bufferPanel = panel();
         bufferPanel.setGravity(Gravity.CENTER);
         bufferSpinner = new ProgressBar(this);
@@ -414,8 +420,16 @@ public class MainActivity extends Activity {
         bufferLabel = text("", 18, true);
         bufferLabel.setGravity(Gravity.CENTER);
         bufferPanel.addView(bufferLabel, new LinearLayout.LayoutParams(-1, -2));
+        if (phoneLayout) {
+            touchRetry = focusButton("↻  Retry");
+            touchRetry.setOnClickListener(v -> retrySelection());
+            bufferPanel.addView(touchRetry);
+            touchDebugger = focusButton("Developer");
+            touchDebugger.setOnClickListener(v -> showTesterTools());
+            bufferPanel.addView(touchDebugger);
+        }
         bufferPanel.setVisibility(View.GONE);
-        root.addView(bufferPanel, new FrameLayout.LayoutParams(dp(360), -2, Gravity.CENTER));
+        root.addView(bufferPanel, new FrameLayout.LayoutParams(playbackPanelWidth(), -2, Gravity.CENTER));
         bannerPanel = new LinearLayout(this);
         bannerPanel.setGravity(Gravity.CENTER_VERTICAL);
         bannerPanel.setPadding(dp(12), dp(8), dp(12), dp(8));
@@ -434,10 +448,19 @@ public class MainActivity extends Activity {
         video.setControllerVisibilityListener((PlayerView.ControllerVisibilityListener) visibility ->
                 eject.setVisibility(visibility == View.VISIBLE && activeMovie != null && !ejectingTape
                         && cassetteMotion == null ? View.VISIBLE : View.GONE));
+        if (phoneLayout) root.setFitsSystemWindows(true);
         setContentView(root);
-        screenSwitcher.requestFocus();
+        if (tvTheme) focusHomeNavigation();
+        else if (!phoneLayout) screenSwitcher.requestFocus();
         player.addListener(new Player.Listener() {
+            @Override public void onEvents(Player source, Player.Events events) {
+                if (events.containsAny(Player.EVENT_PLAY_WHEN_READY_CHANGED, Player.EVENT_PLAYBACK_STATE_CHANGED,
+                        Player.EVENT_PLAYBACK_SUPPRESSION_REASON_CHANGED)) updatePlaybackScreenAwake();
+            }
+
             @Override public void onPlaybackStateChanged(int state) {
+                if (state == Player.STATE_BUFFERING) testerEvent("buffering");
+                if (state == Player.STATE_ENDED) testerEvent("ended");
                 if (guideVisible || recovering || ejectingTape || playbackFailed) return;
                 if (state == Player.STATE_BUFFERING) {
                     if (renderedFrame && player.getPlayWhenReady() && rebufferStarted == 0) {
@@ -473,8 +496,13 @@ public class MainActivity extends Activity {
             @Override public void onRenderedFirstFrame() {
                 if (guideVisible || recovering || ejectingTape || playbackFailed) return;
                 renderedFrame = true;
-                if (firstFrameMs < 0) firstFrameMs = SystemClock.elapsedRealtime() - tuneStarted;
-                hidePlaybackBuffer();
+                if (firstFrameMs < 0) {
+                    firstFrameMs = SystemClock.elapsedRealtime() - tuneStarted;
+                    testerEvent("first-frame");
+                }
+                if (BuildConfig.TESTER_BUILD) android.util.Log.i("ChannelForgePlayback",
+                        usingPreferredRelay ? "First frame via preferred media relay" : "First frame via registered media route");
+                if (player.getPlayWhenReady()) hidePlaybackBuffer();
                 if (tunedChannel != null) showChannelBanner(tunedChannel);
                 showUpcomingIfPlaying();
             }
@@ -492,8 +520,17 @@ public class MainActivity extends Activity {
                 Throwable cause = error.getCause();
                 while (cause != null && !(cause instanceof HttpDataSource.InvalidResponseCodeException))
                     cause = cause.getCause();
-                lastHttpCode = cause == null ? 0 : ((HttpDataSource.InvalidResponseCodeException)cause).responseCode;
+                lastHttpCode = 0;
+                lastHttpResource = null;
+                if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
+                    HttpDataSource.InvalidResponseCodeException failure = (HttpDataSource.InvalidResponseCodeException) cause;
+                    lastHttpCode = failure.responseCode;
+                    String path = failure.dataSpec.uri.getPath();
+                    lastHttpResource = path != null && path.endsWith(".ts") ? "segment"
+                            : path != null && path.endsWith(".m3u8") ? "manifest" : "other";
+                }
                 String reason = lastHttpCode == 503 || lastHttpCode == 429 ? "Studio is busy"
+                        : lastHttpCode == 502 || lastHttpCode == 504 ? "Studio relay is unavailable"
                         : lastHttpCode == 404 || lastHttpCode == 410 ? "Studio address or media expired"
                         : error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW ? "Live window moved"
                         : error.errorCode >= 4000 && error.errorCode < 5000 ? "Video decoder error"
@@ -501,6 +538,363 @@ public class MainActivity extends Activity {
                 recover(reason);
             }
         });
+    }
+
+    private void buildGuideUi(FrameLayout root) {
+        navGroupLabels.clear();
+        navButtons.clear();
+        phoneMenuShade = null;
+        phoneContent = null;
+        phoneHeader = phoneHeaderLine = null;
+        int width = getResources().getConfiguration().screenWidthDp;
+        int height = getResources().getConfiguration().screenHeightDp;
+        phonePortrait = phoneLayout && (height > width || width < 540);
+        compactTouchLayout = phoneLayout ? phonePortrait : touchDevice && width < 850;
+        boolean compact = width < 800 || height < 450;
+        guide = new LinearLayout(this); guide.setOrientation(LinearLayout.VERTICAL);
+        int inset = dp(phoneLayout ? 10 : compact ? 14 : 19);
+        guide.setPadding(inset,dp(9),inset,dp(compact ? 9 : 13));
+        guide.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                neonTheme() ? new int[]{color("#04091A"), color("#070C1C"), color("#190B35")}
+                        : new int[]{color("#050F20"), color("#09152B"), color("#20103D")}));
+        LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(8));
+        phoneHeader = header;
+        TextView menu = focusButton("☰");
+        menu.setContentDescription("Toggle navigation menu");
+        menu.setPadding(dp(12), 0, dp(12), 0);
+        menu.setOnClickListener(v -> toggleMenu());
+        header.addView(menu);
+        ImageView logo=new ImageView(this);
+        logo.setImageResource(BuildConfig.TESTER_BUILD ? R.drawable.channel_forge_tv_tester_icon : R.drawable.channel_forge_viewer_brand);
+        logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        int logoSize = dp(phoneLayout ? 48 : compact ? 36 : 44);
+        logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        header.addView(logo,new LinearLayout.LayoutParams(logoSize,logoSize));
+        LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);
+        TextView brand=text(BuildConfig.TESTER_BUILD && !phonePortrait ? "CHANNELFORGE TV TESTER" : "CHANNELFORGE TV",
+                compact ? 16 : 20, true);
+        brand.setTextColor(color("#FFF229"));brand.setLetterSpacing(compact ? .08f : .16f);
+        brand.setSingleLine(true);
+        brand.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        brand.setPadding(dp(compact ? 5 : 18), dp(3), dp(5), dp(3));
+        if (neonTheme()) applyPhoneWordmark(brand, phonePortrait ? 20 : 26);
+        brandBox.addView(brand);
+        if (neonTheme()) brandBox.addView(phoneRule());
+        else if (!compact) {
+            TextView subtitle=text("THE COMMUNITY DIAL",11,true);
+            subtitle.setTextColor(color("#55EFFF"));subtitle.setLetterSpacing(.28f);
+            subtitle.setSingleLine(true);
+            subtitle.setPadding(dp(18), 0, dp(5), dp(6));
+            brandBox.addView(subtitle);
+        }
+        header.addView(brandBox,new LinearLayout.LayoutParams(0,-2,1));
+        screenSwitcher=focusButton("REWIND CINEMA");
+        screenSwitcher.setOnClickListener(v -> openCinemaScreen(!cinemaScreen));
+        header.addView(screenSwitcher);
+        screenSwitcher.setVisibility(phonePortrait ? View.GONE : View.VISIBLE);
+        updateButton=focusButton(BuildConfig.TESTER_BUILD ? testerVersionLabel() : "UPDATES  •  v" + BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->selectUpdate());LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
+        if (compact) {
+            for (TextView control : new TextView[]{menu, screenSwitcher, updateButton}) {
+                control.setTextSize(11);
+                control.setSingleLine(true);
+                control.setMinHeight(dp(34));
+                control.setPadding(dp(9), 0, dp(9), 0);
+            }
+            updateButton.setMaxWidth(dp(170));
+            updateButton.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        }
+        if (phonePortrait) {
+            menu.setMinWidth(dp(48));
+            menu.setMinHeight(dp(48));
+            menu.setTextSize(19);
+            updateButton.setMinHeight(dp(48));
+            updateButton.setGravity(Gravity.CENTER);
+            updateButton.setSingleLine(false);
+            updateButton.setMaxLines(2);
+            updateLayout.leftMargin = dp(4);
+        }
+        if (neonTheme()) {
+            menu.setBackground(phonePanel(false, 10));
+            updateButton.setBackground(phonePanel(false, 10));
+            screenSwitcher.setBackground(phonePanel(true, 10));
+        }
+        if (tvTheme) {
+            menu.setBackground(tvFrame(false, 11));
+            updateButton.setBackground(tvFrame(false, 11));
+            updateButton.setOnClickListener(v -> openPage(Page.SYSTEM));
+            screenSwitcher.setBackground(tvFrame(false, 11));
+        }
+        menu.setId(View.generateViewId());
+        screenSwitcher.setId(View.generateViewId());
+        updateButton.setId(View.generateViewId());
+        menu.setNextFocusRightId(screenSwitcher.getId());
+        screenSwitcher.setNextFocusLeftId(menu.getId());
+        screenSwitcher.setNextFocusRightId(updateButton.getId());
+        updateButton.setNextFocusLeftId(screenSwitcher.getId());
+        View line = neonTheme() ? phoneRule() : new View(this);
+        if (!neonTheme()) line.setBackgroundColor(color("#16DFF5"));
+        phoneHeaderLine = line;
+        guide.addView(line,new LinearLayout.LayoutParams(-1,dp(2)));
+        status = text(phonePortrait ? "Finding channels…" : "●  CONNECTING TO THE PUBLIC CHANNEL DIRECTORY…", 12, true);
+        status.setTextColor(color("#77F6A3"));
+        if (!phonePortrait) status.setBackground(surface(new int[]{color("#111A3B"),color("#0A0B20")},color("#225E8B"),1,8));
+        LinearLayout.LayoutParams statusLayout = new LinearLayout.LayoutParams(-1, -2);
+        statusLayout.setMargins(0, dp(6), 0, dp(6));
+        if (tvTheme) {
+            FrameLayout statusBar = new FrameLayout(this);
+            statusBar.setBackground(tvFrame(false, 13));
+            status.setBackground(null);
+            status.setPadding(dp(14), dp(5), dp(52), dp(5));
+            statusBar.addView(status, new FrameLayout.LayoutParams(-1, -2));
+            FrameLayout.LayoutParams accent = new FrameLayout.LayoutParams(dp(52), dp(17), Gravity.END | Gravity.CENTER_VERTICAL);
+            accent.rightMargin = dp(9);
+            statusBar.addView(tvStripes(true), accent);
+            guide.addView(statusBar, statusLayout);
+        } else guide.addView(status, statusLayout);
+        LinearLayout columns = new LinearLayout(this);
+        FrameLayout phoneWorkspace = phonePortrait ? new FrameLayout(this) : null;
+        guide.addView(phonePortrait ? phoneWorkspace : columns, new LinearLayout.LayoutParams(-1, 0, 1));
+        menuPanel = new LinearLayout(this);
+        menuPanel.setOrientation(LinearLayout.VERTICAL);
+        menuPanel.setBackground(surface(new int[]{color("#0A0B1C"), color("#150B2B")}, color("#2D365B"), 1, 10));
+        if (neonTheme()) menuPanel.setBackground(phonePanel(false, 11));
+        if (tvTheme) menuPanel.setBackground(tvFrame(false, 14));
+        navigationWidth = dp(phonePortrait ? Math.min(324, width - 27)
+                : Math.max(compact ? 116 : 138, Math.min(180, width / 6)));
+        LinearLayout.LayoutParams menuLayout = new LinearLayout.LayoutParams(navigationWidth, -1);
+        menuLayout.setMargins(0, 0, dp(9), 0);
+        if (!phonePortrait) columns.addView(menuPanel, menuLayout);
+        ScrollView navigationScroll = new ScrollView(this);
+        navigationScroll.setFillViewport(true);
+        navigationScroll.setVerticalScrollBarEnabled(false);
+        LinearLayout menuContent = new LinearLayout(this);
+        menuContent.setPadding(dp(6), dp(5), dp(6), dp(5));
+        menuContent.setOrientation(LinearLayout.VERTICAL);
+        if (phonePortrait) addPhoneDrawerHeader(menuContent);
+        navigationRail = new LinearLayout(this);
+        navigationRail.setOrientation(LinearLayout.VERTICAL);
+        menuContent.addView(navigationRail);
+        creatorRail = new LinearLayout(this);
+        creatorRail.setOrientation(LinearLayout.VERTICAL);
+        menuContent.addView(creatorRail);
+        if (phonePortrait) addPhoneBackdrop(menuContent, 113);
+        navigationScroll.addView(menuContent);
+        menuPanel.addView(navigationScroll, new LinearLayout.LayoutParams(-1, -1));
+        addNavigationGroup("WATCH");
+        addNavigation("⌂", "Home", Page.HOME);
+        addNavigation(neonTheme() ? "▣" : "◉", "Live TV Guide", Page.LIVE);
+        if (!phoneLayout) addNavigationGroup("LIBRARY");
+        addNavigation("▣", "Rewind Cinema", Page.CINEMA);
+        addNavigation("▶", "Continue Watching", Page.CONTINUE);
+        addNavigation("★", "Favorites", Page.FAVORITES);
+        addNavigationGroup("SYSTEM");
+        if (tvTheme) addTvSystemActions();
+        else addNavigation("⚙", "System", Page.SYSTEM);
+        LinearLayout channelsPanel = panel();
+        channelRail = new LinearLayout(this);
+        channelRail.setOrientation(LinearLayout.VERTICAL);
+        ScrollView channelScroll = new ScrollView(this);
+        channelScroll.setVerticalScrollBarEnabled(false);
+        channelScroll.addView(channelRail);
+        channelsPanel.addView(channelScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        if (phonePortrait) {
+            channelsPanel.setPadding(0, dp(4), 0, 0);
+            channelsPanel.setBackground(null);
+            phoneContent = channelsPanel;
+            phoneWorkspace.addView(channelsPanel, new FrameLayout.LayoutParams(-1, -1));
+            phoneMenuShade = new View(this);
+            phoneMenuShade.setBackgroundColor(color("#A0000611"));
+            phoneMenuShade.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            phoneMenuShade.setOnClickListener(v -> setMenuCollapsed(true));
+            phoneWorkspace.addView(phoneMenuShade, new FrameLayout.LayoutParams(-1, -1));
+            menuPanel.setClickable(true);
+            phoneWorkspace.addView(menuPanel, new FrameLayout.LayoutParams(navigationWidth, -1, Gravity.START));
+        } else {
+            if (tvTheme) {
+                channelsPanel.setPadding(0, 0, 0, 0);
+                channelsPanel.setBackground(null);
+            }
+            columns.addView(channelsPanel, new LinearLayout.LayoutParams(0, -1, 1f));
+        }
+        creatorRail.addView(tvTheme ? tvHeading("CREATOR STUDIOS", false) : sectionTitle("CREATOR STUDIOS","#5DEEFF"));
+        creatorRail.addView(text("Searching worldwide…",14,false));
+        syncStudioScreen();
+        setMenuCollapsed(phoneLayout || !BuildConfig.TESTER_BUILD && compactTouchLayout);
+        if (height >= 420 && !touchDevice) {
+            TextView help = text(tvTheme ? "↑↓  Surf Channels     |     OK  Watch / Guide     |     ↶  Back"
+                    : "↑↓  SURF CHANNELS     •     OK  WATCH / GUIDE     •     BACK  RETURN TO GUIDE", 10, true);
+            help.setTextColor(color(tvTheme ? "#E2F3FF" : "#7184A9"));
+            help.setSingleLine(true);
+            if (tvTheme) {
+                addGap(guide, 6);
+                guide.addView(phoneRule());
+                FrameLayout footer = new FrameLayout(this);
+                help.setPadding(dp(6), dp(5), 0, dp(3));
+                footer.addView(help);
+                footer.addView(tvStripes(true), new FrameLayout.LayoutParams(dp(72), dp(19), Gravity.END | Gravity.BOTTOM));
+                guide.addView(footer);
+            } else guide.addView(help);
+        }
+        guide.setVisibility(guideVisible ? View.VISIBLE : View.GONE);
+        root.addView(guide, 1, new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private GradientDrawable phonePanel(boolean purple, int radius) {
+        return surface(new int[]{color(purple ? "#301348" : "#0D3148"), color("#080F24"),
+                        color(purple ? "#1C0B2F" : "#061626")},
+                color(purple ? "#D146F0" : "#29D9F9"), 1, radius);
+    }
+
+    private Drawable tvFrame(boolean purple, int radius) {
+        GradientDrawable trim = surface(new int[]{color(purple ? "#F452FF" : "#38E7FF"), color("#E5F7FF"),
+                color(purple ? "#D444F1" : "#08BEF4")}, 0, 0, radius);
+        GradientDrawable fill = surface(new int[]{color(purple ? "#231038" : "#052B44"), color("#060C1C"),
+                color(purple ? "#1E0C38" : "#061726")}, 0, 0, radius - 1);
+        LayerDrawable layered = new LayerDrawable(new Drawable[]{trim, fill});
+        int inset = dp(2);
+        layered.setLayerInset(1, inset, inset, inset, inset);
+        return layered;
+    }
+
+    private View tvStripes(boolean purple) {
+        View stripes = new View(this) {
+            private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+            private final android.graphics.Path stripe = new android.graphics.Path();
+
+            @Override protected void onDraw(android.graphics.Canvas canvas) {
+                float step = getWidth() / 4f, rise = Math.min(getHeight(), step);
+                paint.setColor(color(purple ? "#EB30FF" : "#29E5FF"));
+                for (int index = 0; index < 3; index++) {
+                    float x = index * step;
+                    stripe.reset();
+                    stripe.moveTo(x, getHeight());
+                    stripe.lineTo(x + rise, 0);
+                    stripe.lineTo(x + rise + step * .7f, 0);
+                    stripe.lineTo(x + step * .7f, getHeight());
+                    stripe.close();
+                    paint.setAlpha(245 - 60 * index);
+                    canvas.drawPath(stripe, paint);
+                }
+            }
+        };
+        stripes.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return stripes;
+    }
+
+    private View tvHeading(String label, boolean purple) {
+        LinearLayout section = new LinearLayout(this);
+        section.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        TextView heading = sectionTitle(label, purple ? "#F2B5FF" : "#43F3FF");
+        heading.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
+        heading.setTextSize(label.length() > 14 ? 11 : 13);
+        heading.setLetterSpacing(.05f);
+        heading.setSingleLine(true);
+        heading.setPadding(dp(6), dp(2), dp(2), dp(1));
+        row.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        row.addView(tvStripes(purple), new LinearLayout.LayoutParams(dp(31), dp(11)));
+        section.addView(row);
+        section.addView(phoneRule());
+        return section;
+    }
+
+    private boolean neonTheme() {
+        return phoneLayout || tvTheme;
+    }
+
+    private View phoneRule() {
+        View line = new View(this);
+        line.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{color("#00AC41F0"), color("#DD48F5"), color("#29E3FA"), color("#0029E3FA")}));
+        line.setLayoutParams(new LinearLayout.LayoutParams(-1, dp(2)));
+        return line;
+    }
+
+    private void applyPhoneWordmark(TextView title, int size) {
+        SpannableString brand = new SpannableString("ChannelForge TV");
+        brand.setSpan(new ForegroundColorSpan(color("#13E5FA")), 13, 15, 0);
+        title.setText(brand);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD_ITALIC));
+        title.setTextSize(size);
+        title.setLetterSpacing(0);
+        title.setPadding(dp(5), dp(3), dp(3), dp(3));
+        title.setSingleLine(!phonePortrait);
+        title.setMaxLines(phonePortrait ? 2 : 1);
+    }
+
+    private ImageView phoneBackdrop() {
+        ImageView art = new ImageView(this);
+        art.setImageResource(R.drawable.cinema_hero);
+        art.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        art.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return art;
+    }
+
+    private void addPhoneBackdrop(LinearLayout column, int height) {
+        addGap(column, 9);
+        column.addView(phoneBackdrop(), new LinearLayout.LayoutParams(-1, dp(height)));
+    }
+
+    private void addPhoneDrawerHeader(LinearLayout column) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(BuildConfig.TESTER_BUILD ? R.drawable.channel_forge_tv_tester_icon : R.drawable.channel_forge_viewer_brand);
+        logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        row.addView(logo, new LinearLayout.LayoutParams(dp(46), dp(46)));
+        TextView brand = text("", 16, true);
+        applyPhoneWordmark(brand, 19);
+        row.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView close = focusButton("×");
+        close.setTextSize(22);
+        close.setContentDescription("Close navigation menu");
+        close.setMinHeight(dp(44));
+        close.setBackgroundColor(Color.TRANSPARENT);
+        close.setOnClickListener(v -> setMenuCollapsed(true));
+        row.addView(close, new LinearLayout.LayoutParams(dp(44), -2));
+        column.addView(row);
+        column.addView(phoneRule());
+        addGap(column, 6);
+    }
+
+    @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        if (!phoneLayout || guide == null) return;
+
+        boolean wasCollapsed = menuCollapsed;
+        guide.removeCallbacks(directoryRefresh);
+        guide.removeCallbacks(directoryRetry);
+        if (programArtwork != null) programArtwork.removeCallbacks(previewClock);
+        activityRoot.removeView(guide);
+        liveRail = movieRail = auxiliaryPage = null;
+        buildGuideUi(activityRoot);
+        setMenuCollapsed(wasCollapsed);
+        if (!creators.isEmpty()) {
+            buildStudioRails();
+            renderCreatorButtons();
+            syncStudioScreen();
+            if (movieShelfLoaded && currentStudio != null && currentStudio.cinemaSupported) renderMovies(currentStudio);
+            showLoadedChannels();
+        }
+        if (testerConsented()) {
+            guide.postDelayed(directoryRefresh, DIRECTORY_REFRESH_MS);
+            if (directoryStale) guide.postDelayed(directoryRetry, DIRECTORY_RETRY_MS);
+        }
+        bufferPanel.getLayoutParams().width = playbackPanelWidth();
+        bufferPanel.requestLayout();
+    }
+
+    private int playbackPanelWidth() {
+        return phoneLayout
+                ? Math.min(dp(360), dp(getResources().getConfiguration().screenWidthDp - 24)) : dp(360);
+    }
+
+    private String testerVersionLabel() { return alphaVersionLabel(BuildConfig.VERSION_NAME); }
+
+    private static String alphaVersionLabel(String version) {
+        return "Alpha V" + (version.endsWith(".0") ? version.substring(0, version.length() - 2) : version);
     }
 
     private String get(String address) throws Exception {
@@ -530,6 +924,8 @@ public class MainActivity extends Activity {
     }
 
     private void loadDirectory() {
+        if (BuildConfig.TESTER_BUILD && !testerConsented()) return;
+        testerEvent("guide");
         if(directoryLoading)return;
         directoryLoading=true;
         if (creators.isEmpty()) status.setText("Scanning the public ChannelForge directory…");
@@ -561,8 +957,8 @@ public class MainActivity extends Activity {
                     JSONObject doc = new JSONObject(body);
                     List<Creator> incoming = parseCreators(doc);
                     boolean primary = address.equals(BuildConfig.DIRECTORY_URL);
-                    authoritative = primary && doc.optBoolean("registrations_complete");
-                    if (primary && (authoritative || !incoming.isEmpty())) {
+                    authoritative = primary && doc.optBoolean("registrations_complete", true);
+                    if (primary && (authoritative || doc.getJSONArray("creators").length() > 0)) {
                         JSONObject snapshot = registrationSnapshot(doc, saved, authoritative);
                         guideCache.write("directory", snapshot.toString());
                         discovered.addAll(parseCreators(snapshot));
@@ -609,7 +1005,7 @@ public class MainActivity extends Activity {
                 JSONObject row = previous.optJSONObject(i);
                 if (row == null || now - row.optLong("observed_on_device") > 7L * 86400 * 1000) continue;
                 if (incoming.add(row.optString("id",row.optString("playlist_url")))) {
-                    row.put("state", "reconnecting");
+                    if (!"offline".equals(row.optString("state"))) row.put("state", "reconnecting");
                     rows.put(row);
                 }
             }
@@ -622,14 +1018,27 @@ public class MainActivity extends Activity {
         JSONArray rows = doc.getJSONArray("creators");
         for (int i = 0; i < rows.length(); i++) {
             JSONObject row = rows.optJSONObject(i);
-            if (row == null) continue;
+            if (row == null || "offline".equals(row.optString("state"))
+                    || (row.optString("state").isEmpty() && !row.optBoolean("online", true))) continue;
             String playlist = row.optString("playlist_url");
             if (playlist.isEmpty() || hasCreator(result, playlist)) continue;
             Creator creator = new Creator(row.optString("name", "Creator"), row.optString("description"),
                     playlist, row.optString("vault_url"), row.optString("status_url"), row.optBoolean("cinema_supported"));
             creator.id = row.optString("id", playlist);
+            creator.playbackOrigin = row.optString("playback_origin");
             creator.state = row.optString("state", row.optBoolean("online", true) ? "broadcasting" : "offline");
             creator.lastHeartbeat = row.optLong("last_heartbeat");
+            creator.updatedAt = row.optLong("updated_at");
+            JSONArray inventory = row.optJSONArray("channel_inventory");
+            if (inventory != null && !creator.channelStatus.isEmpty()
+                    && row.optLong("inventory_expires") > System.currentTimeMillis() / 1000) {
+                String address = Uri.parse(creator.channelStatus).buildUpon().appendQueryParameter("guide", "extended").build().toString();
+                try {
+                    creator.hubChannels = parseOnlineChannels(new JSONObject().put("channels", inventory).toString(), address);
+                } catch (JSONException invalid) {
+                    android.util.Log.w("ChannelForgeGuide", "Invalid Hub channel inventory");
+                }
+            }
             result.add(creator);
         }
         return result;
@@ -646,6 +1055,7 @@ public class MainActivity extends Activity {
             creators.clear();
             channelsByStudio.clear();
             staleGuides.clear();
+            unreachableStudios.clear();
             renderDirectoryRecovery(failure);
             return;
         }
@@ -661,6 +1071,18 @@ public class MainActivity extends Activity {
         for (Creator creator : creators) activeOrigins.add(creator.playlist);
         channelsByStudio.keySet().retainAll(activeOrigins);
         staleGuides.retainAll(activeOrigins);
+        unreachableStudios.retainAll(activeOrigins);
+        for (Creator creator : creators) {
+            if (creator.hubChannels != null && !channelsByStudio.containsKey(creator.playlist)) {
+                for (Channel channel : creator.hubChannels) {
+                    channel.studio = creator.name;
+                    channel.studioId = creator.id;
+                }
+                channelsByStudio.put(creator.playlist, creator.hubChannels);
+                staleGuides.add(creator.playlist);
+                unreachableStudios.remove(creator.playlist);
+            }
+        }
         if (!activeOrigins.contains(guideStudio)) guideStudio = "";
         if (changed || liveRail == null) {
             renderCreators();
@@ -681,6 +1103,7 @@ public class MainActivity extends Activity {
             if (!old.state.equals(current.state) || !old.id.equals(current.id) || !old.playlist.equals(current.playlist) || !old.name.equals(current.name)
                     || !old.description.equals(current.description) || !old.vault.equals(current.vault)
                     || !old.channelStatus.equals(current.channelStatus)
+                    || !old.playbackOrigin.equals(current.playbackOrigin)
                     || old.cinemaSupported != current.cinemaSupported) return false;
         }
         return true;
@@ -710,8 +1133,7 @@ public class MainActivity extends Activity {
         status.setText(error == null ? "NO PUBLIC STUDIOS ONLINE" : "PUBLIC DIRECTORY UNAVAILABLE  •  SELECT SCAN TO RETRY");
         creatorRail.addView(sectionTitle("DISCOVERY","#5DEEFF"));
         TextView retry=focusButton("↻  SCAN PUBLIC DIRECTORY");retry.setOnClickListener(v->loadDirectory());creatorRail.addView(retry,new LinearLayout.LayoutParams(-1,-2));addGap(creatorRail,10);
-        TextView pair=focusButton("＋  OPTIONAL DIRECT PAIR");pair.setOnClickListener(v->showPairingDialog());creatorRail.addView(pair,new LinearLayout.LayoutParams(-1,-2));
-        creatorRail.addView(text("Pairing is optional. It connects one published studio directly while the global directory is unavailable.",12,false));
+        if (BuildConfig.TESTER_BUILD) creatorRail.addView(text("Open System to pair a Studio by its address.",12,false));
         channelRail.addView(sectionTitle("LIVE TV GUIDE","#5DEEFF"));
         TextView detail=text(error==null?"No public studios are online. Scan for channels to check again."
                 :"The public directory is unreachable. Scan for channels to retry.",15,false);
@@ -723,19 +1145,61 @@ public class MainActivity extends Activity {
     private void showPairingDialog(){
         EditText input=new EditText(this);input.setSingleLine(true);input.setHint("https://your-studio.trycloudflare.com");input.setText(getSharedPreferences(PREFS,MODE_PRIVATE).getString(PAIRED_CREATOR,""));input.setSelectAllOnFocus(true);input.setPadding(30,18,30,18);
         AlertDialog dialog=new AlertDialog.Builder(this).setTitle("Pair ChannelForge Creator").setMessage("In Creator, open System → Publish worldwide and copy its HTTPS pairing URL.").setView(input).setNegativeButton("CANCEL",null).setNeutralButton("FORGET",(d,w)->{getSharedPreferences(PREFS,MODE_PRIVATE).edit().remove(PAIRED_CREATOR).apply();loadDirectory();}).setPositiveButton("PAIR",null).create();
-        dialog.setOnShowListener(ignored->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{String address=input.getText().toString().trim();if(address.isEmpty()){input.setError("Enter the Creator HTTPS URL");return;}dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);status.setText("Pairing with Creator…");new Thread(()->{try{Creator creator=readPairedCreator(address);getSharedPreferences(PREFS,MODE_PRIVATE).edit().putString(PAIRED_CREATOR,address.replaceAll("/+$","")).apply();runOnUiThread(()->{dialog.dismiss();creators.clear();creators.add(creator);renderCreators();});}catch(Exception error){runOnUiThread(()->{dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);input.setError("Could not reach this Creator. Check that Creator is open and the URL begins with https://");});}}).start();}));
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String address = input.getText().toString().trim();
+            if (address.isEmpty()) { input.setError("Enter the Studio HTTPS URL"); return; }
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+            new Thread(() -> {
+                try {
+                    Creator creator = readPairedCreator(address);
+                    runOnUiThread(() -> {
+                        if (isFinishing() || isDestroyed() || !dialog.isShowing()) return;
+                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PAIRED_CREATOR,
+                                address.replaceAll("/+$", "")).apply();
+                        dialog.dismiss();
+                        if (!hasCreator(creators, creator.playlist)) creators.add(creator);
+                        unreachableStudios.remove(creator.playlist);
+                        renderCreatorButtons();
+                        guideStudio = creator.playlist;
+                        loadCreator(creator);
+                    });
+                } catch (Exception error) {
+                    runOnUiThread(() -> {
+                        if (!dialog.isShowing()) return;
+                        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+                        input.setError("Could not reach this Studio. Check its HTTPS URL and try again.");
+                    });
+                }
+            }, "studio-pairing").start();
+        }));
         dialog.show();
     }
 
     private TextView focusButton(String label) { TextView button=text(label,14,true);button.setTextColor(color("#DFFBFF"));button.setGravity(Gravity.CENTER_VERTICAL);button.setMinHeight(dp(38));button.setFocusable(true);button.setBackground(surface(new int[]{color("#151A3D"),color("#101127")},color("#1BDFF5"),1,7));button.setOnFocusChangeListener((v, focused)->{v.setBackground(surface(focused?new int[]{color("#6A145C"),color("#231454")}:new int[]{color("#151A3D"),color("#101127")},focused?color("#FF42C5"):color("#1BDFF5"),focused?2:1,7));v.setScaleX(focused?1.018f:1f);v.setScaleY(focused?1.018f:1f);v.setTranslationZ(focused?dp(5):0);});return button;}
 
     private void renderCreators() {
+        Creator selected = renderCreatorButtons();
+        loadCreator(cinemaScreen && !selected.cinemaSupported ? firstCinemaStudio(selected) : selected);
+    }
+
+    private Creator renderCreatorButtons() {
         creatorRail.removeAllViews();
         status.setText("●  " + creators.size() + " REGISTERED STUDIOS");
-        creatorRail.addView(sectionTitle("CREATOR STUDIOS", "#5DEEFF"));
-        Creator selected = creators.get(0);
-        for (Creator creator : creators) {
-            TextView button = focusButton(creator.name + "\n" + (creator.state.equals("broadcasting") ? creator.description : creator.state));
+        creatorRail.addView(tvTheme ? tvHeading("CREATOR STUDIOS", false) : sectionTitle("CREATOR STUDIOS", "#5DEEFF"));
+        List<Creator> visible = reachableCreators();
+        Creator selected = visible.isEmpty() ? creators.get(0) : visible.get(0);
+        for (Creator creator : visible) {
+            TextView button = focusButton(tvTheme ? "◉  " + creator.name
+                    : creator.name + "\n" + (creator.state.equals("broadcasting") ? creator.description : creator.state));
+            if (tvTheme) {
+                button.setSingleLine(true);
+                button.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                button.setTextSize(12);
+                button.setMinHeight(dp(32));
+                button.setPadding(dp(8), 0, dp(5), 0);
+                button.setBackground(tvFrame(false, 8));
+                button.setOnFocusChangeListener((view, focused) -> button.setBackground(tvFrame(focused, 8)));
+            }
             button.setTag(creator);
             button.setOnClickListener(view -> {
                 if (activePage == Page.LIVE) {
@@ -748,7 +1212,28 @@ public class MainActivity extends Activity {
             creatorRail.addView(button, layout);
             if (creator.playlist.equals(selectedPlaylist)) selected = creator;
         }
-        loadCreator(cinemaScreen && !selected.cinemaSupported ? firstCinemaStudio(selected) : selected);
+        return selected;
+    }
+
+    private List<Creator> reachableCreators() {
+        List<Creator> visible = new ArrayList<>();
+        for (Creator creator : creators) {
+            if (!unreachableStudios.contains(creator.playlist)) visible.add(creator);
+        }
+        return visible;
+    }
+
+    private void buildStudioRails() {
+        channelRail.removeAllViews();
+        auxiliaryPage = null;
+        liveRail = new LinearLayout(this);
+        liveRail.setOrientation(LinearLayout.VERTICAL);
+        movieRail = new LinearLayout(this);
+        movieRail.setOrientation(LinearLayout.VERTICAL);
+        channelRail.addView(liveRail);
+        channelRail.addView(movieRail);
+        liveRail.addView(text("Finding live channels…", 14, false));
+        movieRail.addView(text("Loading Rewind Cinema…", 14, false));
     }
 
     private void loadCreator(Creator creator) {
@@ -764,16 +1249,7 @@ public class MainActivity extends Activity {
             moreMovies = null;
             vaultItems.clear();
             channelIndex = 0;
-            channelRail.removeAllViews();
-            auxiliaryPage = null;
-            liveRail = new LinearLayout(this);
-            liveRail.setOrientation(LinearLayout.VERTICAL);
-            movieRail = new LinearLayout(this);
-            movieRail.setOrientation(LinearLayout.VERTICAL);
-            channelRail.addView(liveRail);
-            channelRail.addView(movieRail);
-            liveRail.addView(text("Finding live channels…", 14, false));
-            movieRail.addView(text("Loading Rewind Cinema…", 14, false));
+            buildStudioRails();
         }
         syncStudioScreen();
         for (Creator studio : creators) loadStudioGuide(studio);
@@ -810,15 +1286,26 @@ public class MainActivity extends Activity {
                 degraded = true;
                 try {
                     String playlist = get(creator.playlist);
-                    if (playlist.startsWith("#EXTM3U")) loaded = parseM3u(playlist);
+                    if (playlist.startsWith("#EXTM3U")) loaded = parseM3u(playlist, creator.playlist);
                 } catch (Exception unavailable) {
                     android.util.Log.w("ChannelForgeGuide", "Playlist fallback unavailable");
                 }
             }
-            final List<Channel> result = loaded;
+            final List<Channel> result = loaded == null ? creator.hubChannels : loaded;
             final boolean stale = degraded;
             runOnUiThread(() -> {
                 loadingGuides.remove(creator.playlist);
+                if (isFinishing() || isDestroyed() || !hasCreator(creators, creator.playlist)) return;
+                boolean changed = BuildConfig.TESTER_BUILD && (result == null ? unreachableStudios.add(creator.playlist)
+                        : unreachableStudios.remove(creator.playlist));
+                if (changed) {
+                    renderCreatorButtons();
+                    if (guideStudio.equals(creator.playlist) && result == null) guideStudio = "";
+                    if (cinemaScreen && currentStudio == creator && result == null) {
+                        Creator online = firstCinemaStudio(creator);
+                        if (online != creator) { loadCreator(online); return; }
+                    }
+                }
                 applyGuide(creator, result, stale);
             });
         });
@@ -853,6 +1340,7 @@ public class MainActivity extends Activity {
                 } else if (row.programs == null && !existing.url.equals(row.url)) {
                     existing.url = row.url;
                     existing.continuousUrl = "";
+                    existing.fireTvUrl = "";
                 }
             }
         }
@@ -862,12 +1350,27 @@ public class MainActivity extends Activity {
     private void showLoadedChannels() {
         if (!guideVisible || liveRail == null) return;
         channels.clear();
-        for (Creator studio : creators) {
+        Map<String, Channel> unique = new java.util.LinkedHashMap<>();
+        Map<String, Creator> origin = new HashMap<>();
+        for (Creator studio : reachableCreators()) {
             if (guideStudio.isEmpty() || studio.playlist.equals(guideStudio) || activePage == Page.FAVORITES) {
                 List<Channel> loaded = channelsByStudio.get(studio.playlist);
-                if (loaded != null) channels.addAll(loaded);
+                if (loaded == null) continue;
+                String name = studio.name.trim().toLowerCase(java.util.Locale.ROOT);
+                boolean fresh = !staleGuides.contains(studio.playlist);
+                for (Channel channel : loaded) {
+                    String key = !name.isEmpty() && channel.id.matches("[a-fA-F0-9]{16}") ? name + "/" + channel.id : channel.url;
+                    Creator previous = origin.get(key);
+                    boolean previousFresh = previous != null && !staleGuides.contains(previous.playlist);
+                    if (previous == null || (fresh != previousFresh ? fresh : studio.updatedAt > previous.updatedAt)) {
+                        origin.put(key, studio);
+                        unique.put(key, channel);
+                    }
+                }
             }
         }
+        Set<String> urls = new HashSet<>();
+        for (Channel channel : unique.values()) if (urls.add(channel.url)) channels.add(channel);
         channelIndex = Math.min(channelIndex, Math.max(0, channels.size() - 1));
         String name = currentStudio == null ? "Worldwide" : currentStudio.name;
         if (activePage == Page.LIVE) {
@@ -882,11 +1385,16 @@ public class MainActivity extends Activity {
 
     private TextView navigationButton(String label) {
         TextView button = focusButton(label);
-        button.setTextSize(11);
-        button.setMinHeight(dp(30));
+        button.setTextSize(phonePortrait ? 14 : 11);
+        button.setMinHeight(dp(phonePortrait ? 43 : 30));
         button.setPadding(dp(9), dp(3), dp(8), dp(3));
         button.setMaxLines(1);
         button.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        if (tvTheme) {
+            button.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
+            button.setMinHeight(dp(25));
+            button.setTextSize(13);
+        }
         return button;
     }
 
@@ -894,16 +1402,69 @@ public class MainActivity extends Activity {
         TextView button = navigationButton(icon + "  " + label);
         button.setTag(new String[]{icon, label});
         button.setContentDescription(label);
-        button.setOnClickListener(v -> openPage(page));
-        button.setOnFocusChangeListener((view, focused) -> paintNavigation(button, page));
+        button.setOnClickListener(v -> {
+            playMenuSound();
+            openPage(page);
+        });
+        button.setOnFocusChangeListener((view, focused) -> {
+            if (focused) playMenuSound();
+            paintNavigation(button, page);
+        });
         paintNavigation(button, page);
         navigationRail.addView(button);
         navButtons.put(page, button);
     }
 
+    private void addNavigationGroup(String label) {
+        if (tvTheme) {
+            View heading = tvHeading(label, false);
+            navGroupLabels.add(heading);
+            navigationRail.addView(heading);
+            return;
+        }
+        TextView heading = sectionTitle(label, "#63EFFF");
+        heading.setTextSize(9);
+        heading.setPadding(dp(7), dp(9), dp(4), dp(4));
+        if (phonePortrait) {
+            heading.setTextColor(Color.WHITE);
+            heading.setTextSize(11);
+            heading.setBackground(phonePanel(true, 5));
+        }
+        navGroupLabels.add(heading);
+        navigationRail.addView(heading);
+    }
+
+    private void addTvSystemActions() {
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.VERTICAL);
+        addTvSystemAction(actions, "⟳  Check for Update", this::openSystemUpdates);
+        addTvSystemAction(actions, BuildConfig.TESTER_BUILD ? "◇  Developer" : "◇  Diagnostics", this::openSystemDiagnostics);
+        if (BuildConfig.TESTER_BUILD) addTvSystemAction(actions, "＋  Pair a Studio", this::showPairingDialog);
+        navGroupLabels.add(actions);
+        navigationRail.addView(actions);
+    }
+
+    private void addTvSystemAction(LinearLayout actions, String label, Runnable action) {
+        TextView button = navigationButton(label);
+        button.setBackground(null);
+        button.setOnClickListener(view -> { playMenuSound(); action.run(); });
+        button.setOnFocusChangeListener((view, focused) -> {
+            if (focused) playMenuSound();
+            button.setBackground(focused ? tvFrame(true, 7) : null);
+        });
+        actions.addView(button);
+    }
+
     private void paintNavigation(TextView button, Page page) {
         boolean selected = activePage == page;
-        if (selected || button.isFocused()) {
+        if (tvTheme) {
+            button.setBackground(selected || button.isFocused() ? tvFrame(true, 8) : null);
+            button.setTextColor(color("#F4F7FF"));
+            return;
+        }
+        if (neonTheme() && (selected || button.isFocused())) {
+            button.setBackground(phonePanel(!phonePortrait && selected, 7));
+        } else if (selected || button.isFocused()) {
             button.setBackground(surface(new int[]{color("#251849"), color("#17102C")},
                     color(button.isFocused() ? "#FF77D9" : "#D242AA"), 1, 7));
         } else button.setBackgroundColor(Color.TRANSPARENT);
@@ -911,20 +1472,49 @@ public class MainActivity extends Activity {
     }
 
     private void toggleMenu() {
+        playMenuSound();
         setMenuCollapsed(!menuCollapsed);
-        if (activePage == Page.LIVE) showLoadedChannels();
+        if (!phonePortrait && activePage == Page.LIVE) showLoadedChannels();
+    }
+
+    private void playMenuSound() {
+        long now = SystemClock.elapsedRealtime();
+        if (!menuSoundReady || now - lastMenuSound < 65
+                || Settings.System.getInt(getContentResolver(), Settings.System.SOUND_EFFECTS_ENABLED, 1) == 0) return;
+        lastMenuSound = now;
+        menuSounds.play(menuTick, .32f, .32f, 0, 0, 1f);
     }
 
     private void setMenuCollapsed(boolean collapsed) {
+        boolean wasCollapsed = menuCollapsed;
         menuCollapsed = collapsed;
-        menuPanel.getLayoutParams().width = menuCollapsed ? dp(44) : navigationWidth;
+        menuPanel.getLayoutParams().width = !phonePortrait && menuCollapsed ? dp(phoneLayout ? 49 : 44) : navigationWidth;
+        menuPanel.setVisibility(phonePortrait && collapsed ? View.GONE : View.VISIBLE);
+        if (phonePortrait) {
+            phoneMenuShade.setVisibility(collapsed ? View.GONE : View.VISIBLE);
+            phoneContent.setImportantForAccessibility(collapsed ? View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+                    : View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            phoneHeader.setVisibility(collapsed ? View.VISIBLE : View.GONE);
+            phoneHeaderLine.setVisibility(collapsed ? View.VISIBLE : View.GONE);
+            status.setVisibility(View.GONE);
+            menuPanel.animate().cancel();
+            if (!collapsed && wasCollapsed && motionEnabled()) {
+                menuPanel.setTranslationX(-navigationWidth);
+                menuPanel.animate().translationX(0).setDuration(210).start();
+            } else menuPanel.setTranslationX(0);
+        }
         menuPanel.requestLayout();
         creatorRail.setVisibility(menuCollapsed ? View.GONE : View.VISIBLE);
+        for (View heading : navGroupLabels) heading.setVisibility(menuCollapsed ? View.GONE : View.VISIBLE);
         for (TextView button : navButtons.values()) {
             String[] parts = (String[]) button.getTag();
             button.setText(menuCollapsed ? parts[0] : parts[0] + "  " + parts[1]);
+            if (phoneLayout && !phonePortrait) {
+                button.setGravity(collapsed ? Gravity.CENTER : Gravity.CENTER_VERTICAL);
+                button.setTextSize(collapsed ? 21 : 12);
+                button.setMinHeight(dp(collapsed ? 40 : 35));
+            }
         }
-        navigationUpdates.setText(menuCollapsed ? "↻" : "↻  Updates");
     }
 
     private void openCinemaScreen(boolean cinema) {
@@ -932,7 +1522,8 @@ public class MainActivity extends Activity {
     }
 
     private void openPage(Page page) {
-        if (page == Page.LIVE && activePage != Page.LIVE) setMenuCollapsed(true);
+        if (phonePortrait && !menuCollapsed) setMenuCollapsed(true);
+        if (!BuildConfig.TESTER_BUILD && page == Page.LIVE && activePage != Page.LIVE) setMenuCollapsed(true);
         activePage = page;
         cinemaScreen = page == Page.CINEMA;
         if (cinemaScreen && currentStudio != null && !currentStudio.cinemaSupported) {
@@ -946,7 +1537,7 @@ public class MainActivity extends Activity {
     }
 
     private Creator firstCinemaStudio(Creator fallback) {
-        for (Creator item : creators) if (item.cinemaSupported) return item;
+        for (Creator item : reachableCreators()) if (item.cinemaSupported) return item;
         return fallback;
     }
 
@@ -964,7 +1555,8 @@ public class MainActivity extends Activity {
                 child.setVisibility(cinemaScreen && !item.cinemaSupported ? View.GONE : View.VISIBLE);
             }
         }
-        if (auxiliaryPage != null && renderedAuxiliary == activePage && activePage == Page.HOME) return;
+        if (auxiliaryPage != null && renderedAuxiliary == activePage
+                && (activePage == Page.HOME || activePage == Page.SYSTEM)) return;
         if (auxiliaryPage != null) channelRail.removeView(auxiliaryPage);
         auxiliaryPage = null;
         if ((activePage == Page.LIVE && liveRail != null) || (showMovies && movieRail != null)) return;
@@ -973,15 +1565,7 @@ public class MainActivity extends Activity {
         auxiliaryPage.setOrientation(LinearLayout.VERTICAL);
         channelRail.addView(auxiliaryPage);
         if (activePage == Page.HOME) {
-            TextView hero = text("Live channels.\nOne community dial.", 29, true);
-            hero.setTextColor(color("#FAFCFF"));
-            hero.setPadding(dp(18), dp(14), dp(18), dp(14));
-            hero.setBackground(surface(new int[]{color("#271343"), color("#081F33"), color("#2A1744")}, color("#42E9F4"), 1, 11));
-            auxiliaryPage.addView(hero);
-            addGap(auxiliaryPage, 8);
-            addHomeActions("LIVE TV GUIDE", () -> openPage(Page.LIVE), "REWIND CINEMA", () -> openPage(Page.CINEMA));
-            addGap(auxiliaryPage, 8);
-            addHomeActions("FAVORITES", () -> openPage(Page.FAVORITES), "UPDATES", this::selectUpdate);
+            buildHomePage();
         } else if (activePage == Page.FAVORITES) {
             auxiliaryPage.addView(sectionTitle("FAVORITE CHANNELS", "#63EFFF"));
             boolean found = false;
@@ -998,6 +1582,8 @@ public class MainActivity extends Activity {
         } else if (activePage == Page.CONTINUE) {
             auxiliaryPage.addView(sectionTitle("CONTINUE WATCHING", "#63EFFF"));
             showContinueWatching();
+        } else if (activePage == Page.SYSTEM) {
+            buildSystemPage();
         } else {
             auxiliaryPage.addView(text(cinemaScreen ? "No compatible movie studios are online."
                     : "Waiting for a public studio. Select Scan for Channels to retry.", 14, false));
@@ -1007,52 +1593,444 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void addHomeActions(String left, Runnable leftAction, String right, Runnable rightAction) {
+    private void openSystemUpdates() {
+        if (BuildConfig.TESTER_BUILD && testerConsented()) checkUpdates(true);
+        else selectUpdate();
+    }
+
+    private void openSystemDiagnostics() {
+        if (BuildConfig.TESTER_BUILD) showTesterTools();
+        else showDiagnostics();
+    }
+
+    private void buildSystemPage() {
+        LinearLayout options = panel();
+        if (neonTheme()) options.setBackground(phonePanel(false, 11));
+        options.addView(sectionTitle("SYSTEM", "#53EFFF"));
+        options.addView(homeTile("↻", "Check for Update", "Find a newer version of ChannelForge TV", this::openSystemUpdates));
+        addGap(options, 7);
+        options.addView(homeTile("◇", BuildConfig.TESTER_BUILD ? "Developer" : "Diagnostics",
+                "View playback and connection details", this::openSystemDiagnostics));
+        if (BuildConfig.TESTER_BUILD) {
+            addGap(options, 7);
+            options.addView(homeTile("＋", "Pair a Studio", "Connect to a Studio by its address", this::showPairingDialog));
+        }
+        auxiliaryPage.addView(options);
+    }
+
+    private void buildHomePage() {
+        if (phonePortrait) {
+            buildPhoneHome();
+            return;
+        }
+        if (tvTheme) {
+            buildTvHome();
+            return;
+        }
+        LinearLayout hero = new LinearLayout(this);
+        hero.setGravity(Gravity.CENTER_VERTICAL);
+        hero.setPadding(dp(18), dp(15), dp(18), dp(15));
+        hero.setBackground(surface(new int[]{color("#2A1550"), color("#0A2138"), color("#241242")},
+                color("#48E5FF"), 1, 13));
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        copy.addView(sectionTitle("WELCOME TO CHANNELFORGE TV", "#55EFFF"));
+        TextView headline = text("Live channels.\nOne community dial.", compactTouchLayout ? 30 : 39, true);
+        headline.setTextColor(color("#FAFCFF"));
+        copy.addView(headline);
+        copy.addView(text("Watch community-created live channels and explore shared movie collections.", 13, false));
+        hero.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
+        if (!compactTouchLayout) {
+            TextView badge = text("● LIVE\nPUBLIC GUIDE", 15, true);
+            badge.setTextColor(color("#70FFA4"));
+            badge.setGravity(Gravity.CENTER);
+            badge.setPadding(dp(10), dp(14), dp(10), dp(14));
+            badge.setBackground(surface(new int[]{color("#171330"), color("#111A26")}, color("#E657D1"), 1, 9));
+            hero.addView(badge);
+        }
+        auxiliaryPage.addView(hero);
+        addGap(auxiliaryPage, 12);
+        addHomePair(auxiliaryPage,
+                homeTile("▣", "Live TV Guide", "See what’s on now and what’s next", () -> openPage(Page.LIVE)),
+                homeTile("▶", "Rewind Cinema", "Explore movies from connected studios", () -> openPage(Page.CINEMA)));
+        addGap(auxiliaryPage, 12);
+        LinearLayout notes = panel(), quick = panel();
+        notes.addView(sectionTitle("LATEST UPDATE", "#56EFFF"));
+        notes.addView(homeTile("↓", "Release notes", "ChannelForge v" + BuildConfig.VERSION_NAME, this::selectUpdate));
+        quick.addView(sectionTitle("QUICK ACTIONS", "#56EFFF"));
+        addHomePair(quick,
+                homeTile("☆", "Favorites", "Your saved channels", () -> openPage(Page.FAVORITES)),
+                homeTile("▷", "Continue Watching", "Pick up where you left off", () -> openPage(Page.CONTINUE)));
+        addHomePair(auxiliaryPage, notes, quick);
+    }
+
+    private FrameLayout brandedHomeHero() {
+        FrameLayout hero = new FrameLayout(this);
+        hero.setBackground(phonePanel(true, 12));
+        hero.setClipToOutline(true);
+        ImageView art = phoneBackdrop();
+        art.setScaleType(ImageView.ScaleType.MATRIX);
+        art.addOnLayoutChangeListener((view, l, t, r, b, oldL, oldT, oldR, oldB) -> {
+            Drawable image = art.getDrawable();
+            float scale = (float) (b - t) / image.getIntrinsicHeight();
+            android.graphics.Matrix matrix = new android.graphics.Matrix();
+            matrix.setScale(scale, scale);
+            matrix.postTranslate(r - l - image.getIntrinsicWidth() * scale, 0);
+            art.setImageMatrix(matrix);
+        });
+        hero.addView(art, new FrameLayout.LayoutParams(-1, -1));
+        View scrim = new View(this);
+        scrim.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{color("#FF06091D"), color("#FA06091D"), color("#9506091D"), color("#0006091D")}));
+        hero.addView(scrim, new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        copy.setPadding(dp(tvTheme ? 23 : 11), dp(18), dp(17), dp(16));
+        copy.addView(sectionTitle("WELCOME TO", "#36E6FF"));
+        TextView wordmark = text("", 27, true);
+        applyPhoneWordmark(wordmark, phonePortrait ? 30 : tvTheme ? 34 : 42);
+        copy.addView(wordmark);
+        View titleRule = phoneRule();
+        if (tvTheme) titleRule.getLayoutParams().width = dp(395);
+        copy.addView(titleRule);
+        addGap(copy, tvTheme ? 5 : 12);
+        TextView headline = text(tvTheme ? "Live channels. One community dial." : "Live channels.\nOne community dial.",
+                phonePortrait ? 23 : tvTheme ? 26 : 32, true);
+        headline.setPadding(dp(5), 0, 0, dp(4));
+        copy.addView(headline);
+        TextView description = text("Watch community-created channels and explore shared movie collections.", 13, false);
+        description.setPadding(dp(5), dp(3), dp(40), 0);
+        if (tvTheme) description.setMaxWidth(dp(415));
+        copy.addView(description);
+        hero.addView(copy, new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_VERTICAL));
+        if (tvTheme) {
+            View border = new View(this);
+            border.setBackground(surface(new int[]{Color.TRANSPARENT, Color.TRANSPARENT}, color("#75DAFF"), 2, 12));
+            hero.addView(border, new FrameLayout.LayoutParams(-1, -1));
+        }
+        return hero;
+    }
+
+    private void buildPhoneHome() {
+        float fontScale = getResources().getConfiguration().fontScale;
+        int heroHeight = 211 + (int) (Math.max(0, fontScale - 1f) * 134);
+        auxiliaryPage.addView(brandedHomeHero(), new LinearLayout.LayoutParams(-1, dp(heroHeight)));
+        addGap(auxiliaryPage, 13);
+        LinearLayout watch = new LinearLayout(this);
+        addPhoneHomeTile(watch, "Live TV Guide", "See what’s on now and what’s next", false, Page.LIVE);
+        addPhoneHomeTile(watch, "Rewind Cinema", "Movies from connected studios", true, Page.CINEMA);
+        auxiliaryPage.addView(watch);
+        addGap(auxiliaryPage, 16);
+
+        LinearLayout notes = panel();
+        notes.setBackground(phonePanel(true, 11));
+        notes.addView(sectionTitle("LATEST UPDATE", "#F0A7FF"));
+        notes.addView(phoneRule());
+        notes.addView(homeTile("↓", "Release notes", "ChannelForge v" + BuildConfig.VERSION_NAME, this::selectUpdate));
+        auxiliaryPage.addView(notes);
+        addGap(auxiliaryPage, 14);
+
+        LinearLayout quick = panel();
+        quick.setBackground(phonePanel(false, 11));
+        quick.addView(sectionTitle("QUICK ACTIONS", "#43E8FF"));
+        LinearLayout actions = new LinearLayout(this);
+        addPhoneHomeTile(actions, "Favorites", "Your saved channels", false, Page.FAVORITES);
+        addPhoneHomeTile(actions, "Continue Watching", "Pick up where you left off", true, Page.CONTINUE);
+        quick.addView(actions);
+        auxiliaryPage.addView(quick);
+        addPhoneBackdrop(auxiliaryPage, 106);
+    }
+
+    private void buildTvHome() {
+        int screenHeight = getResources().getConfiguration().screenHeightDp;
+        float fontScale = getResources().getConfiguration().fontScale;
+        int heroHeight = (screenHeight < 470 ? 166 : 183) + (int) (Math.max(0, fontScale - 1f) * 132);
+        auxiliaryPage.addView(brandedHomeHero(), new LinearLayout.LayoutParams(-1, dp(heroHeight)));
+        addGap(auxiliaryPage, 9);
+        LinearLayout watch = new LinearLayout(this);
+        addHomePair(watch,
+                tvHomeCard("Live TV Guide", "See what’s on now and what’s next", Page.LIVE, false, false, () -> openPage(Page.LIVE)),
+                tvHomeCard("Rewind Cinema", "Movies from connected studios", Page.CINEMA, true, false, () -> openPage(Page.CINEMA)));
+        auxiliaryPage.addView(watch);
+        addGap(auxiliaryPage, 9);
+        LinearLayout notes = tvHomeGroup("LATEST UPDATE", true);
+        notes.addView(tvHomeCard("Release Notes", "ChannelForge v" + BuildConfig.VERSION_NAME, null,
+                true, true, this::selectUpdate));
+        LinearLayout shortcuts = tvHomeGroup("QUICK ACTIONS", false);
+        addHomePair(shortcuts,
+                tvHomeCard("Favorites", "Your saved channels", Page.FAVORITES, false, true, () -> openPage(Page.FAVORITES)),
+                tvHomeCard("Continue Watching", "Pick up where you left off", Page.CONTINUE, false, true, () -> openPage(Page.CONTINUE)));
+        LinearLayout lower = new LinearLayout(this);
+        lower.addView(notes, new LinearLayout.LayoutParams(0, -1, .88f));
+        LinearLayout.LayoutParams quick = new LinearLayout.LayoutParams(0, -1, 1.12f);
+        quick.leftMargin = dp(9);
+        lower.addView(shortcuts, quick);
+        auxiliaryPage.addView(lower);
+    }
+
+    private LinearLayout tvHomeGroup(String title, boolean purple) {
+        LinearLayout group = panel();
+        group.setBackground(tvFrame(purple, 12));
+        group.setPadding(dp(9), dp(4), dp(9), dp(6));
+        group.addView(tvHeading(title, purple));
+        addGap(group, 4);
+        return group;
+    }
+
+    private FrameLayout tvHomeCard(String title, String subtitle, Page glyph, boolean purple, boolean compact, Runnable action) {
+        FrameLayout card = new FrameLayout(this);
+        card.setBackground(tvFrame(purple, compact ? 8 : 13));
+        card.setFocusable(true);
+        card.setOnClickListener(view -> { playMenuSound(); action.run(); });
+        card.setOnFocusChangeListener((view, focused) -> {
+            if (focused) playMenuSound();
+            card.setBackground(tvFrame(purple || focused, compact ? 8 : 13));
+            card.setTranslationZ(focused ? dp(4) : 0);
+        });
         LinearLayout row = new LinearLayout(this);
-        TextView first = focusButton(left), second = focusButton(right);
-        first.setOnClickListener(v -> leftAction.run());
-        second.setOnClickListener(v -> rightAction.run());
-        LinearLayout.LayoutParams leftLayout = new LinearLayout.LayoutParams(0, dp(48), 1);
-        leftLayout.rightMargin = dp(8);
-        row.addView(first, leftLayout);
-        row.addView(second, new LinearLayout.LayoutParams(0, dp(48), 1));
-        auxiliaryPage.addView(row);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(compact ? 9 : 18), dp(compact ? 4 : 9), dp(8), dp(compact ? 4 : 9));
+        View icon = glyph == null ? text("↓", 25, true) : navigationGlyph(glyph, purple && !compact);
+        if (icon instanceof TextView) {
+            TextView symbol = (TextView) icon;
+            symbol.setTextColor(color("#44EBFF"));
+            symbol.setPadding(0, 0, 0, 0);
+            symbol.setGravity(Gravity.CENTER);
+            symbol.setIncludeFontPadding(false);
+        }
+        int iconSize = dp(compact ? 26 : 45);
+        row.addView(icon, new LinearLayout.LayoutParams(iconSize, iconSize));
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        TextView label = text(title, compact ? 14 : 21, true);
+        label.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
+        label.setPadding(0, 0, 0, 0);
+        copy.addView(label);
+        TextView hint = text(subtitle, compact ? 11 : 13, false);
+        hint.setTypeface(Typeface.create("sans-serif-condensed", Typeface.NORMAL));
+        hint.setPadding(0, 0, 0, 0);
+        copy.addView(hint);
+        LinearLayout.LayoutParams content = new LinearLayout.LayoutParams(0, -2, 1);
+        content.leftMargin = dp(compact ? 6 : 14);
+        row.addView(copy, content);
+        card.addView(row);
+        if (!compact) {
+            FrameLayout.LayoutParams stripe = new FrameLayout.LayoutParams(dp(46), dp(16), Gravity.BOTTOM | Gravity.END);
+            stripe.rightMargin = dp(5);
+            stripe.bottomMargin = dp(4);
+            card.addView(tvStripes(purple), stripe);
+        }
+        return card;
+    }
+
+    private void addPhoneHomeTile(LinearLayout row, String title, String subtitle, boolean violet, Page page) {
+        LinearLayout tile = new LinearLayout(this);
+        tile.setOrientation(LinearLayout.VERTICAL);
+        tile.setGravity(Gravity.CENTER);
+        tile.setPadding(dp(7), dp(9), dp(7), dp(9));
+        tile.setBackground(phonePanel(violet, 12));
+        tile.setFocusable(true);
+        tile.setContentDescription(title);
+        tile.setOnClickListener(view -> { playMenuSound(); openPage(page); });
+        tile.setOnFocusChangeListener((view, focused) -> {
+            if (focused) playMenuSound();
+            tile.setBackground(phonePanel(focused || violet, 12));
+            tile.setTranslationZ(focused ? dp(4) : 0);
+            tile.setAlpha(focused ? 1f : .94f);
+        });
+        tile.addView(navigationGlyph(page, violet), new LinearLayout.LayoutParams(dp(38), dp(38)));
+        addGap(tile, 3);
+        TextView label = text(title, 17, true);
+        label.setGravity(Gravity.CENTER);
+        label.setPadding(0, 0, 0, dp(2));
+        tile.addView(label);
+        TextView hint = text(subtitle, 12, false);
+        hint.setTextColor(color("#D2DBEF"));
+        hint.setGravity(Gravity.CENTER);
+        hint.setPadding(0, 0, 0, 0);
+        tile.addView(hint);
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(0, -1, 1);
+        if (row.getChildCount() > 0) layout.setMarginStart(dp(9));
+        row.addView(tile, layout);
+    }
+
+    private View navigationGlyph(Page page, boolean purple) {
+        View icon = new View(this) {
+            private final android.graphics.Paint ink = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+            private final android.graphics.Path path = new android.graphics.Path();
+
+            @Override protected void onDraw(android.graphics.Canvas canvas) {
+                float unit = Math.min(getWidth(), getHeight()) / 32f;
+                canvas.save();
+                canvas.translate((getWidth() - unit * 32) / 2, (getHeight() - unit * 32) / 2);
+                canvas.scale(unit, unit);
+                ink.setColor(color(purple ? "#F085FF" : "#4BECFF"));
+                ink.setStyle(android.graphics.Paint.Style.STROKE);
+                ink.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+                ink.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+                ink.setStrokeWidth(2.1f);
+                if (page == Page.CINEMA) {
+                    canvas.drawCircle(15, 15, 11, ink);
+                    for (int i = 0; i < 5; i++) {
+                        canvas.save();
+                        canvas.rotate(72 * i, 15, 15);
+                        canvas.drawCircle(15, 9, 2f, ink);
+                        canvas.restore();
+                    }
+                    canvas.drawLine(15, 26, 29, 26, ink);
+                } else if (page == Page.FAVORITES) {
+                    path.reset();
+                    for (int i = 0; i < 10; i++) {
+                        double angle = i * Math.PI / 5 - Math.PI / 2;
+                        float radius = i % 2 == 0 ? 12 : 5.5f;
+                        float x = 16 + radius * (float) Math.cos(angle), y = 16 + radius * (float) Math.sin(angle);
+                        if (i == 0) path.moveTo(x, y);
+                        else path.lineTo(x, y);
+                    }
+                    path.close();
+                    canvas.drawPath(path, ink);
+                } else {
+                    if (page == Page.LIVE) {
+                        canvas.drawRoundRect(3, 10, 29, 29, 3, 3, ink);
+                        canvas.drawLine(16, 10, 11, 4, ink);
+                        canvas.drawLine(16, 10, 22, 4, ink);
+                    }
+                    path.reset();
+                    if (page == Page.LIVE) {
+                        path.moveTo(13, 15); path.lineTo(21, 19.5f); path.lineTo(13, 24);
+                    } else {
+                        path.moveTo(9, 5); path.lineTo(26, 16); path.lineTo(9, 27);
+                    }
+                    path.close();
+                    canvas.drawPath(path, ink);
+                }
+                canvas.restore();
+            }
+        };
+        icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return icon;
+    }
+
+    private void addHomePair(LinearLayout parent, View left, View right) {
+        if (phonePortrait) {
+            parent.addView(left, new LinearLayout.LayoutParams(-1, -2));
+            addGap(parent, 7);
+            parent.addView(right, new LinearLayout.LayoutParams(-1, -2));
+            return;
+        }
+        LinearLayout row = new LinearLayout(this);
+        row.setBaselineAligned(false);
+        LinearLayout.LayoutParams first = new LinearLayout.LayoutParams(0, -2, 1);
+        first.rightMargin = dp(8);
+        row.addView(left, first);
+        row.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
+        parent.addView(row, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private View homeTile(String symbol, String title, String subtitle, Runnable action) {
+        LinearLayout tile = new LinearLayout(this);
+        tile.setGravity(Gravity.CENTER_VERTICAL);
+        tile.setPadding(dp(6), dp(5), dp(5), dp(5));
+        tile.setFocusable(true);
+        tile.setContentDescription(title);
+        applyTileFocus(tile, false);
+        tile.setOnFocusChangeListener((view, focused) -> applyTileFocus(view, focused));
+        TextView icon = text(symbol, 25, true);
+        icon.setTextColor(color("#48ECFF"));
+        tile.addView(icon);
+        LinearLayout labels = new LinearLayout(this);
+        labels.setOrientation(LinearLayout.VERTICAL);
+        labels.addView(text(title, 16, true));
+        labels.addView(text(subtitle, 11, false));
+        tile.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
+        tile.setOnClickListener(view -> action.run());
+        return tile;
+    }
+
+    private void applyTileFocus(View tile, boolean focused) {
+        tile.setBackground(surface(new int[]{color(focused ? "#3D1C62" : "#0D324D"), color("#16132D")},
+                color(focused ? "#FA6FE7" : "#42DDF5"), focused ? 2 : 1, 9));
     }
 
     private void showContinueWatching() {
-        String stored = getSharedPreferences(PREFS, MODE_PRIVATE).getString("continue_movie", "");
-        try {
-            JSONObject entry = new JSONObject(stored);
-            VaultItem movie = new VaultItem(entry.getString("title"), entry.optString("year"), "",
-                    entry.optString("poster"), entry.optString("fullPoster"), entry.getString("url"));
+        JSONArray history = movieHistory();
+        int added = 0;
+        for (int index = 0; index < history.length(); index++) {
+            JSONObject entry = history.optJSONObject(index);
+            if (entry == null) continue;
+            VaultItem movie = new VaultItem(entry.optString("title"), entry.optString("year"), "",
+                    entry.optString("poster"), entry.optString("fullPoster"), entry.optString("url"));
             movie.id = entry.optString("id");
+            movie.studioId = entry.optString("studioId");
             long position = entry.optLong("position");
             if (!movie.url.isEmpty() && position > 0) {
-                TextView resume = focusButton(movie.title + "  •  RESUME AT " + elapsedTime(position));
-                resume.setOnClickListener(v -> playMovie(movie, position));
-                auxiliaryPage.addView(resume);
-                return;
+                if (BuildConfig.TESTER_BUILD) {
+                    auxiliaryPage.addView(vaultBox(movie, "Resume at " + elapsedTime(position),
+                            view -> showResumeChoices(movie, position)));
+                } else {
+                    TextView resume = focusButton(movie.title + "  •  RESUME AT " + elapsedTime(position));
+                    resume.setOnClickListener(v -> playMovie(movie, position));
+                    auxiliaryPage.addView(resume);
+                }
+                added++;
             }
+        }
+        if (added == 0) auxiliaryPage.addView(text("No unfinished movies yet.", 13, false));
+    }
+
+    private void showResumeChoices(VaultItem movie, long position) {
+        new AlertDialog.Builder(this).setTitle(movie.title).setMessage("Resume at " + elapsedTime(position))
+                .setPositiveButton("Continue watching", (box, button) -> playMovie(movie, position))
+                .setNeutralButton("Remove from watch list", (box, button) -> {
+                    saveMovieHistory(movie, null);
+                    auxiliaryPage.removeAllViews();
+                    auxiliaryPage.addView(sectionTitle("CONTINUE WATCHING", "#63EFFF"));
+                    showContinueWatching();
+                    if (auxiliaryPage.getChildCount() > 1) auxiliaryPage.getChildAt(1).requestFocus();
+                }).setNegativeButton("Cancel", null).show();
+    }
+
+    private JSONArray movieHistory() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        try {
+            String saved = prefs.getString("movie_history", "");
+            if (!saved.isEmpty()) return new JSONArray(saved);
+            String legacy = prefs.getString("continue_movie", "");
+            if (!legacy.isEmpty()) return new JSONArray().put(new JSONObject(legacy));
         } catch (JSONException ignored) { }
-        auxiliaryPage.addView(text("No unfinished movies yet.", 13, false));
+        return new JSONArray();
     }
 
     private void rememberMovie() {
         if (activeMovie == null) return;
-        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        long position = player.getCurrentPosition();
+        long position = firstFrameMs < 0 ? resumePosition : player.getCurrentPosition();
+        if (!movieFinished && position <= 0) return;
         try {
-            if (movieFinished) {
-                JSONObject previous = new JSONObject(prefs.getString("continue_movie", "{}"));
-                if (activeMovie.url.equals(previous.optString("url"))) prefs.edit().remove("continue_movie").apply();
-            } else if (position >= 8000 && !playbackWaiting) {
-                JSONObject entry = new JSONObject();
+            JSONObject entry = null;
+            if (!movieFinished) {
+                entry = new JSONObject();
                 entry.put("title", activeMovie.title).put("id", activeMovie.id).put("year", activeMovie.year)
+                        .put("studioId", activeMovie.studioId)
                         .put("poster", activeMovie.poster).put("fullPoster", activeMovie.fullPoster)
                         .put("url", activeMovie.url).put("position", position);
-                prefs.edit().putString("continue_movie", entry.toString()).apply();
             }
+            saveMovieHistory(activeMovie, entry);
         } catch (JSONException ignored) { }
+    }
+
+    private void saveMovieHistory(VaultItem movie, JSONObject entry) {
+        JSONArray updated = new JSONArray();
+        if (entry != null) updated.put(entry);
+        JSONArray previous = movieHistory();
+        for (int index = 0; index < previous.length() && updated.length() < 20; index++) {
+            JSONObject saved = previous.optJSONObject(index);
+            if (saved == null || movie.url.equals(saved.optString("url"))) continue;
+            if (!movie.id.isEmpty() && !movie.studioId.isEmpty()
+                    && movie.id.equals(saved.optString("id")) && movie.studioId.equals(saved.optString("studioId"))) continue;
+            updated.put(saved);
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("movie_history", updated.toString())
+                .remove("continue_movie").apply();
     }
 
     private String favoriteKey(Channel channel) {
@@ -1084,7 +2062,7 @@ public class MainActivity extends Activity {
         int movieLoad = ++movieRequest;
         final String decade = movieDecade, query = movieSearch, genre = movieGenre, rating = movieRating;
         if (moreMovies != null) moreMovies.setText("LOADING MOVIES…");
-        studioLoader.execute(() -> {
+        movieCatalogLoader.execute(() -> {
             try {
                 JSONObject page = new JSONObject();
                 if (!creator.vault.isEmpty()) {
@@ -1097,6 +2075,7 @@ public class MainActivity extends Activity {
                     page = new JSONObject(get(address));
                 }
                 List<VaultItem> movies = creator.vault.isEmpty() ? Collections.emptyList() : parseVault(page);
+                for (VaultItem movie : movies) movie.studioId = creator.id;
                 int followingOffset = page.optInt("next_offset", -1);
                 final JSONArray genres = page.optJSONArray("genres"), ratings = page.optJSONArray("ratings");
                 runOnUiThread(() -> {
@@ -1143,13 +2122,20 @@ public class MainActivity extends Activity {
         JSONArray entries = new JSONObject(payload).getJSONArray("channels");
         for (int i = 0; i < entries.length(); i++) {
             JSONObject entry = entries.getJSONObject(i);
-            if (entry.has("stream_url")) {
-                Channel channel = new Channel(entry.getString("name"), entry.getString("stream_url"));
+            String availability = entry.optString("state", entry.optBoolean("online", true) ? "broadcasting" : "offline");
+            if (entry.has("stream_url") && !"offline".equals(availability)) {
+                String address = studioMediaAddress(entry.getString("stream_url"), guideUrl);
+                if (address.isEmpty()) continue;
+                Channel channel = new Channel(entry.getString("name"), address);
                 channel.id = entry.optString("id");
-                channel.state = entry.optString("state", entry.optBoolean("online", true) ? "broadcasting" : "offline");
-                channel.continuousUrl = entry.optString("firetv_url", entry.optString("continuous_url"));
+                channel.state = availability;
+                channel.fireTvUrl = studioMediaAddress(entry.optString("firetv_url"), guideUrl);
+                channel.continuousUrl = studioMediaAddress(entry.optString("continuous_url"), guideUrl);
                 channel.airUntil = entry.optLong("air_until_epoch_ms", 0);
                 channel.number = entry.optString("number");
+                int rank = entry.optInt("channel_rating_rank", 0);
+                channel.ratingRank = rank >= 1 && rank <= 9 ? rank : 10;
+                if (channel.ratingRank < 10) channel.rating = entry.optString("channel_rating");
                 channel.logo = entry.optString("logo_url");
                 channel.programs = entry.optJSONArray("programs");
                 channel.guideUrl = guideUrl;
@@ -1178,8 +2164,30 @@ public class MainActivity extends Activity {
 
     private static final java.util.regex.Pattern M3U_ID = java.util.regex.Pattern.compile("tvg-id=\"public-channelforge\\.([^\"]+)\"");
     private static final java.util.regex.Pattern M3U_NUMBER = java.util.regex.Pattern.compile("tvg-chno=\"([^\"]+)\"");
+    private static final java.util.regex.Pattern M3U_CHANNEL_RATING = java.util.regex.Pattern.compile("tvg-rating=\"([A-Z0-9-]+)\"");
+    private static final java.util.regex.Pattern M3U_CHANNEL_RANK = java.util.regex.Pattern.compile("tvg-rating-rank=\"([1-9])\"");
+    private static final java.util.regex.Pattern STUDIO_SLOT_PATH = java.util.regex.Pattern.compile("^/studio/[a-f0-9]{16}(?=/)");
+    private static final java.util.regex.Pattern CHANNEL_PLAYLIST_PATH = java.util.regex.Pattern.compile("/(?:broadcast|live)/[a-zA-Z0-9_-]+(?:/[^/]+)?\\.m3u8");
 
-    private List<Channel> parseM3u(String m3u) {
+    private String studioMediaAddress(String raw, String guideAddress) {
+        if (raw.isEmpty()) return "";
+        try {
+            URL guide = new URL(guideAddress);
+            URL resolved = new URL(guide, raw);
+            if (!"https".equals(resolved.getProtocol())) return "";
+            // Studio stream paths are relative to its registered origin. A disk
+            // snapshot may still include the tunnel hostname from a prior launch.
+            String path = STUDIO_SLOT_PATH.matcher(resolved.getPath()).replaceFirst("");
+            if (CHANNEL_PLAYLIST_PATH.matcher(path).matches()) {
+                java.util.regex.Matcher slot = STUDIO_SLOT_PATH.matcher(guide.getPath());
+                String prefix = slot.find() ? slot.group() : "";
+                return new URL(guide, prefix + path + (resolved.getQuery() == null ? "" : "?" + resolved.getQuery())).toString();
+            }
+            return resolved.toString();
+        } catch (IOException invalid) { return ""; }
+    }
+
+    private List<Channel> parseM3u(String m3u, String guideAddress) {
         List<Channel> result = new ArrayList<>();
         String info = "";
         for (String raw : m3u.split("\\r?\\n")) {
@@ -1188,10 +2196,18 @@ public class MainActivity extends Activity {
                 info = line;
             } else if (!line.isEmpty() && !line.startsWith("#") && !info.isEmpty()) {
                 int comma = info.indexOf(',');
-                Channel channel = new Channel(comma >= 0 ? info.substring(comma + 1).trim() : "Channel", line);
+                String address = studioMediaAddress(line, guideAddress);
+                if (address.isEmpty()) { info = ""; continue; }
+                Channel channel = new Channel(comma >= 0 ? info.substring(comma + 1).trim() : "Channel", address);
                 java.util.regex.Matcher id = M3U_ID.matcher(info), number = M3U_NUMBER.matcher(info);
                 if (id.find()) channel.id = id.group(1);
                 if (number.find()) channel.number = number.group(1);
+                java.util.regex.Matcher rating = M3U_CHANNEL_RATING.matcher(info);
+                java.util.regex.Matcher rank = M3U_CHANNEL_RANK.matcher(info);
+                if (rating.find() && rank.find()) {
+                    channel.rating = rating.group(1);
+                    channel.ratingRank = Integer.parseInt(rank.group(1));
+                }
                 result.add(channel);
                 info = "";
             }
@@ -1212,20 +2228,27 @@ public class MainActivity extends Activity {
         updateStudioStatus(creator);
         renderProgramPreview();
 
+        if (phonePortrait) {
+            renderPhoneGuideControls();
+            renderPhoneChannels();
+            return;
+        }
         LinearLayout tools = new LinearLayout(this);
         tools.setGravity(Gravity.CENTER_VERTICAL);
-        guideControl(tools, "↻ SCAN FOR CHANNELS", "scan", () -> loadDirectory(), previousFocus);
+        guideControl(tools, phoneLayout ? "↻ SCAN CHANNELS" : "↻ SCAN FOR CHANNELS", "scan", () -> loadDirectory(), previousFocus);
         tools.addView(text(channels.size() + " channels", 11, true));
         guideControl(tools, "‹ EARLIER", "earlier", () -> moveGuide(-1), previousFocus);
         guideControl(tools, "NOW", "now", () -> { guideOffset = 0; showLoadedChannels(); }, previousFocus);
         guideControl(tools, "LATER ›", "later", () -> moveGuide(1), previousFocus);
         guideControl(tools, guideSearch.isEmpty() ? "SEARCH GUIDE" : "SEARCH: " + guideSearch,
                 "search", () -> searchGuide(), previousFocus);
+        guideControl(tools, guideSortByRating ? "SORT: RATING" : "SORT: CHANNEL", "guide-sort",
+                this::chooseGuideSort, previousFocus);
         addGuideStrip(tools);
         addGap(liveRail, 6);
         LinearLayout filters = new LinearLayout(this);
         guideControl(filters, "ALL STUDIOS", "studio:", () -> filterGuide(""), previousFocus);
-        for (Creator studio : creators) {
+        for (Creator studio : reachableCreators()) {
             guideControl(filters, studio.name, "studio:" + studio.playlist,
                     () -> filterGuide(studio.playlist), previousFocus);
         }
@@ -1238,7 +2261,7 @@ public class MainActivity extends Activity {
             return;
         }
         int viewport = getResources().getDisplayMetrics().widthPixels
-                - (menuCollapsed ? dp(44) : navigationWidth) - dp(63);
+                - (menuCollapsed ? dp(phoneLayout ? 49 : 44) : navigationWidth) - dp(phoneLayout ? 35 : 63);
         int stationWidth = dp(116);
         int ticksCount = getResources().getConfiguration().screenWidthDp < 770 ? 6 : 8;
         int tickWidth = Math.max(dp(48), (viewport - stationWidth - dp(34)) / ticksCount);
@@ -1249,6 +2272,7 @@ public class MainActivity extends Activity {
         LinearLayout table = new LinearLayout(this);
         table.setOrientation(LinearLayout.VERTICAL);
         table.setBackground(surface(new int[]{color("#0D142C"), color("#090A20")}, color("#1EC6E3"), 1, 7));
+        if (neonTheme()) table.setBackground(phonePanel(false, 10));
         LinearLayout ticks = new LinearLayout(this);
         TextView station = sectionTitle("CH   CHANNEL", "#63EFFF");
         station.setTextSize(11);
@@ -1263,15 +2287,211 @@ public class MainActivity extends Activity {
         }
         table.addView(ticks);
         Channel initial = null;
-        for (int i = 0; i < channels.size(); i++) {
+        for (int i : displayedGuideIndices()) {
             Channel channel = channels.get(i);
-            if (!matchesGuide(channel)) continue;
             if (initial == null) initial = channel;
             addGuideRow(table, channel, i, start, end, stationWidth, timelineWidth, previousFocus);
         }
         if (initial != null && (previousFocus == null || getCurrentFocus() == focused)) showProgram(initial);
         if (initial == null) table.addView(text("No channels match this search.", 13, false));
         addGuideStrip(table);
+        if (phoneLayout) addPhoneBackdrop(liveRail, 58);
+    }
+
+    private void renderPhoneGuideControls() {
+        LinearLayout destinations = new LinearLayout(this);
+        addPhoneGuideDestination(destinations, "Live TV\nGuide", Page.LIVE);
+        addPhoneGuideDestination(destinations, "Rewind\nCinema", Page.CINEMA);
+        addPhoneGuideDestination(destinations, "Continue\nWatching", Page.CONTINUE);
+        addPhoneGuideDestination(destinations, "Favorites", Page.FAVORITES);
+        liveRail.addView(destinations);
+        addGap(liveRail, 9);
+        LinearLayout actions = new LinearLayout(this);
+        addPhoneAction(actions, guideSearch.isEmpty() ? "Search guide" : "Search: " + guideSearch,
+                this::searchGuide);
+        addPhoneAction(actions, "↻  Scan channels", this::loadDirectory);
+        liveRail.addView(actions);
+        addGap(liveRail, 8);
+
+        LinearLayout filters = new LinearLayout(this);
+        String studioName = "All studios";
+        for (Creator studio : reachableCreators()) {
+            if (studio.playlist.equals(guideStudio)) studioName = studio.name;
+        }
+        addPhoneAction(filters, studioName + " ▾", this::choosePhoneGuideStudio);
+        addPhoneAction(filters, (guideOffset == 0 ? "Now" : guideTime(phoneGuideTime())) + " ▾",
+                this::choosePhoneGuideTime);
+        addPhoneAction(filters, guideSortByRating ? "Rating ▾" : "Sort ▾", this::chooseGuideSort);
+        liveRail.addView(filters);
+        addGap(liveRail, 7);
+    }
+
+    private void addPhoneGuideDestination(LinearLayout row, String label, Page page) {
+        boolean selected = page == Page.LIVE;
+        LinearLayout button = new LinearLayout(this);
+        button.setOrientation(LinearLayout.VERTICAL);
+        button.setGravity(Gravity.CENTER);
+        button.setMinimumHeight(dp(60));
+        button.setPadding(dp(3), dp(4), dp(3), dp(4));
+        button.setBackground(phonePanel(selected, 9));
+        button.setFocusable(true);
+        button.setContentDescription(label.replace('\n', ' '));
+        button.setOnClickListener(v -> openPage(page));
+        button.addView(navigationGlyph(page, selected), new LinearLayout.LayoutParams(dp(24), dp(24)));
+        TextView title = text(label, 12, true);
+        title.setGravity(Gravity.CENTER);
+        title.setPadding(0, dp(2), 0, 0);
+        button.addView(title);
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(0, -1, 1);
+        if (row.getChildCount() > 0) layout.setMarginStart(dp(6));
+        row.addView(button, layout);
+    }
+
+    private void addPhoneAction(LinearLayout row, String label, Runnable action) {
+        TextView button = navigationButton(label);
+        button.setTextSize(12);
+        button.setBackground(phonePanel(false, 7));
+        button.setOnClickListener(v -> action.run());
+        addPhoneAction(row, button);
+    }
+
+    private void addPhoneAction(LinearLayout row, TextView button) {
+        button.setGravity(Gravity.CENTER);
+        button.setSingleLine(false);
+        button.setMaxLines(2);
+        button.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        button.setMinHeight(dp(48));
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(0, -1, 1);
+        if (row.getChildCount() > 0) layout.setMarginStart(dp(8));
+        row.addView(button, layout);
+    }
+
+    private void choosePhoneGuideStudio() {
+        List<Creator> options = reachableCreators();
+        String[] names = new String[options.size() + 1];
+        names[0] = "All studios";
+        int selected = 0;
+        for (int i = 0; i < options.size(); i++) {
+            Creator studio = options.get(i);
+            names[i + 1] = studio.name;
+            if (studio.playlist.equals(guideStudio)) selected = i + 1;
+        }
+        new AlertDialog.Builder(this).setTitle("Filter by studio").setSingleChoiceItems(names, selected, (dialog, which) -> {
+            dialog.dismiss();
+            filterGuide(which == 0 ? "" : options.get(which - 1).playlist);
+        }).setNegativeButton("Cancel", null).show();
+    }
+
+    private long phoneGuideTime() {
+        return System.currentTimeMillis() + 2L * guideOffset * HALF_HOUR;
+    }
+
+    private void choosePhoneGuideTime() {
+        long now = System.currentTimeMillis();
+        String[] times = new String[7];
+        for (int i = 0; i < times.length; i++) {
+            times[i] = i == 1 ? "Now" : guideTime(now + 2L * (i - 1) * HALF_HOUR);
+        }
+        new AlertDialog.Builder(this).setTitle("Guide time").setSingleChoiceItems(times, guideOffset + 1, (dialog, which) -> {
+            dialog.dismiss();
+            guideOffset = which - 1;
+            showLoadedChannels();
+        }).setNegativeButton("Cancel", null).show();
+    }
+
+    private void renderPhoneChannels() {
+        if (channels.isEmpty()) {
+            liveRail.addView(text(loadingGuides.isEmpty() ? "No live channels are reachable. Select Scan to check again."
+                    : "Finding live channels…", 14, false));
+            return;
+        }
+        long guideTime = phoneGuideTime();
+        List<Integer> displayed = displayedGuideIndices();
+        liveRail.addView(sectionTitle("CHANNELS (" + displayed.size() + ")", "#ECF7FF"));
+        Channel first = null;
+        for (int i : displayed) {
+            Channel channel = channels.get(i);
+            if (first == null) first = channel;
+            LinearLayout card = new LinearLayout(this);
+            card.setGravity(Gravity.CENTER_VERTICAL);
+            card.setBackground(phonePanel((i & 1) == 1, 9));
+            card.setPadding(dp(7), dp(6), dp(6), dp(6));
+            FrameLayout mark = new FrameLayout(this);
+            mark.setBackground(phonePanel((i & 1) == 1, 7));
+            mark.setClipToOutline(true);
+            TextView markLabel = text("CH " + displayNumber(channel, i), 13, true);
+            markLabel.setGravity(Gravity.CENTER);
+            markLabel.setTextColor(color("#52F0FB"));
+            mark.addView(markLabel, new FrameLayout.LayoutParams(-1, -1));
+            if (!channel.logo.isEmpty()) {
+                ImageView logo = new ImageView(this);
+                logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                mark.addView(logo, new FrameLayout.LayoutParams(-1, -1));
+                posterLoader.execute(() -> loadPoster(channel.logo, logo));
+            }
+            card.addView(mark, new LinearLayout.LayoutParams(dp(83), dp(68)));
+            LinearLayout identity = new LinearLayout(this);
+            identity.setOrientation(LinearLayout.VERTICAL);
+            identity.setPadding(dp(8), 0, 0, 0);
+            TextView station = text("CH " + displayNumber(channel, i) + guideRatingLabel(channel) + "  •  " + channel.studio, 11, false);
+            station.setTextColor(color("#8DBAD5"));
+            station.setPadding(0, 0, 0, 0);
+            station.setMaxLines(1);
+            station.setEllipsize(TextUtils.TruncateAt.END);
+            identity.addView(station);
+            TextView name = text(channel.name, 16, true);
+            name.setPadding(0, dp(2), 0, 0);
+            identity.addView(name);
+            JSONObject scheduled = programAt(channel, guideTime);
+            String program = scheduled == null ? "No program listed" : scheduled.optString("title", "No program listed");
+            TextView summary = text(program, 12, false);
+            summary.setTextColor(color("#BED3E8"));
+            summary.setPadding(0, dp(2), 0, dp(2));
+            summary.setMaxLines(2);
+            summary.setEllipsize(TextUtils.TruncateAt.END);
+            identity.addView(summary);
+            if (guideOffset == 0 && scheduled != null) {
+                long scheduledStart = guideTimeMillis(scheduled, "start");
+                long duration = guideTimeMillis(scheduled, "stop") - scheduledStart;
+                if (duration > 0) {
+                    ProgressBar progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                    progress.setMax(1000);
+                    progress.setProgress((int) Math.min(1000, Math.max(0, 1000 * (guideTime - scheduledStart) / duration)));
+                    progress.setProgressTintList(android.content.res.ColorStateList.valueOf(color("#1FE3F9")));
+                    identity.addView(progress, new LinearLayout.LayoutParams(-1, dp(5)));
+                }
+            }
+            card.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
+            LinearLayout controls = new LinearLayout(this);
+            controls.setPadding(dp(5), 0, 0, 0);
+            controls.setOrientation(LinearLayout.VERTICAL);
+            boolean saved = isFavorite(channel);
+            TextView favorite = navigationButton(saved ? "★" : "☆");
+            favorite.setContentDescription((saved ? "Remove from favorites: " : "Add to favorites: ") + channel.name);
+            favorite.setGravity(Gravity.CENTER);
+            favorite.setPadding(0, 0, 0, 0);
+            favorite.setTextSize(19);
+            favorite.setMinHeight(dp(41));
+            favorite.setBackgroundColor(Color.TRANSPARENT);
+            favorite.setOnClickListener(v -> toggleFavorite(channel, favorite));
+            controls.addView(favorite, new LinearLayout.LayoutParams(dp(44), -2));
+            TextView watch = navigationButton("▶");
+            watch.setContentDescription("Watch live: " + channel.name);
+            watch.setGravity(Gravity.CENTER);
+            watch.setPadding(0, 0, 0, 0);
+            watch.setTextSize(17);
+            watch.setMinHeight(dp(42));
+            watch.setBackground(phonePanel(false, 7));
+            watch.setOnClickListener(v -> play(channel));
+            controls.addView(watch, new LinearLayout.LayoutParams(dp(44), -2));
+            card.addView(controls);
+            liveRail.addView(card);
+            addGap(liveRail, 10);
+        }
+        if (first == null) liveRail.addView(text("No channels match this search.", 13, false));
+        else showProgram(first);
+        addPhoneBackdrop(liveRail, 90);
     }
 
     private void addGuideStrip(LinearLayout contents) {
@@ -1309,6 +2529,32 @@ public class MainActivity extends Activity {
         showLoadedChannels();
     }
 
+    private void chooseGuideSort() {
+        new AlertDialog.Builder(this).setTitle("Sort live channels")
+                .setSingleChoiceItems(new String[]{"Channel order", "Rating, lowest first"}, guideSortByRating ? 1 : 0,
+                        (dialog, which) -> {
+                            guideSortByRating = which == 1;
+                            dialog.dismiss();
+                            showLoadedChannels();
+                        })
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    private List<Integer> displayedGuideIndices() {
+        List<Integer> indices = new ArrayList<>();
+        for (int i = 0; i < channels.size(); i++) {
+            if (matchesGuide(channels.get(i))) indices.add(i);
+        }
+        if (guideSortByRating) Collections.sort(indices, (left, right) ->
+                Integer.compare(channels.get(left).ratingRank, channels.get(right).ratingRank));
+        return indices;
+    }
+
+    private String guideRatingLabel(Channel channel) {
+        if (!channel.rating.isEmpty()) return "  •  " + channel.rating;
+        return guideSortByRating ? "  •  Unrated" : "";
+    }
+
     private void searchGuide() {
         EditText query = new EditText(this);
         query.setSingleLine(true);
@@ -1343,9 +2589,26 @@ public class MainActivity extends Activity {
                 color("#26D6F2"), 1, 8));
         LinearLayout.LayoutParams screenLayout = new LinearLayout.LayoutParams(0, -1, .62f);
         screenLayout.setMargins(0, 0, dp(8), 0);
-        preview.addView(screen, screenLayout);
+        landscapeProgramArtwork = null;
+        if (neonTheme() && !phonePortrait) {
+            FrameLayout cover = new FrameLayout(this);
+            cover.setBackground(phonePanel(true, 9));
+            cover.setClipToOutline(true);
+            landscapeProgramArtwork = new ImageView(this);
+            landscapeProgramArtwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            landscapeProgramArtwork.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            cover.addView(landscapeProgramArtwork, new FrameLayout.LayoutParams(-1, -1));
+            TextView nowLabel = sectionTitle("▶  NOW PLAYING", "#B3F6FF");
+            nowLabel.setBackground(phonePanel(true, 5));
+            nowLabel.setPadding(dp(7), dp(3), dp(7), dp(3));
+            FrameLayout.LayoutParams tag = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
+            tag.setMargins(dp(8), dp(7), dp(8), 0);
+            cover.addView(nowLabel, tag);
+            preview.addView(cover, screenLayout);
+        } else if (!phonePortrait) preview.addView(screen, screenLayout);
         FrameLayout card = new FrameLayout(this);
         card.setBackground(surface(new int[]{color("#10162C"), color("#2C1350")}, color("#26D6F2"), 1, 8));
+        if (neonTheme()) card.setBackground(phonePanel(phonePortrait, 11));
         if (programArtwork != null) programArtwork.removeCallbacks(previewClock);
         previewChannel = null;
         programArtwork = new ImageView(this);
@@ -1368,13 +2631,16 @@ public class MainActivity extends Activity {
         card.setClipToOutline(true);
         LinearLayout detail = new LinearLayout(this);
         detail.setOrientation(LinearLayout.VERTICAL);
-        detail.setPadding(dp(8), dp(4), dp(8), dp(2));
-        TextView now = sectionTitle("● NOW PLAYING", "#5EF4FF");
+        detail.setPadding(dp(8), dp(phonePortrait ? 11 : 4), dp(8), dp(phonePortrait ? 9 : 2));
+        TextView now = sectionTitle("▶  NOW PLAYING", "#5EF4FF");
         now.setPadding(dp(6), dp(1), dp(6), dp(1));
-        detail.addView(now);
+        if (phonePortrait) now.setBackground(phonePanel(true, 5));
+        if (phonePortrait || !neonTheme()) detail.addView(now, new LinearLayout.LayoutParams(-2, -2));
         programTitle = text("Select a channel from the guide", 17, true);
-        programTitle.setTextColor(color("#FFF16B"));
-        programTitle.setSingleLine(true);
+        programTitle.setTextColor(color(neonTheme() ? "#F3F8FF" : "#FFF16B"));
+        if (neonTheme()) programTitle.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD_ITALIC));
+        if (phonePortrait) programTitle.setMaxLines(2);
+        else programTitle.setSingleLine(true);
         programTitle.setPadding(dp(6), dp(1), dp(6), dp(2));
         programTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
         detail.addView(programTitle);
@@ -1395,10 +2661,16 @@ public class MainActivity extends Activity {
         timing.addView(programDuration);
         detail.addView(timing);
         card.addView(detail, new FrameLayout.LayoutParams(-1, -2));
-        preview.addView(card, new LinearLayout.LayoutParams(0, -1, 1));
-        int previewHeight = getResources().getConfiguration().screenHeightDp < 420 ? 87 : 106;
-        liveRail.addView(preview, new LinearLayout.LayoutParams(-1, dp(previewHeight)));
-        addGap(liveRail, 8);
+        if (phonePortrait) {
+            card.setMinimumHeight(dp(131));
+            preview.addView(card, new LinearLayout.LayoutParams(-1, -2));
+            liveRail.addView(preview, new LinearLayout.LayoutParams(-1, -2));
+        } else {
+            preview.addView(card, new LinearLayout.LayoutParams(0, -1, 1));
+            int previewHeight = getResources().getConfiguration().screenHeightDp < 420 ? 87 : 106;
+            liveRail.addView(preview, new LinearLayout.LayoutParams(-1, dp(previewHeight)));
+        }
+        addGap(liveRail, phonePortrait ? 12 : 8);
     }
 
     private String guideTime(long milliseconds) {
@@ -1412,18 +2684,19 @@ public class MainActivity extends Activity {
         updateProgram(channel);
     }
 
+    private JSONObject programAt(Channel channel, long time) {
+        if (channel.programs == null) return null;
+        for (int i = 0; i < channel.programs.length(); i++) {
+            JSONObject entry = channel.programs.optJSONObject(i);
+            if (entry != null && guideTimeMillis(entry, "start") <= time && guideTimeMillis(entry, "stop") > time)
+                return entry;
+        }
+        return null;
+    }
+
     private void updateProgram(Channel channel) {
         long now = System.currentTimeMillis();
-        JSONObject item = null;
-        if (channel.programs != null) {
-            for (int i = 0; i < channel.programs.length(); i++) {
-                JSONObject entry = channel.programs.optJSONObject(i);
-                if (entry != null && guideTimeMillis(entry, "start") <= now && guideTimeMillis(entry, "stop") > now) {
-                    item = entry;
-                    break;
-                }
-            }
-        }
+        JSONObject item = programAt(channel, now);
         programTitle.setText(item == null ? channel.name : item.optString("title", channel.name));
         programTime.setText(channel.studio + (channel.number.isEmpty() ? "" : "  •  CH " + channel.number)
                 + (item == null || item.optString("content_rating").isEmpty() ? "" : "  •  " + item.optString("content_rating")));
@@ -1437,8 +2710,10 @@ public class MainActivity extends Activity {
         String artworkKey = android.text.TextUtils.join("\n", artwork);
         if (artworkKey.equals(programArtwork.getTag())) return;
         ImageView view = programArtwork;
+        ImageView wideArtwork = landscapeProgramArtwork;
         view.setTag(artworkKey);
         view.setImageDrawable(null);
+        if (wideArtwork != null) wideArtwork.setImageDrawable(null);
         if (!artworkKey.trim().isEmpty()) posterLoader.execute(() -> {
             Set<String> tried = new HashSet<>();
             for (String url : artwork) {
@@ -1446,7 +2721,10 @@ public class MainActivity extends Activity {
                 Bitmap image = posterBitmap(url);
                 if (image == null) continue;
                 runOnUiThread(() -> {
-                    if (view.isAttachedToWindow() && artworkKey.equals(view.getTag())) view.setImageBitmap(image);
+                    if (view.isAttachedToWindow() && artworkKey.equals(view.getTag())) {
+                        view.setImageBitmap(image);
+                        if (wideArtwork != null) wideArtwork.setImageBitmap(image);
+                    }
                 });
                 break;
             }
@@ -1471,7 +2749,7 @@ public class MainActivity extends Activity {
         String availability = channel.state;
         Creator owner = studioFor(channel);
         if (owner != null && !owner.state.equals("broadcasting") && !owner.state.equals("standby")) availability = owner.state;
-        TextView station = text("CH " + displayNumber(channel, index) + "  " + channel.name + "\n" + channel.studio
+        TextView station = text("CH " + displayNumber(channel, index) + "  " + channel.name + "\n" + channel.studio + guideRatingLabel(channel)
                 + ("broadcasting".equals(availability) ? "" : " · " + availability), 11, true);
         station.setPadding(dp(7), dp(4), dp(4), dp(4));
         station.setMaxLines(3);
@@ -1503,7 +2781,8 @@ public class MainActivity extends Activity {
                     color(active ? "#FF51C7" : "#2B597F"), active ? 2 : 1, 4));
             if (active) showProgram(channel);
         });
-        tune.setOnClickListener(view -> play(index));
+        if (phoneLayout) tune.setContentDescription("Watch live: " + channel.name);
+        tune.setOnClickListener(view -> play(channel));
         row.addView(tune, new LinearLayout.LayoutParams(stationWidth + timelineWidth, dp(45)));
         TextView star = navigationButton(isFavorite(channel) ? "★" : "☆");
         star.setContentDescription("Toggle favorite: " + channel.name);
@@ -1551,6 +2830,19 @@ public class MainActivity extends Activity {
     }
 
     private void updateStudioStatus(String creator) {
+        if (phonePortrait) {
+            String freshness = directoryStale || !staleGuides.isEmpty() ? "  •  Last known guide" : "";
+            if (!cinemaScreen) {
+                int count = channels.size();
+                status.setText(count + (count == 1 ? " channel" : " channels") + freshness);
+            } else if (movieShelfLoaded) {
+                status.setText(vaultItems.size() + (nextMovieOffset >= 0 ? "+" : "")
+                        + (vaultItems.size() == 1 && nextMovieOffset < 0 ? " movie" : " movies"));
+            } else {
+                status.setText(moviePageLoading ? "Finding movies…" : "Rewind Cinema");
+            }
+            return;
+        }
         status.setText("●  " + creator.toUpperCase(Locale.US) + "  •  " + channels.size()
                 + " CHANNELS" + (directoryStale || !staleGuides.isEmpty() ? "  •  LAST KNOWN GUIDE" : "") + "  •  " + (movieShelfLoaded
                 ? vaultItems.size() + (nextMovieOffset >= 0 ? "+" : "") + " MOVIES"
@@ -1566,9 +2858,33 @@ public class MainActivity extends Activity {
     }
 
     private void addMovieFilters(Creator creator) {
+        String[] decades = {"all", "60s", "70s", "80s", "90s", "2000s", "recent"};
+        String[] labels = {"All decades", "60s", "70s", "80s", "90s", "2000s", "2010+"};
         LinearLayout strip = new LinearLayout(this);
-        for (String value : new String[]{"all","60s","70s","80s","90s","2000s","recent"}) {
-            String label = value.equals("recent") ? "2010+" : value.toUpperCase(Locale.ROOT);
+        TextView search = navigationButton(movieSearch.isEmpty() ? "Search movies" : movieSearch);
+        search.setOnClickListener(v -> searchMovies(creator));
+        if (phonePortrait) {
+            int selected = Math.max(0, java.util.Arrays.asList(decades).indexOf(movieDecade));
+            addPhoneAction(strip, search);
+            addPhoneAction(strip, labels[selected] + " ▾", () -> new AlertDialog.Builder(this)
+                    .setTitle("Filter by decade").setSingleChoiceItems(labels, selected, (dialog, which) -> {
+                        dialog.dismiss();
+                        movieDecade = decades[which];
+                        reloadMovieFilters(creator);
+                    }).setNegativeButton("Cancel", null).show());
+            movieRail.addView(strip);
+            addGap(movieRail, 8);
+            LinearLayout metadata = new LinearLayout(this);
+            addMovieChoices(metadata, creator, true);
+            addMovieChoices(metadata, creator, false);
+            if (metadata.getChildCount() > 0) {
+                movieRail.addView(metadata);
+                addGap(movieRail, 8);
+            }
+            return;
+        }
+        for (int i = 0; i < decades.length; i++) {
+            String value = decades[i], label = i == 0 ? "ALL" : labels[i].toUpperCase(Locale.ROOT);
             TextView button = navigationButton(label);
             button.setSelected(value.equals(movieDecade));
             if (button.isSelected()) button.setTextColor(color("#FFF088"));
@@ -1576,20 +2892,20 @@ public class MainActivity extends Activity {
             button.setOnClickListener(v -> { movieDecade = value; reloadMovieFilters(creator); });
             strip.addView(button);
         }
-        TextView search = navigationButton(movieSearch.isEmpty() ? "Search movies" : movieSearch);
-        search.setOnClickListener(v -> {
-            EditText input = new EditText(this);
-            input.setSingleLine(true);
-            input.setText(movieSearch);
-            new AlertDialog.Builder(this).setTitle("Search movies").setView(input)
-                    .setPositiveButton("Search", (d,w) -> { movieSearch = input.getText().toString().trim(); reloadMovieFilters(creator); })
-                    .setNeutralButton("Clear", (d,w) -> { movieSearch = ""; reloadMovieFilters(creator); })
-                    .setNegativeButton("Cancel", null).show();
-        });
         strip.addView(search);
         addMovieChoices(strip, creator, true);
         addMovieChoices(strip, creator, false);
         addHorizontalStrip(movieRail, strip);
+    }
+
+    private void searchMovies(Creator creator) {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(movieSearch);
+        new AlertDialog.Builder(this).setTitle("Search movies").setView(input)
+                .setPositiveButton("Search", (d,w) -> { movieSearch = input.getText().toString().trim(); reloadMovieFilters(creator); })
+                .setNeutralButton("Clear", (d,w) -> { movieSearch = ""; reloadMovieFilters(creator); })
+                .setNegativeButton("Cancel", null).show();
     }
 
     private void addMovieChoices(LinearLayout row, Creator creator, boolean genres) {
@@ -1607,25 +2923,32 @@ public class MainActivity extends Activity {
                     if (genres) movieGenre = value; else movieRating = value;
                     reloadMovieFilters(creator);
                 }).show());
-        row.addView(button);
+        if (phonePortrait) addPhoneAction(row, button);
+        else row.addView(button);
     }
 
     private void renderMovies(Creator creator) {
         movieRail.removeAllViews();
         updateStudioStatus(creator.name);
         FrameLayout hero = new FrameLayout(this);
+        hero.setBackground(surface(new int[]{color("#10172D"), color("#2A153C")}, color("#38DDF5"), 1, 11));
+        hero.setClipToOutline(true);
         ImageView artwork = new ImageView(this);
         artwork.setImageResource(R.drawable.cinema_hero);
         artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
         hero.addView(artwork, new FrameLayout.LayoutParams(-1, -1));
-        TextView title = sectionTitle("REWIND CINEMA", "#FF48C8");
-        title.setTextSize(24);
+        TextView title = sectionTitle("REWIND CINEMA", "#F5F7FF");
+        android.text.SpannableString heading = new android.text.SpannableString("REWIND CINEMA");
+        heading.setSpan(new android.text.style.ForegroundColorSpan(color("#FF48C8")), 7, heading.length(), 0);
+        title.setText(heading);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD_ITALIC);
+        title.setTextSize(compactTouchLayout ? 25 : 32);
         title.setGravity(Gravity.CENTER);
         hero.addView(title, new FrameLayout.LayoutParams(-1, -1));
-        movieRail.addView(hero, new LinearLayout.LayoutParams(-1, dp(62)));
+        movieRail.addView(hero, new LinearLayout.LayoutParams(-1, dp(compactTouchLayout ? 62 : 84)));
         addGap(movieRail, 6);
         LinearLayout studios = new LinearLayout(this);
-        for (Creator option : creators) {
+        for (Creator option : reachableCreators()) {
             if (!option.cinemaSupported) continue;
             TextView studio = navigationButton(option.name);
             if (option.playlist.equals(creator.playlist)) studio.setTextColor(color("#FFF088"));
@@ -1634,13 +2957,17 @@ public class MainActivity extends Activity {
             button.setMargins(0, 0, dp(5), 0);
             studios.addView(studio, button);
         }
-        if (studios.getChildCount() > 1) addHorizontalStrip(movieRail, studios);
+        if (studios.getChildCount() > 1) {
+            addHorizontalStrip(movieRail, studios);
+            if (phonePortrait) addGap(movieRail, 8);
+        }
         addMovieFilters(creator);
         if (vaultItems.isEmpty()) {
             movieRail.addView(text("No movies match this selection.", 14, false));
             return;
         }
         LinearLayout content = new LinearLayout(this);
+        if (compactTouchLayout) content.setOrientation(LinearLayout.VERTICAL);
         content.setBaselineAligned(false);
         content.setPadding(0, dp(8), 0, 0);
         int screenHeight = getResources().getConfiguration().screenHeightDp;
@@ -1649,57 +2976,101 @@ public class MainActivity extends Activity {
         shelf.setOrientation(LinearLayout.VERTICAL);
         movieShelf = shelf;
         shelf.setPadding(dp(4), dp(4), dp(6), dp(8));
+        if (phoneLayout) {
+            shelf.setBackground(surface(new int[]{color("#111D34"), color("#100D22")}, color("#4F9CC3"), 1, 9));
+            movieRail.addView(shelf, new LinearLayout.LayoutParams(-1, -2));
+            growMovieShelf(creator);
+            return;
+        }
         ScrollView results = new ScrollView(this);
+        results.setBackground(surface(new int[]{color("#111D34"), color("#100D22")}, color("#4F9CC3"), 1, 9));
         results.setFillViewport(true);
         results.setNestedScrollingEnabled(true);
         results.addView(shelf);
-        content.addView(results, new LinearLayout.LayoutParams(0, dp(height), 1.15f));
+        content.addView(results, compactTouchLayout ? new LinearLayout.LayoutParams(-1, dp(Math.max(105, screenHeight / 3)))
+                : new LinearLayout.LayoutParams(0, dp(height), 1.15f));
         movieDetails = panel();
+        movieDetails.setBackground(surface(new int[]{color("#21103F"), color("#101D31"), color("#0C1124")},
+                color("#2CD9F2"), 1, 10));
         ScrollView detailsScroll = new ScrollView(this);
         detailsScroll.setFillViewport(true);
         detailsScroll.setNestedScrollingEnabled(true);
         detailsScroll.addView(movieDetails);
-        content.addView(detailsScroll, new LinearLayout.LayoutParams(0, dp(height), 1f));
+        content.addView(detailsScroll, compactTouchLayout ? new LinearLayout.LayoutParams(-1, -2)
+                : new LinearLayout.LayoutParams(0, dp(height), 1f));
         movieRail.addView(content);
         growMovieShelf(creator);
-        showMovieDetails(vaultItems.get(0));
+        insertMovie = null;
+        movieDetails.addView(text("Select a movie to see its details.", 14, false));
     }
 
     private void showMovieDetails(VaultItem item) {
-        movieDetails.removeAllViews();
+        insertMovie = fillMovieDetails(movieDetails, item, () -> playMovie(item));
+    }
+
+    private void showPhoneMovieDetails(VaultItem item) {
+        LinearLayout details = panel();
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(details);
+        AlertDialog dialog = new AlertDialog.Builder(this).setView(scroll)
+                .setNegativeButton("Back to movies", null).create();
+        fillMovieDetails(details, item, () -> {
+            dialog.dismiss();
+            playMovie(item);
+        });
+        dialog.show();
+    }
+
+    private TextView fillMovieDetails(LinearLayout details, VaultItem item, Runnable play) {
+        details.removeAllViews();
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
         FrameLayout caseFrame = new FrameLayout(this);
         caseFrame.setPadding(dp(9), dp(4), dp(4), dp(6));
         caseFrame.setBackground(surface(new int[]{color("#98745F"), color("#23172E"), color("#130E21")},
                 color("#B38D73"), 1, 5));
-        ImageView cover = new ImageView(this);
+        ImageView cover = movieArtwork(item, false);
         cover.setScaleType(ImageView.ScaleType.FIT_CENTER);
         cover.setBackgroundColor(color("#0C0B1B"));
         caseFrame.addView(cover, new FrameLayout.LayoutParams(-1, -1));
-        top.addView(caseFrame, new LinearLayout.LayoutParams(dp(70), dp(101)));
-        if (!item.poster.isEmpty()) posterLoader.execute(() -> updatePoster(moviePoster(item), cover));
+        top.addView(caseFrame, new LinearLayout.LayoutParams(dp(87), dp(125)));
         LinearLayout labels = new LinearLayout(this);
         labels.setOrientation(LinearLayout.VERTICAL);
         labels.setPadding(dp(9), 0, 0, 0);
         TextView label = sectionTitle("SELECTED CASSETTE", "#63EFFF");
         label.setPadding(dp(4), 0, 0, dp(3));
         labels.addView(label);
-        TextView title = text(item.title + (item.year.isEmpty() ? "" : "  ·  " + item.year), 16, true);
-        title.setTextColor(color("#FFE275"));
+        TextView title = text(item.title, 21, true);
+        title.setTextColor(color("#FFF35E"));
         title.setPadding(dp(4), 0, 0, dp(5));
         labels.addView(title);
+        if (!item.year.isEmpty()) labels.addView(text(item.year, 11, true));
         top.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
-        movieDetails.addView(top);
-        addGap(movieDetails, 8);
-        insertMovie = focusButton("▶  INSERT MOVIE");
-        insertMovie.setOnClickListener(v -> playMovie(item));
-        movieDetails.addView(insertMovie);
+        details.addView(top);
+        addGap(details, 8);
+        TextView playMovie = focusButton("▶  INSERT MOVIE");
+        playMovie.setContentDescription("Insert movie");
+        if (phoneLayout) playMovie.setMinHeight(dp(48));
+        playMovie.setGravity(Gravity.CENTER);
+        playMovie.setTextColor(color("#061D17"));
+        paintInsertMovie(playMovie, false);
+        playMovie.setOnFocusChangeListener((button, focused) -> paintInsertMovie(button, focused));
+        playMovie.setOnClickListener(v -> {
+            playMenuSound();
+            play.run();
+        });
+        details.addView(playMovie);
         if (!item.summary.isEmpty()) {
             TextView summary = text(item.summary, 12, false);
             summary.setPadding(dp(4), dp(5), dp(4), dp(4));
-            movieDetails.addView(summary);
+            details.addView(summary);
         }
+        return playMovie;
+    }
+
+    private void paintInsertMovie(View button, boolean focused) {
+        button.setBackground(surface(new int[]{color("#8AFFB8"), color("#27E882")},
+                color(focused ? "#FFF5F9" : "#4FF093"), focused ? 3 : 1, 7));
     }
 
     private void growMovieShelf(Creator creator) {
@@ -1724,46 +3095,117 @@ public class MainActivity extends Activity {
     }
 
     private View vaultBox(VaultItem item) {
+        return vaultBox(item, "CHANNELFORGE HOME VIDEO", view -> {
+            if (phoneLayout) {
+                showPhoneMovieDetails(item);
+                return;
+            }
+            showMovieDetails(item);
+            insertMovie.requestFocus();
+        });
+    }
+
+    private View vaultBox(VaultItem item, String subtitle, View.OnClickListener select) {
         LinearLayout box = new LinearLayout(this);
         box.setGravity(Gravity.CENTER_VERTICAL);
-        box.setPadding(dp(10), dp(5), dp(7), dp(5));
+        box.setPadding(dp(8), dp(4), dp(7), dp(4));
         box.setFocusable(true);
-        box.setContentDescription(item.title + (item.year.isEmpty() ? "" : ", " + item.year));
-        int[] sleeve = {color("#5D493B"), color("#151021"), color("#452044")};
-        box.setBackground(surface(sleeve, color("#C9AE83"), 1, 6));
-        ImageView poster = new ImageView(this);
+        box.setContentDescription(item.title + ", " + subtitle);
+        paintTape(box, false);
+        TextView brand = text("CF", 17, true);
+        brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD_ITALIC);
+        brand.setPadding(0, 0, dp(7), 0);
+        brand.setTextColor(color("#FCE0BC"));
+        box.addView(brand);
+        View stripe = new View(this);
+        stripe.setBackgroundColor(color("#40CCEF"));
+        stripe.setRotation(17f);
+        LinearLayout.LayoutParams stripeLayout = new LinearLayout.LayoutParams(dp(4), dp(30));
+        stripeLayout.rightMargin = dp(5);
+        box.addView(stripe, stripeLayout);
+        ImageView poster = movieArtwork(item, true);
         poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
         poster.setBackgroundColor(color("#201528"));
         FrameLayout frame = new FrameLayout(this);
         frame.setPadding(dp(1), dp(1), dp(1), dp(1));
-        frame.setBackgroundColor(color("#E84998"));
+        frame.setBackgroundColor(color("#CE7BAD"));
         frame.addView(poster, new FrameLayout.LayoutParams(-1, -1));
-        box.addView(frame, new LinearLayout.LayoutParams(dp(47), dp(30)));
-        TextView label = text(item.title, 13, true);
-        label.setMaxLines(2);
-        label.setTextColor(color("#F3D8AE"));
-        label.setPadding(dp(8), 0, dp(4), 0);
-        box.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
+        box.addView(frame, new LinearLayout.LayoutParams(dp(51), dp(32)));
+        LinearLayout labels = new LinearLayout(this);
+        labels.setOrientation(LinearLayout.VERTICAL);
+        labels.setPadding(dp(7), 0, dp(4), 0);
+        TextView title = text(item.title, 15, true);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD_ITALIC);
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        title.setPadding(0, 0, 0, 0);
+        labels.addView(title);
+        TextView line = text(subtitle, 9, true);
+        line.setSingleLine(true);
+        line.setTextColor(color("#CFBDD5"));
+        line.setLetterSpacing(.11f);
+        line.setPadding(0, 0, 0, 0);
+        labels.addView(line);
+        box.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
+        if (!item.year.isEmpty()) {
+            TextView year = text(item.year, 11, true);
+            year.setPadding(dp(3), dp(2), dp(3), dp(2));
+            year.setRotation(-7f);
+            year.setBackground(surface(new int[]{color("#B13932"), color("#7E282B")}, color("#E19177"), 1, 3));
+            LinearLayout.LayoutParams yearLayout = new LinearLayout.LayoutParams(-2, -2);
+            yearLayout.rightMargin = dp(7);
+            box.addView(year, yearLayout);
+        }
         TextView format = text("VHS", 10, true);
         format.setPadding(dp(3), dp(3), dp(3), dp(3));
-        format.setTextColor(color("#FFAD82"));
+        format.setTextColor(color("#F4D3A9"));
+        format.setBackground(surface(new int[]{color("#221A25"), color("#171421")}, color("#DDB892"), 1, 3));
         box.addView(format);
-        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, dp(42));
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, dp(phoneLayout ? 52 : 42));
         layout.setMargins(0, 0, 0, dp(5));
         box.setLayoutParams(layout);
         box.setOnFocusChangeListener((view, focused) -> {
+            if (focused) playMenuSound();
             boolean motion = motionEnabled();
             view.animate().translationY(focused && motion ? -dp(2) : 0)
                     .setDuration(motion ? 160 : 0).start();
-            view.setBackground(surface(sleeve, color(focused ? "#FF68D7" : "#C9AE83"), focused ? 3 : 1, 6));
-            if (focused) showMovieDetails(item);
+            view.setTranslationZ(focused ? dp(2) : 0);
+            paintTape(view, focused);
         });
         box.setOnClickListener(view -> {
-            showMovieDetails(item);
-            insertMovie.requestFocusFromTouch();
+            playMenuSound();
+            select.onClick(view);
         });
-        if (!item.poster.isEmpty()) posterLoader.execute(() -> updatePoster(moviePoster(item), poster));
         return box;
+    }
+
+    private ImageView movieArtwork(VaultItem item, boolean thumbnail) {
+        return new ImageView(this) {
+            private final android.graphics.Rect visible = new android.graphics.Rect();
+            private boolean requested;
+
+            @Override protected void onDraw(android.graphics.Canvas canvas) {
+                super.onDraw(canvas);
+                if (requested || isDestroyed() || item.poster.isEmpty() || !getLocalVisibleRect(visible)) return;
+                requested = true;
+                Bitmap cached = posters.get(item.poster);
+                if (cached != null) {
+                    post(() -> { if (isAttachedToWindow()) setImageBitmap(cached); });
+                } else if (thumbnail) {
+                    posterLoader.execute(() -> loadPoster(item.poster, this));
+                } else {
+                    movieCoverLoader.execute(() -> updatePoster(moviePoster(item), this));
+                }
+            }
+        };
+    }
+
+    private void paintTape(View row, boolean focused) {
+        Drawable texture = getDrawable(R.drawable.cinema_spine);
+        if (texture instanceof BitmapDrawable) ((BitmapDrawable) texture).setGravity(Gravity.FILL);
+        GradientDrawable border = surface(new int[]{color("#2825213C"), color("#240B071E")},
+                color(focused ? "#FF67E3" : "#B38D7A"), focused ? 2 : 1, 6);
+        row.setBackground(new LayerDrawable(new Drawable[]{texture, border}));
     }
 
     private void loadPoster(String address, ImageView poster) {
@@ -1812,10 +3254,23 @@ public class MainActivity extends Activity {
     }
 
     private void selectUpdate() {
+        if (BuildConfig.TESTER_BUILD) {
+            showTesterNotes(testerVersionLabel(), BuildConfig.TESTER_RELEASE_NOTES,
+                    "Open System → Check for Update to look for a newer build.");
+            return;
+        }
         if (updateBusy) return;
         if (latestUpdateNotes.isEmpty()) {
             checkUpdates(true);
         } else showUpdateNotes();
+    }
+
+    private void showTesterNotes(String label, String notes, String status) {
+        new AlertDialog.Builder(this)
+                .setTitle(label + " patch notes")
+                .setMessage(notes.isEmpty() ? status : notes + "\n\n" + status)
+                .setPositiveButton("Done", null)
+                .show();
     }
 
     private void showUpdateNotes() {
@@ -1880,6 +3335,7 @@ public class MainActivity extends Activity {
     }
 
     private void checkUpdates(boolean requested) {
+        if (updateBusy) return;
         updateBusy = true;
         updateButton.setText("UPDATES  •  CHECKING…");
         updateLoader.execute(() -> {
@@ -1891,13 +3347,30 @@ public class MainActivity extends Activity {
                     pendingUpdate = release;
                     latestUpdateNotes = notes.toString();
                     finishUpdate("");
-                    if (requested) showUpdateNotes();
+                    if (requested && BuildConfig.TESTER_BUILD) {
+                        if (release == null) {
+                            showTesterNotes(testerVersionLabel(), BuildConfig.TESTER_RELEASE_NOTES,
+                                    "You’re on the latest Tester build.");
+                        } else {
+                            if (canInstallUpdates()) {
+                                showTesterNotes(alphaVersionLabel(release.version), latestUpdateNotes, "Downloading the update…");
+                                downloadUpdate();
+                            } else {
+                                new AlertDialog.Builder(this)
+                                        .setTitle(alphaVersionLabel(release.version) + " patch notes")
+                                        .setMessage(latestUpdateNotes)
+                                        .setNegativeButton("Later", null)
+                                        .setPositiveButton("Install update", (dialog, which) -> installSelectedUpdate())
+                                        .show();
+                            }
+                        }
+                    } else if (requested) showUpdateNotes();
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
                     if (isDestroyed()) return;
                     updateBusy = false;
-                    updateButton.setText("UPDATES  •  RETRY");
+                    updateButton.setText(BuildConfig.TESTER_BUILD ? testerVersionLabel() : "UPDATES  •  RETRY");
                     if (requested) showBanner("Could not check for updates. Select Updates to try again.");
                 });
             }
@@ -1941,6 +3414,10 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 31) flags |= PendingIntent.FLAG_MUTABLE;
         PendingIntent result = PendingIntent.getBroadcast(this, updateSession, callback, flags);
         try (PackageInstaller.Session session = installer.openSession(updateSession)) {
+            if (BuildConfig.TESTER_BUILD && pendingUpdate != null && !getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .edit().putInt(TesterUpdateReceiver.REOPEN_AFTER_UPDATE, pendingUpdate.testerRevision).commit()) {
+                throw new IOException("Could not save the update restart state.");
+            }
             session.commit(result.getIntentSender());
             sessionCommitted = true;
         } catch (IOException | RuntimeException error) {
@@ -1972,11 +3449,14 @@ public class MainActivity extends Activity {
     }
 
     private void finishUpdate(String message) {
+        if (BuildConfig.TESTER_BUILD && !message.isEmpty() && pendingUpdate != null) {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(TesterUpdateReceiver.REOPEN_AFTER_UPDATE).apply();
+        }
         updateBusy = sessionCommitted = installerOpened = false;
         updateSession = -1;
         installConfirmation = null;
-        updateButton.setText(pendingUpdate == null ? "UP TO DATE ✓  v" + BuildConfig.VERSION_NAME
-                : "UPDATE TO v" + pendingUpdate.version);
+        updateButton.setText(BuildConfig.TESTER_BUILD ? testerVersionLabel()
+                : pendingUpdate == null ? "UP TO DATE ✓  v" + BuildConfig.VERSION_NAME : "UPDATE TO v" + pendingUpdate.version);
         if (resumed && guideVisible && !message.isEmpty()) showBanner(message);
     }
 
@@ -2112,6 +3592,32 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static boolean standardHttps(Uri address) {
+        return "https".equalsIgnoreCase(address.getScheme()) && address.getUserInfo() == null
+                && (address.getPort() == -1 || address.getPort() == 443)
+                && address.getHost() != null
+                && address.getHost().matches("[a-zA-Z0-9-]+(?:\\.[a-zA-Z0-9-]+)*\\.[a-zA-Z][a-zA-Z0-9-]*");
+    }
+
+    private Uri preferredPlayback(Uri fallback, boolean live) {
+        if (skipPreferredRelay || !standardHttps(fallback)) return fallback;
+        Creator source = live && tunedChannel != null ? studioFor(tunedChannel)
+                : activeMovie == null ? null : studioById(activeMovie.studioId);
+        if (source == null) return fallback;
+        Uri registered = Uri.parse(source.playlist);
+        if (!standardHttps(registered) || !fallback.getHost().equalsIgnoreCase(registered.getHost())) return fallback;
+        String preferred = source.playbackOrigin;
+        if (!BuildConfig.PLAYBACK_RELAY_ROUTE.isEmpty()) {
+            String[] route = BuildConfig.PLAYBACK_RELAY_ROUTE.split("=", 2);
+            if (route[0].equalsIgnoreCase(registered.getHost())) preferred = "https://" + route[1];
+        }
+        Uri relay = Uri.parse(preferred);
+        if (!standardHttps(relay) || relay.getQuery() != null || relay.getFragment() != null
+                || !(relay.getPath() == null || relay.getPath().isEmpty() || "/".equals(relay.getPath()))
+                || relay.getHost().equalsIgnoreCase(fallback.getHost())) return fallback;
+        return fallback.buildUpon().encodedAuthority(relay.getEncodedAuthority()).build();
+    }
+
     private void startStream(String url, boolean live) {
         renderedFrame = false;
         recentLiveStalls.clear();
@@ -2120,9 +3626,18 @@ public class MainActivity extends Activity {
         video.removeCallbacks(watchdog);
         video.postDelayed(watchdog, 2000);
         video.removeCallbacks(resetPlaybackRetries);
-        MediaItem.Builder media = new MediaItem.Builder().setUri(url).setMimeType(MimeTypes.APPLICATION_M3U8);
+        Uri fallback = Uri.parse(url);
+        Uri input = preferredPlayback(fallback, live);
+        usingPreferredRelay = !input.equals(fallback);
+        if (usingPreferredRelay) android.util.Log.i("ChannelForgePlayback", "Using preferred media relay");
+        String path = input.getPath();
+        if (path != null) path = STUDIO_SLOT_PATH.matcher(path).replaceFirst("");
+        if (path != null && (path.startsWith("/broadcast/") || path.startsWith("/live/") || path.startsWith("/vault/"))) {
+            input = input.buildUpon().appendQueryParameter("viewer", viewerLease).build();
+        }
+        MediaItem.Builder media = new MediaItem.Builder().setUri(input).setMimeType(MimeTypes.APPLICATION_M3U8);
         if (live) {
-            media.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(12000).build());
+            media.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(20000).build());
             player.setMediaItem(media.build());
         } else {
             player.setMediaItem(media.build(), resumePosition);
@@ -2134,17 +3649,27 @@ public class MainActivity extends Activity {
     private void beginTune() {
         ++playGeneration;
         recovering = false;
+        usingPreferredRelay = skipPreferredRelay = false;
         finishRebuffer();
         totalRebufferMs = rebufferCount = 0;
         setBitrateCap(Integer.MAX_VALUE);
         totalRetries = liveRetries = movieRetries = lastErrorCode = lastHttpCode = 0;
+        routeRecoveryStarted = 0;
+        lastHttpResource = null;
+        segmentLoads = segmentErrors = manifestErrors = 0;
+        segmentLoadMs = segmentLoadBytes = slowestSegmentMs = slowestManifestMs = 0;
         resumePosition = 0;
         lastReason = "none";
         tuneStarted = SystemClock.elapsedRealtime();
         firstFrameMs = -1;
+        testerEvent("load");
     }
 
     private void recover(String reason) {
+        recover(reason, false);
+    }
+
+    private void recover(String reason, boolean deadlineExpired) {
         if (guideVisible || ejectingTape || playbackFailed || recovering) return;
         recovering = true;
         finishRebuffer();
@@ -2157,27 +3682,44 @@ public class MainActivity extends Activity {
         lastReason = reason;
         if (recentEvents.size() == 16) recentEvents.removeFirst();
         recentEvents.addLast(System.currentTimeMillis() + " " + reason + " (HTTP " + lastHttpCode + ")");
+        testerEvent("retry");
         if (activeMovie != null && (renderedFrame || player.getCurrentPosition() > 0))
             resumePosition = Math.max(0, player.getCurrentPosition());
-        int attempt = tunedChannel != null ? ++liveRetries : ++movieRetries;
         int generation = ++playGeneration;
+        if (activeMovie != null) clearCassette();
         player.stop();
-        if (attempt > 3) {
-            recovering = false;
-            playbackFailed = true;
-            if (activeMovie != null) clearCassette();
-            showBuffering(reason + ". Press OK to retry or Back for the guide.", false);
+        final Channel channel = tunedChannel;
+        final VaultItem film = activeMovie;
+        if (usingPreferredRelay) {
+            usingPreferredRelay = false;
+            skipPreferredRelay = true;
+            totalRetries++;
+            android.util.Log.i("ChannelForgePlayback", "Preferred relay unavailable; using registered media route");
+            resumeAfterRecovery(channel, film);
+            return;
+        }
+        int attempt = channel != null ? ++liveRetries : ++movieRetries;
+        if (attempt == 1) routeRecoveryStarted = SystemClock.elapsedRealtime();
+        final Creator source = channel == null && film != null && !film.studioId.isEmpty()
+                ? studioById(film.studioId) : channel == null ? currentStudio : studioById(channel.studioId);
+        final String studioId = source != null ? source.id : film != null ? film.studioId : channel != null ? channel.studioId : "";
+        boolean replacementOnly = BuildConfig.TESTER_BUILD && attempt == 4 && !studioId.isEmpty()
+                && (channel != null && !channel.id.isEmpty() || film != null && !film.id.isEmpty());
+        if (attempt > 3 && !replacementOnly) {
+            failRecovery(reason);
             return;
         }
         totalRetries++;
-        showBuffering(reason + ". Reconnecting (" + attempt + "/3)…", true);
-        final Channel channel = tunedChannel;
-        final VaultItem film = activeMovie;
-        final Creator source = channel == null ? currentStudio : studioFor(channel);
-        boolean refreshRoute = attempt > 1 || lastHttpCode == 404 || lastHttpCode == 410;
+        showBuffering(replacementOnly ? "Checking for the Studio’s backup connection…"
+                : reason + ". Reconnecting (" + attempt + "/3)…", true);
+        boolean startupLookup = BuildConfig.TESTER_BUILD && deadlineExpired && channel != null
+                && attempt == 1 && segmentLoads == 0 && !renderedFrame;
+        boolean shortGuide = startupLookup || replacementOnly;
+        boolean refreshRoute = startupLookup || attempt > 1 || lastHttpCode == 404 || lastHttpCode == 410
+                || lastHttpCode == 502 || lastHttpCode == 504;
         video.postDelayed(() -> {
             if (generation != playGeneration || guideVisible || isDestroyed()) return;
-            if (!refreshRoute || source == null) {
+            if (!refreshRoute || (source == null && studioId.isEmpty())) {
                 resumeAfterRecovery(channel, film);
                 return;
             }
@@ -2185,36 +3727,51 @@ public class MainActivity extends Activity {
             Runnable routeDeadline = () -> {
                 if (generation == playGeneration && !guideVisible && !isDestroyed()) {
                     ++playGeneration;
-                    resumeAfterRecovery(channel, film);
+                    if (replacementOnly) failRecovery(reason);
+                    else resumeAfterRecovery(channel, film);
                 }
             };
             video.postDelayed(routeDeadline, 8000);
-            studioLoader.execute(() -> {
+            recoveryLoader.execute(() -> {
                 String updatedUrl = "";
                 Channel fresh = null;
                 try {
                     Creator origin = source;
                     try {
                         for (Creator entry : parseCreators(new JSONObject(get(BuildConfig.DIRECTORY_URL)))) {
-                            if (source.id.equals(entry.id)) { origin = entry; break; }
+                            if (studioId.equals(entry.id)) { origin = entry; break; }
                         }
                     } catch (Exception unavailable) {
                         android.util.Log.w("ChannelForgePlayback", "Directory unavailable during route refresh");
                     }
                     if (channel != null && origin != null && !origin.channelStatus.isEmpty()) {
-                        String address = Uri.parse(origin.channelStatus).buildUpon().appendQueryParameter("guide", "extended").build().toString();
-                        for (Channel row : parseOnlineChannels(get(address), address)) {
-                            if ((!channel.id.isEmpty() && channel.id.equals(row.id)) || channel.url.equals(row.url)) {
-                                fresh = row;
-                                break;
+                        Uri status = Uri.parse(origin.channelStatus);
+                        Uri previous = Uri.parse(channel.guideUrl).buildUpon().clearQuery().fragment(null).build();
+                        // A first startup timeout only needs a short guide from a replacement origin.
+                        if (!shortGuide || !status.buildUpon().clearQuery().fragment(null).build().equals(previous)) {
+                            String address = status.buildUpon().appendQueryParameter("guide", shortGuide ? "brief" : "extended").build().toString();
+                            for (Channel row : parseOnlineChannels(get(address), address)) {
+                                if ((!channel.id.isEmpty() && channel.id.equals(row.id)) || channel.url.equals(row.url)) {
+                                    row.guideUrl = status.buildUpon().appendQueryParameter("guide", "extended").build().toString();
+                                    fresh = row;
+                                    break;
+                                }
                             }
                         }
                     } else if (film != null && origin != null && !origin.vault.isEmpty()) {
-                        String address = Uri.parse(origin.vault).buildUpon().appendQueryParameter("q", film.title)
-                                .appendQueryParameter("limit", "50").build().toString();
-                        for (VaultItem row : parseVault(new JSONObject(get(address)))) {
-                            if ((!film.id.isEmpty() && film.id.equals(row.id)) || row.releaseKey().equals(film.releaseKey())) {
-                                updatedUrl = row.url; break;
+                        Uri vault = Uri.parse(origin.vault);
+                        String path = vault.getPath(), suffix = "/api/public/vault";
+                        if ("https".equals(vault.getScheme()) && path != null && path.endsWith(suffix)
+                                && film.id.matches("[a-f0-9]{24}")) {
+                            updatedUrl = vault.buildUpon().path(path.substring(0, path.length() - suffix.length())
+                                    + "/vault/" + film.id + ".m3u8").clearQuery().fragment(null).build().toString();
+                        } else {
+                            String address = vault.buildUpon().appendQueryParameter("q", film.title)
+                                    .appendQueryParameter("limit", "50").build().toString();
+                            for (VaultItem row : parseVault(new JSONObject(get(address)))) {
+                                if ((!film.id.isEmpty() && film.id.equals(row.id)) || row.releaseKey().equals(film.releaseKey())) {
+                                    updatedUrl = row.url; break;
+                                }
                             }
                         }
                     }
@@ -2226,11 +3783,16 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     video.removeCallbacks(routeDeadline);
                     if (generation != playGeneration || guideVisible || isDestroyed()) return;
+                    if (replacementOnly && replacement == null && (movieUrl.isEmpty() || film == null || movieUrl.equals(film.url))) {
+                        failRecovery(reason);
+                        return;
+                    }
                     if (channel != null) {
                         if (replacement != null) {
                             channel.url = replacement.url;
                             channel.continuousUrl = replacement.continuousUrl;
-                            channel.programs = replacement.programs;
+                            channel.fireTvUrl = replacement.fireTvUrl;
+                            if (!shortGuide || channel.programs == null) channel.programs = replacement.programs;
                             channel.guideUrl = replacement.guideUrl;
                             channel.state = replacement.state;
                             channel.airUntil = replacement.airUntil;
@@ -2241,7 +3803,13 @@ public class MainActivity extends Activity {
                     resumeAfterRecovery(channel, film);
                 });
             });
-        }, 750L << (attempt - 1));
+        }, replacementOnly ? Math.max(750, 30_000 - (SystemClock.elapsedRealtime() - routeRecoveryStarted)) : 750L << (attempt - 1));
+    }
+
+    private void failRecovery(String reason) {
+        recovering = false;
+        playbackFailed = true;
+        showBuffering(phoneLayout ? reason + "." : reason + ". Press OK to retry or Back for the guide.", false);
     }
 
     private void resumeAfterRecovery(Channel channel, VaultItem film) {
@@ -2256,17 +3824,26 @@ public class MainActivity extends Activity {
     }
 
     private Creator studioFor(Channel channel) {
+        return studioById(channel.studioId);
+    }
+
+    private Creator studioById(String id) {
         for (Creator entry : creators) {
-            if (channel.studioId.equals(entry.id)) return entry;
+            if (id.equals(entry.id)) return entry;
         }
         return null;
     }
 
     private void play(int index) {
         if (channels.isEmpty()) return;
-        channelIndex = (index + channels.size()) % channels.size();
+        play(channels.get((index + channels.size()) % channels.size()));
+    }
+
+    private void play(Channel channel) {
+        int index = channels.indexOf(channel);
+        if (index >= 0) channelIndex = index;
         beginTune();
-        tunedChannel = channels.get(channelIndex);
+        tunedChannel = channel;
         tunedProgramEnd = 0;
         upcomingDue = upcomingShown = false;
         transitionAt = 0;
@@ -2276,6 +3853,7 @@ public class MainActivity extends Activity {
         activeMovie = null;
         guide.setVisibility(View.GONE);
         guideVisible = false;
+        if (touchGuideButton != null) touchGuideButton.setVisibility(View.VISIBLE);
         video.setVisibility(View.VISIBLE);
         video.hideController();
         video.setUseController(false);
@@ -2311,9 +3889,17 @@ public class MainActivity extends Activity {
         showBuffering("Connecting to the studio…", true);
         waitForPlayback();
         startStream(movie.url, false);
-        animateCassette(true, movie, () -> {
-            if (!ejectingTape && activeMovie == movie) player.play();
-        });
+        int generation = playGeneration;
+        Runnable startMovie = () -> {
+            if (playGeneration == generation && !ejectingTape && activeMovie == movie) player.play();
+        };
+        animateCassette(true, movie, startMovie);
+        // Playback must not depend on the animation reporting that it finished.
+        video.postDelayed(() -> {
+            if (playGeneration != generation || ejectingTape || activeMovie != movie) return;
+            clearCassette();
+            if (!player.getPlayWhenReady()) startMovie.run();
+        }, 3500);
         showBanner("REWIND CINEMA   •   " + movie.title);
     }
     private String displayNumber(Channel channel, int index) {
@@ -2348,6 +3934,8 @@ public class MainActivity extends Activity {
         }
         bufferLabel.setText(message + (streamTitle.isEmpty() ? "" : "\n" + streamTitle));
         bufferSpinner.setVisibility(loading ? View.VISIBLE : View.GONE);
+        if (touchRetry != null) touchRetry.setVisibility(!loading && playbackFailed ? View.VISIBLE : View.GONE);
+        if (touchDebugger != null) touchDebugger.setVisibility(!loading && playbackFailed ? View.VISIBLE : View.GONE);
         bufferPanel.setVisibility(View.VISIBLE);
     }
 
@@ -2370,18 +3958,23 @@ public class MainActivity extends Activity {
 
     private final Runnable hideBanner = () -> bannerPanel.setVisibility(View.GONE);
 
+    private void retrySelection() {
+        if (!playbackFailed) return;
+        if (tunedChannel != null) play(tunedChannel);
+        else if (activeMovie != null) {
+            movieRetries = 0;
+            playbackFailed = false;
+            recover("Retrying movie");
+        }
+    }
+
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         int key = event.getKeyCode();
         boolean select = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER;
         if (!guideVisible && select && (playbackFailed || consumingRetryKey)) {
             if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0 && playbackFailed) {
                 consumingRetryKey = true;
-                if (tunedChannel != null) play(channelIndex);
-                else if (activeMovie != null) {
-                    movieRetries = 0;
-                    playbackFailed = false;
-                    recover("Retrying movie");
-                }
+                retrySelection();
             } else if (event.getAction() == KeyEvent.ACTION_UP) consumingRetryKey = false;
             return true;
         }
@@ -2393,21 +3986,139 @@ public class MainActivity extends Activity {
         return super.dispatchKeyEvent(event);
     }
 
+    private boolean testerConsented() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(TESTER_CONSENT, false);
+    }
+
+    private void testerEvent(String kind) {
+        if (!BuildConfig.TESTER_BUILD || !testerConsented()) return;
+        try {
+            if (testerTimeline.size() == 40) testerTimeline.removeFirst();
+            testerTimeline.addLast(new JSONObject().put("kind", kind).put("ms", SystemClock.elapsedRealtime()));
+            ((TesterApplication) getApplication()).rememberTimeline(new JSONArray(testerTimeline));
+        } catch (JSONException invalid) { throw new IllegalStateException(invalid); }
+    }
+
+    private void showTesterTools() {
+        if (!testerConsented()) return;
+        TesterApplication tester = (TesterApplication) getApplication();
+        String current = tester.automaticReports() ? "Enabled" : "Off";
+        new AlertDialog.Builder(this).setTitle("Developer").setItems(
+                new String[]{"Review playback report", "Review saved crash report", "Automatic crash reports · " + current, "Stop testing"},
+                (dialog, selection) -> {
+                    if (selection == 0) showTesterReport();
+                    else if (selection == 1) showSavedCrash(tester);
+                    else if (selection == 2) new AlertDialog.Builder(this).setTitle("Automatic crash reports")
+                            .setMessage("After an app crash, send its error type, build, device model, and recent playback events when you reopen ChannelForge. You can turn this off here.")
+                            .setNegativeButton("Close", null)
+                            .setPositiveButton(tester.automaticReports() ? "Turn off" : "Enable",
+                                    (box, button) -> tester.setAutomaticReports(!tester.automaticReports())).show();
+                    else {
+                        tester.setAutomaticReports(false);
+                        tester.clearSavedCrash();
+                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(TESTER_CONSENT).apply();
+                        testerTimeline.clear();
+                        finish();
+                    }
+                }).setNegativeButton("Close", null).show();
+    }
+
+    private void showSavedCrash(TesterApplication tester) {
+        String report = tester.savedCrash();
+        if (report == null) {
+            new AlertDialog.Builder(this).setTitle("Crash reports")
+                    .setMessage("There is no saved app crash report. Send a playback report for a channel that won’t load.")
+                    .setNegativeButton("Close", null).setPositiveButton("Playback report", (dialog, which) -> showTesterReport())
+                    .show();
+            return;
+        }
+        AlertDialog review = new AlertDialog.Builder(this).setTitle("Saved crash report").setMessage(report)
+                .setNegativeButton("Close", null).setPositiveButton("Send crash report", null).show();
+        Button send = review.getButton(AlertDialog.BUTTON_POSITIVE);
+        send.setOnClickListener(view -> deliverTesterReport(report, review, send, () -> tester.sendSavedCrash(report)));
+    }
+
+    private JSONObject snapshotForSharing() throws JSONException {
+        JSONObject snapshot = diagnosticSnapshot();
+        JSONObject shared = new JSONObject();
+        for (String key : ("app engine sdk model trace_id directoryCached studioCount staleGuides firstFrameMs "
+                + "bufferMs positionMs playing bandwidthEstimateBps retries temporaryBitrateCapBps "
+                + "postStartRebuffers postStartRebufferMs playerErrorCode httpError http_resource build_revision width height "
+                + "videoBitrateBps videoMime audioMime audioChannels renderedFrames droppedFrames "
+                + "delivery_route segment_loads segment_errors manifest_errors slowest_segment_ms slowest_manifest_ms segment_rate_bps").split(" ")) {
+            if (snapshot.has(key)) shared.put(key, snapshot.get(key));
+        }
+        shared.put("platform", TesterApplication.platform())
+                .put("kind", activeMovie != null ? "movie" : tunedChannel != null ? "live" : JSONObject.NULL)
+                .put("timeline", new JSONArray(testerTimeline));
+        return shared;
+    }
+
+    private void showTesterReport() {
+        try {
+            JSONObject shared = guideVisible && lastPlaybackReport != null ? lastPlaybackReport : snapshotForSharing();
+            AlertDialog.Builder tools = new AlertDialog.Builder(this).setTitle("Developer")
+                    .setMessage(TESTER_NOTICE + "\n\n" + shared.toString(2))
+                    .setNegativeButton("Close", null);
+            if (!BuildConfig.TESTER_REPORT_URL.isEmpty()) {
+                tools.setPositiveButton("Send report", null);
+            }
+            AlertDialog review = tools.show();
+            Button send = review.getButton(AlertDialog.BUTTON_POSITIVE);
+            if (send != null) send.setOnClickListener(view -> sendTesterReport(shared.toString(), review, send));
+        } catch (JSONException invalid) { throw new IllegalStateException(invalid); }
+    }
+
+    private void sendTesterReport(String report, AlertDialog dialog, Button button) {
+        deliverTesterReport(report, dialog, button, () -> TesterApplication.post(report.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private interface ReportSender { String send(); }
+
+    private void deliverTesterReport(String report, AlertDialog dialog, Button button, ReportSender sender) {
+        if (!testerConsented()) return;
+        button.setEnabled(false);
+        button.setText("Sending…");
+        updateLoader.execute(() -> {
+            String receipt = sender.send();
+            String result = receipt == null ? "Could not send the report. The testing link may have expired."
+                    : "Report sent. ID " + receipt;
+            runOnUiThread(() -> {
+                if (dialog.isShowing()) {
+                    dialog.setMessage(result + "\n\n" + report);
+                    button.setText(receipt == null ? "Retry report" : "Sent ✓");
+                    button.setEnabled(receipt == null);
+                    if (receipt != null) dialog.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus();
+                } else Toast.makeText(this, result, Toast.LENGTH_LONG).show();
+            });
+        });
+    }
+
     private JSONObject diagnosticSnapshot() {
         JSONObject result = new JSONObject();
         try {
-            result.put("app", BuildConfig.VERSION_NAME).put("engine", "Media3 ExoPlayer")
+            result.put("app", BuildConfig.VERSION_NAME).put("engine", "Media3 ExoPlayer").put("trace_id", viewerLease)
                     .put("sdk", Build.VERSION.SDK_INT).put("model", Build.MODEL)
                     .put("directoryLastChecked", directoryChecked).put("directoryCached", directoryStale)
                     .put("studioCount", creators.size()).put("staleGuides", staleGuides.size())
                     .put("firstFrameMs", firstFrameMs).put("bufferMs", player.getTotalBufferedDuration())
+                    .put("positionMs", player.getCurrentPosition()).put("playing", player.isPlaying())
                     .put("bandwidthEstimateBps", bandwidth.getBitrateEstimate()).put("retries", totalRetries)
                     .put("temporaryBitrateCapBps", temporaryBitrateCap == Integer.MAX_VALUE ? -1 : temporaryBitrateCap)
                     .put("postStartRebuffers", rebufferCount)
                     .put("postStartRebufferMs", totalRebufferMs + (rebufferStarted == 0 ? 0 : SystemClock.elapsedRealtime() - rebufferStarted))
                     .put("error", lastReason).put("playerErrorCode", lastErrorCode).put("httpError", lastHttpCode)
+                    .put("http_resource", lastHttpResource).put("build_revision", BuildConfig.VERSION_CODE)
+                    .put("segment_loads", segmentLoads).put("segment_errors", segmentErrors)
+                    .put("manifest_errors", manifestErrors).put("slowest_segment_ms", slowestSegmentMs)
+                    .put("slowest_manifest_ms", slowestManifestMs)
+                    .put("segment_rate_bps", segmentLoadMs == 0 ? -1 : Math.round(8000.0 * segmentLoadBytes / segmentLoadMs))
                     .put("decoder", decoderName).put("processCpuPercentOfOneCore", cpuPercent)
                     .put("pssKiB", android.os.Debug.getPss()).put("events", new JSONArray(recentEvents));
+            if (tunedChannel != null || activeMovie != null) {
+                String route = usingPreferredRelay ? "preferred-relay" : skipPreferredRelay ? "registered-fallback" : "registered-route";
+                result.put("delivery_route", route);
+            }
             Creator source = tunedChannel == null ? currentStudio : studioFor(tunedChannel);
             if (source != null) result.put("studioState", source.state).put("studioLastHeartbeat", source.lastHeartbeat);
             if (tunedChannel != null) {
@@ -2455,7 +4166,10 @@ public class MainActivity extends Activity {
 
     @Override public boolean onKeyDown(int key, KeyEvent event) {
         if (key == KeyEvent.KEYCODE_MENU) {
-            if (event.getRepeatCount() == 0) showDiagnostics();
+            if (event.getRepeatCount() == 0) {
+                if (BuildConfig.TESTER_BUILD) showTesterTools();
+                else showDiagnostics();
+            }
             return true;
         }
         if (!guideVisible) {
@@ -2484,15 +4198,25 @@ public class MainActivity extends Activity {
         return super.onKeyDown(key, event);
     }
 
+    private void updatePlaybackScreenAwake() {
+        if (!phoneLayout || video == null || player == null) return;
+        int state = player.getPlaybackState();
+        video.setKeepScreenOn(resumed && player.getPlayWhenReady()
+                && player.getPlaybackSuppressionReason() == Player.PLAYBACK_SUPPRESSION_REASON_NONE
+                && (state == Player.STATE_BUFFERING || state == Player.STATE_READY));
+    }
+
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        updatePlaybackScreenAwake();
         if (guide != null) loadDirectory();
         commitUpdate();
         openInstallConfirmation();
     }
     @Override protected void onPause() {
         resumed = false;
+        updatePlaybackScreenAwake();
         super.onPause();
     }
     @Override protected void onStop() {
@@ -2504,9 +4228,19 @@ public class MainActivity extends Activity {
         return Settings.Global.getFloat(getContentResolver(), Settings.Global.ANIMATOR_DURATION_SCALE, 1f) != 0f;
     }
 
+    private void focusHomeNavigation() {
+        TextView home = navButtons.get(Page.HOME);
+        if (home != null) home.requestFocusFromTouch();
+    }
+
     @Override public void onBackPressed() {
         if (!guideVisible && activeMovie != null) ejectMovie();
         else if (!guideVisible) returnToGuide();
+        else if (phonePortrait && !menuCollapsed) setMenuCollapsed(true);
+        else if (activePage != Page.HOME) {
+            openPage(Page.HOME);
+            if (!phoneLayout) focusHomeNavigation();
+        }
         else super.onBackPressed();
     }
 
@@ -2581,6 +4315,7 @@ public class MainActivity extends Activity {
 
     private void ejectMovie() {
         if (ejectingTape || activeMovie == null) return;
+        rememberMovie();
         ejectingTape = true;
         ++playGeneration;
         clearPlaybackDeadline();
@@ -2597,6 +4332,10 @@ public class MainActivity extends Activity {
     private void returnToGuide() {
         boolean refreshAfterStall = !guideVisible && resumed
                 && (playbackFailed || playbackWaiting || liveRetries > 0 || movieRetries > 0);
+        if (BuildConfig.TESTER_BUILD && testerConsented() && (tunedChannel != null || activeMovie != null)) {
+            try { lastPlaybackReport = snapshotForSharing(); }
+            catch (JSONException ignored) { lastPlaybackReport = null; }
+        }
         ++playGeneration;
         recovering = false;
         finishRebuffer();
@@ -2620,6 +4359,7 @@ public class MainActivity extends Activity {
         video.setVisibility(View.GONE);
         guideVisible = true;
         guide.setVisibility(View.VISIBLE);
+        if (touchGuideButton != null) touchGuideButton.setVisibility(View.GONE);
         bannerPanel.setVisibility(View.GONE);
         bufferPanel.setVisibility(View.GONE);
         streamTitle = "";
@@ -2628,6 +4368,10 @@ public class MainActivity extends Activity {
         if (refreshAfterStall) loadDirectory();
     }
     @Override protected void onDestroy() {
+        if (menuSounds != null) {
+            menuSounds.release();
+            menuSoundReady = false;
+        }
         unregisterReceiver(updateResult);
         updateLoader.shutdownNow();
         if (updateSession >= 0 && !installerOpened) abandonUpdate(updateSession);
@@ -2636,7 +4380,10 @@ public class MainActivity extends Activity {
             guide.removeCallbacks(directoryRetry);
         }
         posterLoader.shutdownNow();
+        movieCatalogLoader.shutdownNow();
+        movieCoverLoader.shutdownNow();
         studioLoader.shutdownNow();
+        recoveryLoader.shutdownNow();
         clearPlaybackDeadline();
         video.setPlayer(null);
         player.release();
@@ -2647,7 +4394,10 @@ public class MainActivity extends Activity {
         final String name, description, playlist, vault, channelStatus;
         final boolean cinemaSupported;
         String id, state = "broadcasting";
+        String playbackOrigin = "";
         long lastHeartbeat;
+        long updatedAt;
+        List<Channel> hubChannels;
         Creator(String name, String description, String playlist, String vault, String channelStatus, boolean cinemaSupported) {
             this.name = name;
             this.description = description;
@@ -2661,14 +4411,27 @@ public class MainActivity extends Activity {
     private static class Channel {
         final String name;
         String url, id = "", studioId = "", state = "broadcasting";
-        String number = "", logo = "", guideUrl = "", studio = "", continuousUrl = "";
+        String number = "", logo = "", guideUrl = "", studio = "", continuousUrl = "", fireTvUrl = "";
+        String rating = "";
+        int ratingRank = 10;
         long airUntil;
         JSONArray programs;
         Channel(String name, String url) { this.name = name; this.url = url; }
+
+        String liveUrl(int retries, boolean phone) {
+            if (retries >= 2) {
+                if (retries == 2 && !fireTvUrl.isEmpty() && !continuousUrl.isEmpty()
+                        && !fireTvUrl.equals(continuousUrl)) return continuousUrl;
+                if (!url.isEmpty()) return url;
+            }
+            if (phone && !continuousUrl.isEmpty() && (retries == 0 || fireTvUrl.isEmpty())) return continuousUrl;
+            if (!fireTvUrl.isEmpty()) return fireTvUrl;
+            return continuousUrl.isEmpty() ? url : continuousUrl;
+        }
     }
     private static class VaultItem {
         final String title, year, summary, poster, fullPoster;
-        String url, id = "";
+        String url, id = "", studioId = "";
         VaultItem(String title, String year, String summary, String poster, String fullPoster, String url) {
             this.title = title;
             this.year = year;

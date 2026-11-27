@@ -1,0 +1,54 @@
+# Private pilot for one explicitly selected Creator origin on the same host.
+worker_processes 1;
+pid logs/nginx.pid;
+error_log logs/error.log warn;
+
+events { worker_connections 256; }
+
+http {
+    access_log off;
+    client_body_temp_path client_body;
+    proxy_temp_path proxy_temp;
+    fastcgi_temp_path fastcgi_temp;
+    uwsgi_temp_path uwsgi_temp;
+    scgi_temp_path scgi_temp;
+    proxy_cache_path media keys_zone=segments:8m max_size=512m inactive=10m use_temp_path=off;
+
+    upstream creator_media {
+        server 127.0.0.1:__ORIGIN_PORT__;
+        keepalive 16;
+    }
+
+    server {
+        listen 127.0.0.1:__LISTENER_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $server_addr:$server_port;
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
+        proxy_set_header Range "";
+        proxy_set_header If-Range "";
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 20s;
+
+        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+
+        # Manifest requests see the latest schedule and resume position.
+        location ~ ^/(broadcast|live|vault|ffmpeg-stream)/[a-zA-Z0-9_/-]+\.m3u8$ {
+            proxy_pass http://creator_media;
+        }
+
+        # A segment's encoder session and file name identify the same bytes for each viewer.
+        location ~ "^/ffmpeg-stream/[a-f0-9]{20}/segment((economy|balanced|hd)_)?[0-9]+\.ts$" {
+            proxy_pass http://creator_media;
+            proxy_cache segments;
+            proxy_cache_lock on;
+            proxy_cache_lock_timeout 6s;
+            proxy_cache_lock_age 6s;
+            proxy_cache_valid 200 1m;
+            proxy_ignore_headers Cache-Control Expires;
+        }
+
+        location / { return 404; }
+    }
+}

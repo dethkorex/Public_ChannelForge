@@ -6,6 +6,8 @@ sub itemChanged()
   if state = "offline" then label = "Studio reports this channel is offline"
   if state = "reconnecting" then label = "Reconnecting to the studio"
   if state = "overloaded" then label = "Studio is busy"
+  rating = m.top.itemContent.channelRating
+  if rating <> invalid and rating <> "" then label = rating + "  •  " + label
   m.top.findNode("now").text = label
 end sub
 sub focusChanged()

@@ -90,10 +90,11 @@ EOF
 chmod +x "$BIN_DIR/channelforge-tv"
 cat > "$DESKTOP_DIR/public-channelforge.desktop" <<EOF
 [Desktop Entry]
-Name=ChannelForge Creator
+Name=ChannelForge Studio
 Comment=Build personal channels from local folders, Plex, or Jellyfin
 Exec="$BIN_DIR/public-channelforge"
-Icon=$APP_DIR/assets/channel-forge-creator.png
+Icon=$APP_DIR/assets/channel-forge-creator-icon.png
+StartupWMClass=public-channelforge
 Terminal=false
 Type=Application
 Categories=AudioVideo;Utility;
@@ -103,7 +104,8 @@ cat > "$DESKTOP_DIR/channelforge-tv.desktop" <<EOF
 Name=ChannelForge TV
 Comment=Watch public creator channels and Rewind Cinema
 Exec="$BIN_DIR/channelforge-tv"
-Icon=$APP_DIR/assets/channel-forge-tv.png
+Icon=$APP_DIR/assets/channel-forge-tv-icon.png
+StartupWMClass=channelforge-tv
 Terminal=false
 Type=Application
 Categories=AudioVideo;Video;

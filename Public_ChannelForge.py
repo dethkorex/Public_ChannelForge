@@ -18,9 +18,11 @@ import os
 import queue
 import re
 import secrets
+import select
 import shutil
 import socket
 import socketserver
+import ssl
 import subprocess
 import sys
 import threading
@@ -31,10 +33,12 @@ import urllib.parse
 import urllib.request
 import webbrowser
 import zlib
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import NamedTuple
 from xml.etree import ElementTree as ET
 
 from linux_runtime import apply_linux_update, can_apply_linux_update, restart_linux_app, linux_install_command, linux_release_asset, start_webview
@@ -43,18 +47,38 @@ from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_windows_setup, windows_setup_asset, windows_update_cache
 
 APP_NAME = "Public_ChannelForge"
-VERSION = "4.0.0"
+TESTER_CONFIG = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets/tester-config.json"
+TESTER_BUILD = TESTER_CONFIG.is_file()
+APP_TITLE = "ChannelForge Studio Tester" if TESTER_BUILD else "ChannelForge Studio"
+VERSION = "4.1.0"
+if TESTER_BUILD:
+    VERSION = json.loads(TESTER_CONFIG.read_text(encoding="utf-8")).get("version", VERSION)
 DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
-DEFAULT_PORT = 8787
-DEFAULT_PUBLIC_MEDIA_PORT = 8790
-RELAY_HOST_KEY = "localhost.run ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9"
+DEFAULT_PORT = 18787 if TESTER_BUILD else 8787
+DEFAULT_PUBLIC_MEDIA_PORT = 18790 if TESTER_BUILD else 8790
+LEGACY_RELAY_HOST_KEY = "localhost.run ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVqOuSMnyeGDVO1lG6EaG5In/dXABCchhmHKkuRU2s9"
 RELAY_INSTANCE = secrets.token_hex(20)
+RELAY_MEDIA_SAMPLE = secrets.token_bytes(512 * 1024)
+RELAY_MEDIA_CHALLENGES: dict[str, int] = {}
 BROADCAST_ROUTE = re.compile(r"/broadcast/([a-zA-Z0-9_-]+)/(?:([a-f0-9]{24})/(economy|balanced|hd)|(master|firetv))\.m3u8")
+LIVE_VIEWER_ID = re.compile(r"[a-f0-9]{32}")
+CHANNEL_RATING_LEVELS = {
+    "TV-Y": 1, "TV-Y7": 2, "TV-Y7-FV": 2, "G": 3, "TV-G": 3, "PG": 4, "TV-PG": 4,
+    "PG-13": 5, "TV-14": 6, "R": 7, "TV-MA": 8, "NC-17": 9,
+}
+LIVE_VIEWER_TTL = 25
+LIVE_VIEWER_GRACE = 15
+LIVE_LEGACY_IDLE = 45
+STUDIO_START = time.monotonic()
+STUDIO_TRAFFIC = {}
+STUDIO_TRAFFIC_LOCK = threading.Lock()
+STREAM_TRACES = deque(maxlen=128)
 LIVE_PLAYOUT = {}
 EXPORT_CHANNEL_IDS = None
 DEFAULT_DIRECTORY_URL = "https://channelforge-directory.fresh-anorak.workers.dev"
 OLD_DIRECTORY_URL = "https://directory.channelforge.tv"
+RELAY_SLOT_PATH = r"/studio/[a-f0-9]{16}"
 MEDIA_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".flv"}
 POSTER_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 
@@ -65,9 +89,9 @@ def app_dir() -> Path:
         return Path(override).expanduser().resolve()
     if sys.platform == "win32":
         root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        return root / APP_NAME
+        return root / ("ChannelForge-Studio-Tester" if TESTER_BUILD else APP_NAME)
     root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return root / "public-channelforge"
+    return root / ("ChannelForge-Studio-Tester" if TESTER_BUILD else "public-channelforge")
 
 
 DATA_DIR = app_dir()
@@ -81,7 +105,7 @@ ASSETS_DIR = DATA_DIR / "assets"
 BACKUP_DIR = DATA_DIR / "backups"
 POSTER_CACHE_DIR = DATA_DIR / "poster-cache"
 WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "web"
-CREATOR_ICON = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets" / "channel-forge-creator.png"
+CREATOR_ICON = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets" / "channel-forge-creator-icon.png"
 LOCK = threading.RLock()
 # Bound the lock pool while allowing different channels to start in parallel.
 ENCODER_START_LOCKS = tuple(threading.Lock() for _ in range(32))
@@ -120,15 +144,35 @@ LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
 AUDIO_SELECTION_CACHE: dict[str, tuple[int, bool]] = {}
 ENCODER_FILE = r"(?:index(?:_(?:economy|balanced|hd))?\.m3u8|segment(?:(?:economy|balanced|hd)_)?\d+\.ts)"
 DEINTERLACE_VIDEO = "bwdif=mode=send_frame:parity=auto:deint=interlaced"
-LIVE_HD_SCALE = "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
 AAC_FORMAT = ["-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-ar", "48000", "-b:a", "64k"]
 PLEX_RESOURCE_CACHE: dict[str, object] = {"expires": 0.0, "servers": {}}
 STREAM_DIR = DATA_DIR / "streams"
 TUNNEL_LOCK = threading.RLock()
-TUNNEL_PROCESS: subprocess.Popen | None = None
 TUNNEL_URL = ""
-TUNNEL_URLS: queue.Queue[str] = queue.Queue()
+LEGACY_RELAY_PROCESS: subprocess.Popen | None = None
+LEGACY_RELAY_ORIGIN = ""
 PUBLISH_LOCK = threading.RLock()
+SYNCED_CHANNEL_NUMBERS = None
+
+
+class CommunityRelayProfile(NamedTuple):
+    origin: str
+    ssh_host: str
+    ssh_user: str
+    ssh_port: int
+    remote_port: int
+    host_key: str
+    funnel_host: str = ""
+    funnel_port: int = 8443
+
+
+class CommunityRelayConnection(NamedTuple):
+    profile: CommunityRelayProfile
+    local_port: int
+    process: subprocess.Popen
+
+
+COMMUNITY_RELAY: CommunityRelayConnection | None = None
 SHUTTING_DOWN = threading.Event()
 PUBLISH_CHANGED = threading.Event()
 SHARING_STATUS = "idle"
@@ -315,6 +359,8 @@ def apply_creator_update(result, shutdown):
             return
         def restart():
             stop_public_tunnel()
+            stop_legacy_relay()
+            set_community_relay(None)
             stop_ffmpeg_sessions()
             restart_linux_app()
         threading.Timer(1.5, restart).start()
@@ -363,6 +409,8 @@ def config(public: bool = False) -> dict:
         "port": max(1024, min(65535, int(value.get("port", DEFAULT_PORT)))),
         "bind_host": str(value.get("bind_host", HOST)).strip() or HOST,
         "public_url": str(value.get("public_url", "")).strip().rstrip("/"),
+        "community_relay_origin": str(value.get("community_relay_origin", "")).strip().rstrip("/"),
+        "managed_relay": value.get("managed_relay") is True,
         "public_tunnel": bool(value.get("public_tunnel", False)),
         "plex_profile": value.get("plex_profile", {}) if isinstance(value.get("plex_profile", {}), dict) else {},
         "client_identifier": str(value.get("client_identifier", "")) or secrets.token_hex(16),
@@ -372,7 +420,7 @@ def config(public: bool = False) -> dict:
         "creator_key": "" if legacy_directory else str(value.get("creator_key", "")),
         "creator_profile": value.get("creator_profile", {}) if isinstance(value.get("creator_profile", {}), dict) else {},
         "pending_creator_profile": value.get("pending_creator_profile", {}) if isinstance(value.get("pending_creator_profile", {}), dict) else {},
-        "auto_publish_channels": bool(value.get("auto_publish_channels", True)),
+        "auto_publish_channels": bool(value.get("auto_publish_channels", not TESTER_BUILD)),
     }
     if public:
         result["jellyfin_connections"] = jellyfin_connections(public=True)
@@ -381,8 +429,12 @@ def config(public: bool = False) -> dict:
         result["token_saved"] = bool(value.get("plex_token"))
         result["creator_published"] = bool(result["creator_id"] and result["creator_key"])
         result["creator_key"] = ""
-        result["tunnel_active"] = bool(TUNNEL_URL and (TUNNEL_PROCESS is None or TUNNEL_PROCESS.poll() is None))
+        community = COMMUNITY_RELAY
+        result["community_relay_active"] = bool(community and community.profile.origin == result["public_url"]
+                                               and community.process.poll() is None)
+        result["tunnel_active"] = result["community_relay_active"] or bool(TUNNEL_URL or LEGACY_RELAY_ORIGIN)
         result["sharing_status"] = SHARING_STATUS
+        result["legacy_relay"] = is_legacy_relay(result["public_url"])
         result["directory_heartbeat"] = HEARTBEAT_STATUS.copy()
         result["movie_scan"] = MOVIE_SCAN_STATUS
         result.pop("client_identifier", None)
@@ -438,7 +490,7 @@ def delete_local_library(library_id: str) -> None:
     atomic_json(CONFIG_FILE, raw)
 
 
-def directory_request(method: str, path: str, payload: dict | None = None, key: str = "") -> dict:
+def directory_request(method: str, path: str, payload: dict | None = None, key: str = "", *, timeout=20) -> dict:
     settings = config()
     base = settings["directory_url"]
     parsed = urllib.parse.urlsplit(base)
@@ -450,7 +502,7 @@ def directory_request(method: str, path: str, payload: dict | None = None, key: 
     if key:
         request.add_unredirected_header("Authorization", f"Bearer {key}")
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             data = response.read(65537)
             if len(data) > 65536:
                 raise ValueError("Directory response exceeded the limit.")
@@ -484,11 +536,34 @@ def registration_key(directory_url: str) -> str:
         return key["secret"]
 
 
-def publish_creator(payload: dict) -> dict:
+def channel_number_key(value: str) -> str:
+    return re.sub(r"\.0+(?=[0-9])", ".", re.sub(r"^0+(?=[0-9])", "", value.strip().lower()), count=1)
+
+
+def public_channel_numbers(values: list[dict]) -> list[dict]:
+    return [{"id": channel["id"], "number": channel["number"]} for channel in values]
+
+
+def sync_public_channel_numbers(settings: dict) -> None:
+    global SYNCED_CHANNEL_NUMBERS
+    if (settings.get("directory_url") != DEFAULT_DIRECTORY_URL or not settings.get("auto_publish_channels")
+            or not settings.get("creator_id") or not settings.get("creator_key")):
+        return
+    numbers = public_channel_numbers(channels())
+    signature = (settings["creator_id"], tuple(sorted((row["id"], row["number"]) for row in numbers)))
+    if signature != SYNCED_CHANNEL_NUMBERS:
+        path = f'/v1/creators/{settings["creator_id"]}/channel-numbers'
+        directory_request("POST", path, {"mode": "sync", "channels": numbers}, settings["creator_key"], timeout=5)
+        SYNCED_CHANNEL_NUMBERS = signature
+
+
+def publish_creator(payload: dict, *, origin: str | None = None, community_relay_origin: str | None = None,
+                    preserve_pending: bool = False) -> dict:
     settings = config()
-    public_url = settings["public_url"]
+    public_url = origin if origin is not None else settings["public_url"]
     origin = urllib.parse.urlsplit(public_url)
-    if origin.scheme != "https" or not origin.hostname or origin.username or origin.password or origin.path or origin.query or origin.fragment:
+    if (origin.scheme != "https" or not origin.hostname or origin.username or origin.password or origin.query or origin.fragment
+            or (origin.path and not re.fullmatch(RELAY_SLOT_PATH, origin.path))):
         raise ValueError("Enter the public HTTPS origin for ChannelForge's read-only media server.")
     if origin.hostname == "trycloudflare.com" or origin.hostname.endswith(".trycloudflare.com"):
         raise ValueError("Cloudflare Quick Tunnels are for development. Use a public HTTPS host that supports video delivery.")
@@ -509,11 +584,13 @@ def publish_creator(payload: dict) -> dict:
     }
     if not profile["name"]:
         raise ValueError("Enter a creator or studio name.")
+    directory_profile = ({**profile, "channel_numbers": public_channel_numbers(channels())}
+                         if settings["directory_url"] == DEFAULT_DIRECTORY_URL else profile)
     if settings["creator_id"] and settings["creator_key"]:
-        result = directory_request("PUT", f'/v1/creators/{settings["creator_id"]}', profile, settings["creator_key"])
+        result = directory_request("PUT", f'/v1/creators/{settings["creator_id"]}', directory_profile, settings["creator_key"])
         creator_id, creator_key = settings["creator_id"], settings["creator_key"]
     else:
-        result = directory_request("POST", "/v1/creators", profile, registration_key(settings["directory_url"]))
+        result = directory_request("POST", "/v1/creators", directory_profile, registration_key(settings["directory_url"]))
         creator_id, creator_key = str(result.get("creator", {}).get("id", "")), str(result.get("api_key", ""))
         if not creator_id or not creator_key:
             raise ValueError("The Creator Directory did not return publishing credentials.")
@@ -523,7 +600,11 @@ def publish_creator(payload: dict) -> dict:
         if not isinstance(raw, dict):
             raw = {}
         raw.update({"directory_url": settings["directory_url"], "creator_id": creator_id,
-                    "creator_key": creator_key, "creator_profile": profile, "pending_creator_profile": {}})
+                    "creator_key": creator_key, "creator_profile": profile, "public_url": public_url})
+        if not preserve_pending:
+            raw["pending_creator_profile"] = {}
+        if community_relay_origin is not None:
+            raw["community_relay_origin"] = community_relay_origin
         atomic_json(CONFIG_FILE, raw)
     return result.get("creator", {"id": creator_id, **profile})
 
@@ -536,14 +617,16 @@ def unpublish_creator() -> None:
         with LOCK:
             raw = load_json(CONFIG_FILE, {})
             if isinstance(raw, dict):
-                raw.update({"creator_id": "", "creator_key": "", "creator_profile": {},
+                raw.update({"creator_id": "", "creator_key": "", "creator_profile": {}, "community_relay_origin": "", "managed_relay": False,
                             "pending_creator_profile": {}, "auto_publish_channels": False})
                 atomic_json(CONFIG_FILE, raw)
+        set_community_relay(None)
+        stop_legacy_relay()
     PUBLISH_CHANGED.set()
 
 
 def publish_studio(payload: dict) -> dict:
-    global REGISTERED_ORIGIN, SHARING_STATUS
+    global REGISTERED_ORIGIN, SHARING_STATUS, TUNNEL_URL
     if not str(payload.get("name", "")).strip():
         raise ValueError("Enter a creator or studio name.")
     with PUBLISH_LOCK:
@@ -556,19 +639,46 @@ def publish_studio(payload: dict) -> dict:
             if new_directory != str(previous.get("directory_url", DEFAULT_DIRECTORY_URL)).rstrip("/"):
                 changes.update({"creator_id": "", "creator_key": ""})
             changes["directory_url"] = new_directory
-        manual_origin = str(payload.get("public_url", "")).strip().rstrip("/")
+        requested = str(payload.get("public_url", "")).strip().rstrip("/")
+        default_directory = (changes.get("directory_url") or previous.get("directory_url") or DEFAULT_DIRECTORY_URL) == DEFAULT_DIRECTORY_URL
+        saved = str(previous.get("public_url", ""))
+        first_publish = (default_directory and not previous.get("creator_id") and not requested and not saved
+                         and not (DATA_DIR / "community-relay.json").is_file())
+        managed = payload.get("managed_relay", first_publish or previous.get("managed_relay")) is True
+        if managed and changes.get("creator_id") == "":
+            raise ValueError("Use this Studio’s registered directory when enabling the ChannelForge relay.")
+        if not managed and previous.get("managed_relay") is True:
+            if requested == saved:
+                requested = ""
+            saved = ""
+        origin = enrolled_relay_origin(previous) if managed else studio_publication_origin(requested, saved)
+        relay = community_relay_profile(origin)
+        funnel = relay is None and is_funnel_origin(origin)
+        if managed and relay is None:
+            raise ValueError("The directory did not assign a valid Studio transport.")
         already_serving = PUBLIC_MEDIA_SERVER is not None
-        already_relaying = TUNNEL_PROCESS is not None
-        start_public_media_server(automatic=not manual_origin)
+        candidate = None
+        if not funnel:
+            start_public_media_server(automatic=relay is not None)
         try:
-            origin = manual_origin or start_public_tunnel()
-            changes.update({"public_url": origin, "public_tunnel": not manual_origin, "auto_publish_channels": True})
-            with LOCK:
-                previous = load_json(CONFIG_FILE, {})
-                atomic_json(CONFIG_FILE, {**previous, **changes})
-            generate_exports()
-            creator = publish_creator(payload)
+            with stage_media_funnel(origin) if funnel else nullcontext():
+                if relay is not None:
+                    candidate = connect_community_relay(relay)
+                    if not relay.funnel_host and candidate is not COMMUNITY_RELAY and not relay_transfers_media(relay.origin, hd=True):
+                        raise ValueError("The community relay is reachable but could not deliver a 720p test segment in time.")
+                if SHUTTING_DOWN.is_set():
+                    raise InterruptedError("Creator is shutting down.")
+                changes.update({"public_url": origin, "public_tunnel": funnel,
+                                "auto_publish_channels": True, "community_relay_origin": relay.origin if relay else "",
+                                "managed_relay": managed})
+                with LOCK:
+                    previous = load_json(CONFIG_FILE, {})
+                    atomic_json(CONFIG_FILE, {**previous, **changes})
+                generate_exports()
+                creator = publish_creator(payload)
         except Exception:
+            if candidate is not None and candidate is not COMMUNITY_RELAY:
+                stop_relay_process(candidate.process)
             with LOCK:
                 current = load_json(CONFIG_FILE, {})
                 for field, attempted in changes.items():
@@ -579,16 +689,26 @@ def publish_studio(payload: dict) -> dict:
                             current.pop(field, None)
                 atomic_json(CONFIG_FILE, current)
             generate_exports()
-            if not already_relaying:
-                stop_public_tunnel()
             if not already_serving:
                 stop_public_media_server()
             raise
-        if manual_origin:
+        if funnel:
+            with TUNNEL_LOCK:
+                TUNNEL_URL = origin
+        else:
             stop_public_tunnel()
+        stop_legacy_relay()
+        set_community_relay(candidate)
         REGISTERED_ORIGIN = origin
         SHARING_STATUS = "live"
         return creator
+
+
+def can_use_managed_relay(settings: dict) -> bool:
+    origin = str(settings.get("public_url", ""))
+    directory = str(settings.get("directory_url", "")).strip().rstrip("/") or DEFAULT_DIRECTORY_URL
+    return bool(directory == DEFAULT_DIRECTORY_URL and settings.get("creator_id") and settings.get("creator_key")
+                and not settings.get("managed_relay") and (not origin or is_legacy_relay(origin) or is_funnel_origin(origin)))
 
 
 def queue_channel_publication(channel: dict, enabled: bool | None) -> bool:
@@ -645,8 +765,10 @@ def channels() -> list[dict]:
         return value
 
 
-def lineup_duration(channel):
-    return timedelta(milliseconds=sum(max(1000, int(item.get("duration_ms", 1800000))) for item in scheduled_items(channel)))
+def lineup_duration(channel, *, items=None):
+    if items is None:
+        items = scheduled_items(channel)
+    return timedelta(milliseconds=sum(max(1000, int(item.get("duration_ms", 1800000))) for item in items))
 
 
 def current_run_end(channel):
@@ -1202,6 +1324,19 @@ def plex_libraries(server_id: str = "") -> list[dict]:
     ]
 
 
+def media_search_tags(tags, genres, countries) -> list[str]:
+    values = list(dict.fromkeys(tag.strip()[:120] for tag in tags if isinstance(tag, str) and tag.strip()))
+    genre_names = {str(genre).strip().casefold() for genre in genres}
+    animated = bool(genre_names & {"animation", "anime", "アニメ"})
+    japanese = any(str(country).strip().casefold() in {"jp", "japan", "日本"} for country in countries)
+    explicit_anime = bool(genre_names & {"anime", "アニメ"})
+    if TESTER_BUILD:
+        explicit_anime |= any(re.search(r"\banime\b|アニメ", tag, re.IGNORECASE) for tag in values)
+    if ((animated and japanese) or (TESTER_BUILD and explicit_anime)) and not any(tag.casefold() == "anime" for tag in values):
+        values.append("Anime")
+    return values
+
+
 def plex_items(section: str) -> list[dict]:
     server_id, section_id = plex_section_parts(section)
     libraries = plex_libraries(server_id) if server_id else plex_libraries()
@@ -1209,8 +1344,13 @@ def plex_items(section: str) -> list[dict]:
     if not library:
         raise ValueError("Plex library was not found.")
 
-    def credit_names(node, tag):
-        return [entry.get("tag", "").strip()[:120] for entry in node.findall(tag)[:24] if entry.get("tag", "").strip()]
+    def credit_names(node, tag, limit=24):
+        return [entry.get("tag", "").strip()[:120] for entry in node.findall(tag)[:limit] if entry.get("tag", "").strip()]
+
+    def provider_tags(node):
+        if TESTER_BUILD:
+            return [value for kind in ("Label", "Collection", "Mood", "Style") for value in credit_names(node, kind, 96)]
+        return credit_names(node, "Label") + credit_names(node, "Collection")
 
     # TV libraries must expose playable episodes, but Plex normally keeps genres,
     # the premiere year, and the content rating on the non-playable show folder.
@@ -1228,6 +1368,9 @@ def plex_items(section: str) -> list[dict]:
                 "content_rating": show.get("contentRating", ""),
                 "rating": show.get("rating", ""),
                 "genres": sorted({genre.get("tag", "").strip() for genre in show.findall("Genre") if genre.get("tag", "").strip()}),
+                "tags": provider_tags(show),
+                "aliases": [show.get(key, "") for key in ("originalTitle", "titleSort")] if TESTER_BUILD else [],
+                "countries": credit_names(show, "Country"),
                 "actors": credit_names(show, "Role"),
                 "directors": credit_names(show, "Director"),
                 "summary": show.get("summary", "")[:600],
@@ -1255,6 +1398,7 @@ def plex_items(section: str) -> list[dict]:
         series_title = node.get("grandparentTitle", "")
         parent_metadata = show_metadata.get(str(node.get("grandparentRatingKey", ""))) or show_metadata_by_title.get(str(series_title).casefold(), {})
         episode_genres = sorted({genre.get("tag", "").strip() for genre in node.findall("Genre") if genre.get("tag", "").strip()})
+        genres = list(dict.fromkeys(episode_genres + parent_metadata.get("genres", [])))
         result.append({
             "id": rating_key,
             "title": (f'{node.get("grandparentTitle", "")} · S{int(node.get("parentIndex", "0") or 0):02d}E{int(node.get("index", "0") or 0):02d} · {node.get("title", "Untitled")}' if node.get("type") == "episode" else node.get("title", "Untitled")),
@@ -1269,7 +1413,10 @@ def plex_items(section: str) -> list[dict]:
             "summary": (node.get("summary", "") or parent_metadata.get("summary", ""))[:600],
             "content_rating": node.get("contentRating", "") or parent_metadata.get("content_rating", ""),
             "rating": node.get("rating", "") or parent_metadata.get("rating", ""),
-            "genres": episode_genres or list(parent_metadata.get("genres", [])),
+            "genres": genres,
+            "tags": media_search_tags(provider_tags(node) + parent_metadata.get("tags", []),
+                                      genres, credit_names(node, "Country") + parent_metadata.get("countries", [])),
+            **({"aliases": [node.get(key, "") for key in ("originalTitle", "titleSort")] + parent_metadata.get("aliases", [])} if TESTER_BUILD else {}),
             "actors": list(dict.fromkeys(credit_names(node, "Role") + parent_metadata.get("actors", []))),
             "directors": list(dict.fromkeys(credit_names(node, "Director") + parent_metadata.get("directors", []))),
             "series": series_title,
@@ -1475,9 +1622,12 @@ def jellyfin_section(section: str) -> tuple[dict, str]:
 
 def jellyfin_items(section):
     connection, parent_id = jellyfin_section(section)
-    query = {"userId": connection["user_id"], "parentId": parent_id, "recursive": "true", "includeItemTypes": "Movie,Episode,Video",
-             "fields": "Overview,Genres,People,MediaStreams", "limit": 200, "sortBy": "SortName"}
+    query = {"userId": connection["user_id"], "parentId": parent_id, "recursive": "true", "includeItemTypes": "Movie,Episode,Video,Series",
+             "fields": "Overview,Genres,People,MediaStreams,Tags,ProductionLocations", "limit": 200, "sortBy": "SortName"}
+    if TESTER_BUILD:
+        query["fields"] += ",OriginalTitle"
     result = []
+    series_metadata = {}
     offset = 0
     while True:
         page = jellyfin_request(connection, "/Items?" + urllib.parse.urlencode({**query, "startIndex": offset}))
@@ -1488,10 +1638,14 @@ def jellyfin_items(section):
             if not isinstance(row, dict):
                 continue
             identity = jellyfin_id(row.get("Id"))
+            kind = str(row.get("Type", "Video")).lower()
+            if identity and kind == "series":
+                series_metadata[identity] = (row.get("Genres") or [], row.get("Tags") or [], row.get("ProductionLocations") or [],
+                                             row.get("OriginalTitle"))
+                continue
             duration = int(row.get("RunTimeTicks") or 0) // 10000
             if not identity or not duration:
                 continue
-            kind = str(row.get("Type", "Video")).lower()
             art = row.get("ImageTags") or {}
             series_id = jellyfin_id(row.get("SeriesId"))
             series = row.get("SeriesName") or ""
@@ -1507,12 +1661,23 @@ def jellyfin_items(section):
                            "series_art": jellyfin_id(row.get("ParentBackdropItemId")) if row.get("ParentBackdropImageTags") else "",
                            "series": series, "series_id": series_id, "season": season,
                            "episode": episode, "genres": row.get("Genres") or [], "content_rating": row.get("OfficialRating") or "",
+                           "tags": media_search_tags(row.get("Tags") or [], row.get("Genres") or [], row.get("ProductionLocations") or []),
+                           **({"aliases": [row.get("OriginalTitle")] if row.get("OriginalTitle") else []} if TESTER_BUILD else {}),
                            "actors": [person["Name"] for person in (row.get("People") or []) if person.get("Type") == "Actor" and person.get("Name")],
                            "directors": [person["Name"] for person in (row.get("People") or []) if person.get("Type") == "Director" and person.get("Name")],
                            "video_codec": video.get("Codec") or "", "height": video.get("Height") or 0})
         offset += len(rows)
         if not rows or offset >= int(page.get("TotalRecordCount") or offset):
-            return result
+            break
+    for item in result:
+        inherited = series_metadata.get(item["series_id"])
+        if inherited:
+            genres, tags, countries, original_title = inherited
+            item["genres"] = list(dict.fromkeys(item["genres"] + genres))
+            item["tags"] = media_search_tags(item["tags"] + tags, item["genres"], countries)
+            if TESTER_BUILD and original_title and original_title not in item["aliases"]:
+                item["aliases"].append(original_title)
+    return result
 
 
 def all_libraries(*, include_shared: bool = True, include_jellyfin: bool = True) -> list[dict]:
@@ -1696,11 +1861,20 @@ def upload_local_media(handler: BaseHTTPRequestHandler, section: str, filename: 
     return {"name": destination.name, "size": destination.stat().st_size, "library": library["title"]}
 
 
+def media_rating_level(value) -> int:
+    rating = re.sub(r"^(?:US|USA)[: -]+", "", str(value or "").strip().upper())
+    return CHANNEL_RATING_LEVELS.get(rating, 0)
+
+
 def clean_channel(payload: dict, existing_id: str = "") -> dict:
     name = str(payload.get("name", "")).strip()
     if not name:
         raise ValueError("Channel name is required.")
     number = str(payload.get("number", "")).strip()
+    channel_rating = str(payload.get("channel_rating") or "").strip().upper()
+    ceiling = CHANNEL_RATING_LEVELS.get(channel_rating, 0)
+    if channel_rating and not ceiling:
+        raise ValueError("Choose a supported channel rating.")
     if not number:
         raise ValueError("Channel number is required.")
     items = payload.get("items", [])
@@ -1722,7 +1896,9 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "art": str(item.get("art", ""))[:500], "summary": str(item.get("summary", ""))[:600],
             "content_rating": str(item.get("content_rating", ""))[:40], "rating": str(item.get("rating", ""))[:20],
             "genres": [str(value)[:80] for value in item.get("genres", []) if str(value).strip()][:20],
-            "series": str(item.get("series", ""))[:200], "series_id": jellyfin_id(item.get("series_id")),
+            "tags": [str(value)[:120] for value in item.get("tags", []) if str(value).strip()][:50],
+            "series": str(item.get("series", ""))[:200],
+            "series_id": jellyfin_id(item.get("series_id")) if item.get("source") == "jellyfin" else str(item.get("series_id") or "")[:128],
             "season": max(0, int(item.get("season", 0) or 0)), "episode": max(0, int(item.get("episode", 0) or 0)),
             "part_key": str(item.get("part_key", ""))[:500], "container": str(item.get("container", ""))[:30],
             "video_codec": str(item.get("video_codec", ""))[:30], "audio_codec": str(item.get("audio_codec", ""))[:30],
@@ -1735,9 +1911,11 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         })
     if not normalized:
         raise ValueError("The selected titles were invalid.")
+    if ceiling and any(not 0 < media_rating_level(item["content_rating"]) <= ceiling for item in normalized):
+        raise ValueError(f"A {channel_rating} channel can only contain titles with a known rating of {channel_rating} or lower.")
     return {
         "id": existing_id or secrets.token_hex(8), "name": name[:100], "number": number[:12],
-        "section": section, "items": normalized,
+        "section": section, "items": normalized, "channel_rating": channel_rating,
         "logo_asset_id": str(payload.get("logo_asset_id", ""))[:80],
         "background_asset_id": str(payload.get("background_asset_id", ""))[:80],
         "corner_bug_asset_id": str(payload.get("corner_bug_asset_id", ""))[:80],
@@ -1748,17 +1926,53 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
 
 
 def save_channel(payload: dict, channel_id: str = "") -> dict:
+    global SYNCED_CHANNEL_NUMBERS
+    with PUBLISH_LOCK:
+        values = channels()
+        previous = next((value for value in values if value.get("id") == channel_id), None)
+        if channel_id and not previous:
+            raise ValueError("Channel not found.")
+        if previous:
+            payload = dict(payload)
+            if not payload.get("schedule_anchor"):
+                payload["schedule_anchor"] = previous.get("schedule_anchor")
+            payload.setdefault("channel_rating", previous.get("channel_rating", ""))
+        item = clean_channel(payload, channel_id)
+        number = channel_number_key(item["number"])
+        changed = not previous or number != channel_number_key(previous["number"])
+        if changed and any(row["id"] != channel_id and channel_number_key(row["number"]) == number for row in values):
+            raise ValueError(f'Channel {item["number"]} is already used in this Studio. Choose a different number.')
+        settings = config()
+        if changed and settings["directory_url"] == DEFAULT_DIRECTORY_URL:
+            if settings["auto_publish_channels"] and settings["creator_id"] and settings["creator_key"]:
+                path = f'/v1/creators/{settings["creator_id"]}/channel-numbers'
+                # Reconcile on the next heartbeat even if the reserve response is lost.
+                SYNCED_CHANNEL_NUMBERS = None
+                directory_request("POST", path, {"mode": "reserve", "channels": public_channel_numbers([item])},
+                                  settings["creator_key"], timeout=5)
+            elif payload.get("publish_worldwide") is True:
+                path = "/v1/channel-number?" + urllib.parse.urlencode({"number": item["number"]})
+                if not directory_request("GET", path, timeout=5).get("available"):
+                    raise ValueError(f'Channel {item["number"]} is already reserved in the public guide. Choose a different number.')
+        saved = write_channel(payload, channel_id, item)
+        if changed:
+            try:
+                sync_public_channel_numbers(settings)
+            except ValueError:
+                PUBLISH_CHANGED.set()
+        return saved
+
+
+def write_channel(payload: dict, channel_id: str, item: dict) -> dict:
     with LOCK:
         backup_state("edit channel" if channel_id else "create channel")
         values = channels()
-        if channel_id:
-            previous = next((value for value in values if value.get("id") == channel_id), None)
-            if previous and not payload.get("schedule_anchor"):
-                payload = {**payload, "schedule_anchor": previous.get("schedule_anchor")}
-        item = clean_channel(payload, channel_id)
+        previous = next((value for value in values if value.get("id") == channel_id), None) if channel_id else None
         if channel_id and previous:
             restore = payload.get("restore_preset") is True
-            if previous.get("shuffle_seed") and not restore and item["playback_mode"] == previous.get("playback_mode", "ordered"):
+            mode = item["playback_mode"]
+            manual_order = payload.get("lineup_reordered") is True and mode in {"ordered", "marathon", "franchise"}
+            if previous.get("shuffle_seed") and not (restore or manual_order) and mode == previous.get("playback_mode", "ordered"):
                 item["shuffle_seed"] = previous["shuffle_seed"]
             old_end = parse_timestamp(previous["air_until"])
             item["air_until"] = (old_end if run_finished(previous) else
@@ -1791,6 +2005,15 @@ def save_channel(payload: dict, channel_id: str = "") -> dict:
 
 
 def delete_channel(channel_id: str) -> None:
+    with PUBLISH_LOCK:
+        remove_channel(channel_id)
+        try:
+            sync_public_channel_numbers(config())
+        except ValueError:
+            PUBLISH_CHANGED.set()
+
+
+def remove_channel(channel_id: str) -> None:
     with LOCK:
         backup_state("delete channel")
         values = channels()
@@ -1909,7 +2132,7 @@ def schedule_window(channel: dict, start: datetime, end: datetime, *, items: lis
     if channel.get("air_until"):
         finish = parse_timestamp(channel["air_until"])
         end = min(end, finish)
-        start = max(start, finish - lineup_duration(channel))
+        start = max(start, finish - lineup_duration(channel, items=items))
         if start >= end:
             return []
     position = schedule_position(channel, start, items=items)
@@ -1945,7 +2168,7 @@ def normalized_title(value: object) -> str:
 
 def franchise_family(value: object) -> str:
     title = normalized_title(value)
-    if any(token in title for token in ("alien", "prometheus")):
+    if title in {"alien", "aliens", "prometheus"} or title.startswith(("alien ", "aliens ", "prometheus ")):
         return "alien"
     if title == "it" or title.startswith("it chapter") or "welcome to derry" in title:
         return "it"
@@ -1974,6 +2197,19 @@ def scheduled_items(channel: dict) -> list[dict]:
         source = str(item.get("plex_server_id") or item.get("file_path") or "")
         return f'{source}:{item.get("id", "")}' if source else str(item.get("id", ""))
 
+    def series_group(item: dict):
+        return (item.get("series_id") or str(item.get("series", "")).strip().casefold(),
+                item.get("source") or "plex", item.get("plex_server_id", ""), item.get("section", ""))
+
+    def distinct_items():
+        seen = set()
+        for original, item in enumerate(items):
+            key = media_source_identity(item)
+            if item.get("id") and key in seen:
+                continue
+            seen.add(key)
+            yield original, item
+
     stable_key = lambda item: hashlib.sha256(f"{seed}:{item_identity(item)}".encode()).hexdigest()
     if mode == "shuffle" or (mode == "ordered" and channel.get("shuffle_seed")):
         return sorted(items, key=stable_key)
@@ -1982,17 +2218,12 @@ def scheduled_items(channel: dict) -> list[dict]:
         # season/episode order, while movies and shows are placed on one smart
         # franchise timeline. This keeps examples such as Alien -> Alien:
         # Earth -> Aliens and Welcome to Derry -> It -> It Chapter Two intact.
-        blocks: dict[str, dict] = {}
-        seen_ids: set[str] = set()
-        for original, item in enumerate(items):
+        blocks = {}
+        for original, item in distinct_items():
             item_id = item_identity(item)
-            if item_id and item_id in seen_ids:
-                continue
-            if item_id:
-                seen_ids.add(item_id)
             series = str(item.get("series", "")).strip()
             title = series or str(item.get("title") or item_id)
-            block_id = f"show:{series.casefold()}" if series else f"movie:{item_id or original}"
+            block_id = ("show", series_group(item)) if series else ("movie", original)
             block = blocks.setdefault(block_id, {"title": title, "year": item.get("year", ""), "original": original, "items": []})
             block["items"].append(item)
             if str(item.get("year", "")).isdigit() and (not str(block["year"]).isdigit() or int(item["year"]) < int(block["year"])):
@@ -2013,21 +2244,17 @@ def scheduled_items(channel: dict) -> list[dict]:
                 result.extend(sorted(block["items"], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", "")))))
         return result
     if mode in {"shuffle_in_order", "marathon"}:
-        groups: dict[tuple[str, str, str], list[dict]] = {}
-        seen_ids: set[str] = set()
-        for item in items:
-            item_id = item_identity(item)
-            if item_id and item_id in seen_ids:
-                continue
-            if item_id:
-                seen_ids.add(item_id)
+        groups = {}
+        group_titles = {}
+        for original, item in distinct_items():
             title = str(item.get("title") or item.get("id"))
             series = str(item.get("series") or "").strip()
-            group = ("show", series, str(item.get("plex_server_id") or "")) if series else ("movie", title, item_id)
+            group = ("show", series_group(item)) if series else ("movie", original)
             groups.setdefault(group, []).append(item)
+            group_titles.setdefault(group, series or title)
         group_names = list(groups)
         if mode == "shuffle_in_order" or channel.get("shuffle_seed"):
-            group_names.sort(key=lambda group: hashlib.sha256(f"{seed}:{group[1]}".encode()).hexdigest())
+            group_names.sort(key=lambda group: hashlib.sha256(f"{seed}:{group_titles[group]}".encode()).hexdigest())
         ordered_groups = {
             name: sorted(groups[name], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", ""))))
             for name in group_names
@@ -2036,7 +2263,15 @@ def scheduled_items(channel: dict) -> list[dict]:
             # Rotate between the shuffled shows, advancing each show's episodes
             # in sequence. This keeps variety without scrambling episode order or
             # repeating the same episode/show twice when another show is available.
-            return [episode for episode_index in range(max(map(len, ordered_groups.values()), default=0)) for name in group_names for episode in ordered_groups[name][episode_index:episode_index + 1]]
+            pending = deque(iter(ordered_groups[name]) for name in group_names)
+            result = []
+            while pending:
+                group = pending.popleft()
+                episode = next(group, None)
+                if episode is not None:
+                    result.append(episode)
+                    pending.append(group)
+            return result
         return [item for name in group_names for item in ordered_groups[name]]
     return items
 
@@ -2068,6 +2303,295 @@ def openssh_tool(name: str) -> str | None:
     return str(bundled) if getattr(sys, "frozen", False) and bundled.is_file() else shutil.which(name)
 
 
+def community_relay_profile(origin: str) -> CommunityRelayProfile | None:
+    return next(iter(community_relay_candidates(origin)), None)
+
+
+def parse_community_relay_profile(settings: dict) -> CommunityRelayProfile:
+    origin = str(settings.get("origin", "")).strip().rstrip("/")
+    host = str(settings.get("ssh_host", "")).strip().lower()
+    user = str(settings.get("ssh_user", "")).strip()
+    ssh_port, remote_port = settings.get("ssh_port", 22), settings.get("remote_port")
+    key = str(settings.get("host_key", "")).split()
+    funnel_host = str(settings.get("funnel_host", "")).strip().lower()
+    funnel_port = settings.get("funnel_port", 8443)
+    try:
+        blob = base64.b64decode(key[1], validate=True) if len(key) == 2 and key[0] == "ssh-ed25519" else b""
+        address = urllib.parse.urlsplit(origin)
+        valid_origin = (address.scheme == "https" and address.hostname and not (
+            address.username or address.password or address.query or address.fragment
+        ) and (not address.path or re.fullmatch(RELAY_SLOT_PATH, address.path)) and address.port != 0)
+    except ValueError as exc:
+        raise ValueError("Invalid community relay HTTPS origin or SSH host key.") from exc
+    if (not valid_origin or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}", host)
+            or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", user)
+            or type(ssh_port) is not int or not 1 <= ssh_port <= 65535
+            or type(remote_port) is not int or not 1024 <= remote_port <= 65535
+            or len(blob) != 51 or not blob.startswith(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20")):
+        raise ValueError("Check the community relay hostname, account, assigned port, and Ed25519 host key.")
+    if (funnel_host and not re.fullmatch(r"[a-z0-9-]+\.[a-z0-9-]+\.ts\.net", funnel_host)
+            or type(funnel_port) is not int or funnel_port not in {443, 8443, 10000}):
+        raise ValueError("Provide a Tailscale Funnel hostname and a supported TLS port.")
+    return CommunityRelayProfile(origin, host, user, ssh_port, remote_port, " ".join(key), funnel_host, funnel_port)
+
+
+def community_relay_candidates(origin: str) -> tuple[CommunityRelayProfile, ...]:
+    if not origin:
+        return ()
+    settings = load_json(DATA_DIR / "community-relay.json", {})
+    if not isinstance(settings, dict) or str(settings.get("origin", "")).strip().rstrip("/") != origin:
+        enrolled = load_json(DATA_DIR / "managed-community-relay.json", {})
+        settings = enrolled.get("profile") if isinstance(enrolled, dict) else None
+        if not isinstance(settings, dict) or settings.get("origin") != origin:
+            return ()
+        studio_id, _, _ = relay_registration(config())
+        if enrolled.get("creator_id") != studio_id:
+            return ()
+    primary = parse_community_relay_profile(settings)
+    backup = settings.get("backup")
+    if not isinstance(backup, dict):
+        return (primary,)
+    try:
+        alternate = parse_community_relay_profile(backup)
+    except ValueError:
+        return (primary,)
+    if alternate.origin == primary.origin or (alternate.ssh_host, alternate.ssh_port, alternate.remote_port) == (
+            primary.ssh_host, primary.ssh_port, primary.remote_port):
+        return (primary,)
+    return primary, alternate
+
+
+def relay_registration(settings: dict) -> tuple[str, str, str]:
+    studio_id, secret = settings.get("creator_id"), settings.get("creator_key")
+    if isinstance(studio_id, str) and re.fullmatch(r"[a-f0-9-]{8,64}", studio_id) and secret:
+        return studio_id, secret, f"/v1/creators/{studio_id}/relay"
+    if studio_id or secret or (settings.get("directory_url") or DEFAULT_DIRECTORY_URL) != DEFAULT_DIRECTORY_URL:
+        raise ValueError("This Studio needs valid directory credentials to enroll in the ChannelForge relay.")
+    secret = registration_key(DEFAULT_DIRECTORY_URL)
+    studio_id = hashlib.sha256(f"creator-id:{secret}".encode()).hexdigest()[:32]
+    return studio_id, secret, "/v1/creators/relay"
+
+
+def enrolled_relay_origin(settings: dict) -> str:
+    studio_id, secret, route = relay_registration(settings)
+    file = DATA_DIR / "managed-community-relay.json"
+    cached = load_json(file, {})
+    if (isinstance(cached, dict) and cached.get("creator_id") == studio_id
+            and isinstance(cached.get("profile"), dict)):
+        return parse_community_relay_profile(cached["profile"]).origin
+
+    identity = DATA_DIR / "community-relay-identity"
+    keygen = openssh_tool("ssh-keygen")
+    if not keygen:
+        raise ValueError("OpenSSH is needed to enroll in the ChannelForge relay.")
+    options = {"stdin": subprocess.DEVNULL, "capture_output": True, "check": True, "timeout": 8,
+               "creationflags": subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0}
+    if not identity.is_file():
+        subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-C", "ChannelForge Relay", "-f", str(identity)], **options)
+    public = subprocess.run([keygen, "-y", "-f", str(identity)], **options).stdout.decode("ascii").split()
+    result = directory_request("POST", route, {"public_key": " ".join(public[:2])}, secret)
+    profile = result.get("profile")
+    if not isinstance(profile, dict):
+        raise ValueError("The directory did not return a relay profile.")
+    verified = parse_community_relay_profile(profile)
+    # A managed slot can serve viewers through the VPS's own Funnel. It
+    # must still connect to Studio through its assigned, pinned SSH transport.
+    origin_host = urllib.parse.urlsplit(verified.origin).hostname
+    if is_legacy_relay(verified.origin) or (origin_host.endswith(".ts.net") and origin_host != verified.funnel_host):
+        raise ValueError("The directory did not provide a managed VPS origin.")
+    profile["origin"] = verified.origin
+    atomic_json(file, {"creator_id": studio_id, "profile": profile})
+    return verified.origin
+
+
+def stop_relay_process(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def set_community_relay(connection: CommunityRelayConnection | None) -> None:
+    global COMMUNITY_RELAY
+    with TUNNEL_LOCK:
+        previous = COMMUNITY_RELAY
+        if previous is connection:
+            return
+        COMMUNITY_RELAY = connection
+        if previous is not None:
+            stop_relay_process(previous.process)
+        if connection is not None:
+            def reconnect_after_exit():
+                connection.process.wait()
+                if COMMUNITY_RELAY is connection:
+                    PUBLISH_CHANGED.set()
+
+            threading.Thread(target=reconnect_after_exit, daemon=True, name="channel-forge-community-relay").start()
+
+
+def start_relay_tls_bridge(host: str, port: int) -> socket.socket:
+    """Give bundled OpenSSH one loopback connection to the relay's TLS ingress."""
+    listener = socket.socket()
+    try:
+        listener.bind((HOST, 0))
+        listener.listen(1)
+        listener.settimeout(10)
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+    except BaseException:
+        listener.close()
+        raise
+
+    def forward() -> None:
+        try:
+            with listener:
+                local, _ = listener.accept()
+                with local, socket.create_connection((host, port), timeout=8) as remote:
+                    with context.wrap_socket(remote, server_hostname=host) as encrypted:
+                        relay_tls_bytes(local, encrypted)
+        except (OSError, ValueError):
+            # OpenSSH sees EOF and Studio tries its next verified route.
+            return
+
+    threading.Thread(target=forward, name="channel-forge-relay-tls", daemon=True).start()
+    return listener
+
+
+def relay_tls_bytes(local: socket.socket, encrypted: ssl.SSLSocket) -> None:
+    """Pump both directions on one thread and bound the queued bytes."""
+    sockets = (local, encrypted)
+    for connection in sockets:
+        connection.setblocking(False)
+    pending = {connection: bytearray() for connection in sockets}
+    other = {local: encrypted, encrypted: local}
+    limit = 128 * 1024
+    eof = False
+    while not SHUTTING_DOWN.is_set():
+        readers = [] if eof else [connection for connection in sockets if len(pending[other[connection]]) < limit]
+        writers = [connection for connection in sockets if pending[connection]]
+        if eof and not writers:
+            return
+        buffered_tls = encrypted in readers and encrypted.pending()
+        readable, writable, _ = select.select(readers, writers, [], 0 if buffered_tls else 1)
+        if buffered_tls and encrypted not in readable:
+            readable.append(encrypted)
+        for destination in writable:
+            try:
+                size = destination.send(pending[destination])
+            except (BlockingIOError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
+                continue
+            if not size:
+                return
+            del pending[destination][:size]
+        for source in readable:
+            buffer = pending[other[source]]
+            try:
+                data = source.recv(min(32 * 1024, limit - len(buffer)))
+            except (BlockingIOError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
+                continue
+            if not data:
+                eof = True
+                break
+            buffer.extend(data)
+
+
+def connect_community_relay(profile: CommunityRelayProfile) -> CommunityRelayConnection:
+    """Start a candidate forward and prove it reaches this Studio over HTTPS."""
+    with TUNNEL_LOCK:
+        if SHUTTING_DOWN.is_set() or PUBLIC_MEDIA_SERVER is None:
+            raise InterruptedError("The read-only media server is unavailable.")
+        local_port = PUBLIC_MEDIA_SERVER.server_port
+        existing = COMMUNITY_RELAY
+        if (existing and existing.profile == profile and existing.local_port == local_port
+                and existing.process.poll() is None):
+            return existing
+        ssh = openssh_tool("ssh")
+        identity = DATA_DIR / "community-relay-identity"
+        if not ssh or not identity.is_file():
+            raise ValueError("Install OpenSSH and provision this Studio's community relay key.")
+        host = profile.ssh_host if profile.ssh_port == 22 else f"[{profile.ssh_host}]:{profile.ssh_port}"
+        trust = f"{host} {profile.host_key}\n"
+        known_hosts = DATA_DIR / f"community-host-{hashlib.sha256(trust.encode()).hexdigest()[:24]}"
+        known_hosts.write_text(trust, encoding="ascii")
+        null = "NUL" if sys.platform == "win32" else "/dev/null"
+        arguments = [
+            ssh, "-F", null, "-N", "-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
+            "-i", str(identity), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+            "-o", "StrictHostKeyChecking=yes", "-o", "HostKeyAlgorithms=ssh-ed25519",
+            "-o", f'UserKnownHostsFile="{known_hosts.as_posix()}"', "-o", f"GlobalKnownHostsFile={null}",
+            "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
+            "-l", profile.ssh_user,
+            "-R", f"127.0.0.1:{profile.remote_port}:127.0.0.1:{local_port}",
+        ]
+        for through_funnel in (False, True) if profile.funnel_host else (False,):
+            if SHUTTING_DOWN.is_set():
+                break
+            bridge = start_relay_tls_bridge(profile.funnel_host, profile.funnel_port) if through_funnel else None
+            target = ["-p", str(bridge.getsockname()[1]), "-o", f"HostKeyAlias={host}", HOST] if bridge else [
+                "-p", str(profile.ssh_port), profile.ssh_host]
+            process = None
+            accepted = False
+            try:
+                process = subprocess.Popen([*arguments, *target], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                           stderr=subprocess.DEVNULL,
+                                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                deadline = time.monotonic() + 16
+                while not SHUTTING_DOWN.is_set() and process.poll() is None and time.monotonic() < deadline:
+                    if relay_reaches_this_creator(profile.origin):
+                        if profile.funnel_host and not relay_transfers_media(profile.origin, hd=True):
+                            break
+                        if process.poll() is None and not SHUTTING_DOWN.is_set():
+                            accepted = True
+                            return CommunityRelayConnection(profile, local_port, process)
+                    SHUTTING_DOWN.wait(.5)
+            finally:
+                if not accepted:
+                    if process is not None:
+                        stop_relay_process(process)
+                    if bridge:
+                        bridge.close()
+        raise ValueError("The community relay did not reach this Studio. Check its SSH key, assigned port, and HTTPS route.")
+
+
+def accept_community_relay(candidates: tuple[CommunityRelayProfile, ...], preferred: str,
+                           studio: dict, *, unavailable: str = "") -> CommunityRelayConnection:
+    """Keep serving through the current route until a verified candidate is registered."""
+    global REGISTERED_ORIGIN
+    failure = None
+    for candidate in sorted(candidates, key=lambda relay: relay.origin != preferred):
+        if candidate.origin == unavailable:
+            continue
+        try:
+            connection = connect_community_relay(candidate)
+        except (OSError, ValueError) as exc:
+            if SHUTTING_DOWN.is_set():
+                raise
+            failure = exc
+            continue
+        if not candidate.funnel_host and connection is not COMMUNITY_RELAY and not relay_transfers_media(candidate.origin, hd=True):
+            stop_relay_process(connection.process)
+            failure = ValueError("The community relay could not deliver a 720p test segment in time.")
+            continue
+        if candidate.origin != REGISTERED_ORIGIN:
+            try:
+                publish_creator(studio, origin=candidate.origin, community_relay_origin=candidates[0].origin)
+            except Exception:
+                if connection is not COMMUNITY_RELAY:
+                    stop_relay_process(connection.process)
+                raise
+            REGISTERED_ORIGIN = candidate.origin
+            set_community_relay(connection)
+            stop_legacy_relay()
+            generate_exports()
+        else:
+            set_community_relay(connection)
+        return connection
+    raise ValueError(f"No configured community relay passed validation. {failure or ''}".strip()) from failure
+
+
 def relay_key_path() -> Path:
     identity = DATA_DIR / "relay-identity"
     if not identity.is_file():
@@ -2080,40 +2604,88 @@ def relay_key_path() -> Path:
     return identity
 
 
+def enrolled_relay_probe(origin: str, kind: str, nonce: str) -> dict | None:
+    enrolled = load_json(DATA_DIR / "managed-community-relay.json", {})
+    profile = enrolled.get("profile") if isinstance(enrolled, dict) else None
+    if not isinstance(profile, dict) or profile.get("origin") != origin:
+        return None
+    settings = config()
+    try:
+        studio_id, secret, route = relay_registration(settings)
+        if studio_id != enrolled.get("creator_id"):
+            return None
+        return directory_request("POST", route, {"kind": kind, "nonce": nonce}, secret, timeout=5)
+    except ValueError:
+        return {}
+
+
 def relay_reaches_this_creator(origin: str) -> bool:
-    request = urllib.request.Request(f"{origin}/api/public/origin?check={secrets.token_hex(6)}",
+    nonce = secrets.token_hex(6)
+    probe = enrolled_relay_probe(origin, "identity", nonce)
+    if probe is not None:
+        return probe.get("instance") == RELAY_INSTANCE
+    request = urllib.request.Request(f"{origin}/api/public/origin?check={nonce}",
                                      headers={"Accept": "application/json", "Cache-Control": "no-cache"})
     try:
         with urllib.request.urlopen(request, timeout=4) as response:
-            return json.loads(response.read(512)).get("instance") == RELAY_INSTANCE
+            return response.geturl() == request.full_url and json.loads(response.read(512)).get("instance") == RELAY_INSTANCE
     except (OSError, ValueError, AttributeError):
         return False
 
 
-def media_funnel_origin(settings, media_port):
-    """Find a public root mapping that serves only this media listener."""
-    for block in [settings, *settings.get("Foreground", {}).values()]:
-        for host, enabled in block.get("AllowFunnel", {}).items():
-            if not enabled or not re.fullmatch(r"[a-z0-9.-]+\.ts\.net:(443|8443|10000)", host):
-                continue
-            handlers = block.get("Web", {}).get(host, {}).get("Handlers", {})
-            if set(handlers) == {"/"} and handlers["/"].get("Proxy", "").rstrip("/") == f"http://127.0.0.1:{media_port}":
-                return "https://" + host.removesuffix(":443")
-    return ""
-
-
-def configured_media_funnel():
-    executable = shutil.which("tailscale")
-    if not executable:
-        return ""
+def relay_transfers_media(origin: str, *, hd: bool = False) -> bool:
+    """Test actual byte delivery without starting an encoder or exposing library content."""
+    challenge = secrets.token_urlsafe(24)
+    request = urllib.request.Request(f"{origin}/api/public/origin?sample={challenge}",
+                                     headers={"Accept": "application/octet-stream", "Cache-Control": "no-cache"})
+    # A full sample represents at least one second at the live HD advertised peak (4 Mbps).
+    size, timeout = (len(RELAY_MEDIA_SAMPLE), 1.0) if hd else (128 * 1024, 2.0)
+    deadline = time.monotonic() + timeout
+    with LOCK:
+        RELAY_MEDIA_CHALLENGES[challenge] = size
     try:
-        result = subprocess.run([executable, "funnel", "status", "--json"], capture_output=True, timeout=3,
-                                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-        if result.returncode == 0:
-            return media_funnel_origin(json.loads(result.stdout), PUBLIC_MEDIA_PORT)
-    except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
-        pass
-    return ""
+        probe = enrolled_relay_probe(origin, "sample", challenge)
+        if probe is not None:
+            return probe.get("sha256") == hashlib.sha256(RELAY_MEDIA_SAMPLE[:size]).hexdigest()
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if (response.geturl() != request.full_url or response.headers.get_content_type() != "application/octet-stream"
+                    or response.headers.get("Content-Length") != str(size)):
+                return False
+            body = bytearray()
+            while len(body) < size and time.monotonic() < deadline:
+                chunk = response.read1(min(16384, size - len(body)))
+                if not chunk:
+                    return False
+                body.extend(chunk)
+            return time.monotonic() <= deadline and body == RELAY_MEDIA_SAMPLE[:size]
+    except (OSError, ValueError, AttributeError):
+        return False
+    finally:
+        with LOCK:
+            RELAY_MEDIA_CHALLENGES.pop(challenge, None)
+
+
+def is_funnel_origin(origin: str) -> bool:
+    return bool(re.fullmatch(r"https://[a-z0-9.-]+\.ts\.net(?::(?:443|8443|10000))?", origin, re.I))
+
+
+def is_legacy_relay(origin: str) -> bool:
+    host = urllib.parse.urlsplit(origin).hostname or ""
+    return host == "localhost.run" or host == "lhr.life" or host.endswith((".localhost.run", ".lhr.life"))
+
+
+def studio_publication_origin(requested: str, saved: str) -> str:
+    if requested and not is_legacy_relay(requested):
+        return requested
+    relay = load_json(DATA_DIR / "community-relay.json", {})
+    if isinstance(relay, dict) and relay:
+        profile = parse_community_relay_profile(relay)
+        if is_legacy_relay(profile.origin):
+            raise ValueError("The community relay profile needs a current HTTPS relay address.")
+        return profile.origin
+    if saved and not is_legacy_relay(saved):
+        return saved
+    raise ValueError("Studio does not have a verified ChannelForge relay yet.")
 
 
 def constrained_public_relay(settings=None):
@@ -2124,80 +2696,102 @@ def constrained_public_relay(settings=None):
 
 
 def start_public_tunnel() -> str:
-    global TUNNEL_PROCESS, TUNNEL_URL, TUNNEL_URLS
+    global TUNNEL_URL
     with TUNNEL_LOCK:
         if SHUTTING_DOWN.is_set():
             raise InterruptedError("Creator is shutting down.")
-        if PUBLIC_MEDIA_SERVER is None:
-            raise ValueError("The read-only media server is not running.")
-        if TUNNEL_URL and TUNNEL_PROCESS is None:
+        if TUNNEL_URL and PUBLIC_MEDIA_SERVER is not None and PUBLIC_MEDIA_SERVER.server_port == PUBLIC_MEDIA_PORT:
             return TUNNEL_URL
-        if TUNNEL_PROCESS is None or TUNNEL_PROCESS.poll() is not None:
-            funnel = configured_media_funnel()
-            if funnel and attach_media_funnel(funnel):
-                TUNNEL_URL = funnel
-                return funnel
-            ssh = openssh_tool("ssh")
-            if not ssh:
-                raise ValueError("Automatic public sharing requires OpenSSH, which was not found on this computer.")
-            known_hosts = DATA_DIR / "relay-known-hosts"
-            known_hosts.write_text(RELAY_HOST_KEY + "\n", encoding="ascii")
-            identity = relay_key_path()
-            null = "NUL" if sys.platform == "win32" else "/dev/null"
-            process = subprocess.Popen(
-                [ssh, "-F", null, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                 "-i", str(identity), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
-                 "-o", "StrictHostKeyChecking=yes", "-o", "HostKeyAlgorithms=ssh-ed25519",
-                 "-o", f'UserKnownHostsFile="{known_hosts.as_posix()}"', "-o", f"GlobalKnownHostsFile={null}",
-                 "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
-                 "-o", "ServerAliveCountMax=2", "-R", f"80:{HOST}:{PUBLIC_MEDIA_SERVER.server_port}",
-                 "channelforge@localhost.run", "--", "--output", "json"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace",
-                creationflags=0x08000000 if sys.platform == "win32" else 0,
-            )
-            TUNNEL_PROCESS, TUNNEL_URL = process, ""
-            urls: queue.Queue[str] = queue.Queue()
-            TUNNEL_URLS = urls
-
-            def read_output() -> None:
-                with process.stdout as output:
-                    for line in output:
-                        address = relay_address(line)
-                        if address:
-                            urls.put(address)
-
-            threading.Thread(target=read_output, daemon=True, name="channel-forge-relay-output").start()
-        deadline = time.monotonic() + 25
-        candidate = ""
-        while not SHUTTING_DOWN.is_set() and TUNNEL_PROCESS.poll() is None:
-            try:
-                candidate = TUNNEL_URLS.get_nowait()
-            except queue.Empty:
-                pass
-            if candidate and candidate != TUNNEL_URL and relay_reaches_this_creator(candidate):
-                TUNNEL_URL = candidate
-            if TUNNEL_URL and (not candidate or candidate == TUNNEL_URL):
-                return TUNNEL_URL
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(0.35 if candidate else 0.15)
-        stop_public_tunnel()
-        raise ValueError("Could not open the free media relay. Check the internet connection and try again.")
+        origin = config()["public_url"]
+        if not is_funnel_origin(origin):
+            raise ValueError("Studio does not have a saved Tailscale media origin.")
+        with stage_media_funnel(origin):
+            pass
+        TUNNEL_URL = origin
+        return origin
 
 
 def stop_public_tunnel() -> None:
-    global TUNNEL_PROCESS, TUNNEL_URL
+    global TUNNEL_URL
     with TUNNEL_LOCK:
-        if TUNNEL_PROCESS and TUNNEL_PROCESS.poll() is None:
-            TUNNEL_PROCESS.terminate()
-            try:
-                TUNNEL_PROCESS.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                TUNNEL_PROCESS.kill()
-                TUNNEL_PROCESS.wait()
-        TUNNEL_PROCESS = None
         TUNNEL_URL = ""
+
+
+def stop_legacy_relay() -> None:
+    global LEGACY_RELAY_PROCESS, LEGACY_RELAY_ORIGIN
+    with TUNNEL_LOCK:
+        if LEGACY_RELAY_PROCESS is not None:
+            stop_relay_process(LEGACY_RELAY_PROCESS)
+        LEGACY_RELAY_PROCESS = None
+        LEGACY_RELAY_ORIGIN = ""
+
+
+def fallback_studio_relay(profile: dict) -> None:
+    """Publish the legacy route only after the same Studio answers through it."""
+    global LEGACY_RELAY_PROCESS, LEGACY_RELAY_ORIGIN, REGISTERED_ORIGIN
+    if not profile or SHUTTING_DOWN.is_set():
+        return
+    with TUNNEL_LOCK:
+        if (LEGACY_RELAY_PROCESS is None or LEGACY_RELAY_PROCESS.poll() is not None
+                or not relay_reaches_this_creator(LEGACY_RELAY_ORIGIN)):
+            stop_legacy_relay()
+            start_public_media_server(automatic=True)
+            ssh = openssh_tool("ssh")
+            if not ssh or PUBLIC_MEDIA_SERVER is None:
+                raise ValueError("OpenSSH is needed for the legacy fallback.")
+            known_hosts = DATA_DIR / "relay-known-hosts"
+            known_hosts.write_text(LEGACY_RELAY_HOST_KEY + "\n", encoding="ascii")
+            identity = relay_key_path()
+            null = "NUL" if sys.platform == "win32" else "/dev/null"
+            process = subprocess.Popen([
+                ssh, "-F", null, "-T", "-a", "-x", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                "-i", str(identity), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+                "-o", "StrictHostKeyChecking=yes", "-o", "HostKeyAlgorithms=ssh-ed25519",
+                "-o", f'UserKnownHostsFile="{known_hosts.as_posix()}"', "-o", f"GlobalKnownHostsFile={null}",
+                "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
+                "-R", f"80:{HOST}:{PUBLIC_MEDIA_SERVER.server_port}", "channelforge@localhost.run", "--", "--output", "json",
+            ], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+            candidates = queue.Queue(maxsize=4)
+
+            def read_output():
+                with process.stdout as output:
+                    for line in output:
+                        origin = relay_address(line)
+                        if origin:
+                            try:
+                                candidates.put_nowait(origin)
+                            except queue.Full:
+                                pass
+
+            threading.Thread(target=read_output, name="channel-forge-legacy-relay", daemon=True).start()
+            accepted = False
+            try:
+                deadline = time.monotonic() + 15
+                while process.poll() is None and not SHUTTING_DOWN.is_set() and time.monotonic() < deadline:
+                    try:
+                        origin = candidates.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
+                    if (relay_reaches_this_creator(origin) and relay_transfers_media(origin)
+                            and process.poll() is None and not SHUTTING_DOWN.is_set()):
+                        LEGACY_RELAY_PROCESS, LEGACY_RELAY_ORIGIN = process, origin
+                        accepted = True
+                        break
+            finally:
+                if not accepted:
+                    stop_relay_process(process)
+            if not accepted:
+                raise ValueError("The localhost.run fallback could not deliver this Studio’s test data.")
+        if REGISTERED_ORIGIN != LEGACY_RELAY_ORIGIN:
+            try:
+                publish_creator(profile, origin=LEGACY_RELAY_ORIGIN, preserve_pending=True)
+            except (OSError, ValueError):
+                stop_legacy_relay()
+                raise
+            REGISTERED_ORIGIN = LEGACY_RELAY_ORIGIN
+            generate_exports()
 
 
 def ffmpeg_path() -> str:
@@ -2379,10 +2973,10 @@ def broadcast_health(channel_id=None):
     return "reconnecting" if channel_id and playback_error(channel_id) else "standby"
 
 
-def encoder_usage(process):
-    """Sample a running child without another monitoring daemon."""
-    pid = process.pid
-    if process.poll() is not None:
+def encoder_usage(process=None):
+    """Sample Studio or a running child without another monitoring daemon."""
+    pid = os.getpid() if process is None else process.pid
+    if process is not None and process.poll() is not None:
         return None, None
     try:
         if sys.platform.startswith("linux"):
@@ -2397,7 +2991,7 @@ def encoder_usage(process):
                 _fields_ = [("cb", wintypes.DWORD), ("faults", wintypes.DWORD),
                             ("peak_rss", ctypes.c_size_t), ("rss", ctypes.c_size_t),
                             ("additional", ctypes.c_size_t * 6)]
-            handle = wintypes.HANDLE(int(process._handle))
+            handle = wintypes.HANDLE(-1 if process is None else int(process._handle))
             times = [ctypes.c_ulonglong() for _ in range(4)]
             memory = Counters()
             memory.cb = ctypes.sizeof(memory)
@@ -2448,6 +3042,89 @@ def creator_broadcast_diagnostics():
     return report
 
 
+def channel_activity():
+    with LOCK:
+        feeds = list(LIVE_PLAYOUT.values())
+        encoder_counts = {}
+        if TESTER_BUILD:
+            for session in FFMPEG_SESSIONS.values():
+                feed = session.get("feed")
+                if feed and session["process"].poll() is None:
+                    encoder_counts[feed] = encoder_counts.get(feed, 0) + 1
+    activity = {}
+    for feed in feeds:
+        detail = feed.activity()
+        if TESTER_BUILD:
+            with feed.condition:
+                now = time.monotonic()
+                detail.update(
+                    encoders=encoder_counts.get(feed, 0),
+                    program=(feed.source or {}).get("title", ""),
+                    segments=feed.sequence,
+                    uptime_seconds=max(0, int(now - feed.started_at)),
+                    cooldown_seconds=max(0, int((LIVE_LEGACY_IDLE if feed.last_anonymous_request == feed.last_request
+                                                else LIVE_VIEWER_TTL + LIVE_VIEWER_GRACE) - (now - feed.last_request))),
+                )
+        activity[feed.channel_id] = detail
+    return activity
+
+
+def studio_process_usage():
+    """Return Studio and managed child usage as percentages of machine capacity."""
+    if sys.platform == "win32":
+        import ctypes
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [("size", ctypes.c_uint32), ("load", ctypes.c_uint32), ("values", ctypes.c_uint64 * 7)]
+
+        memory = MemoryStatus()
+        memory.size = ctypes.sizeof(memory)
+        ram_total = memory.values[0] if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)) else 0
+    elif sys.platform.startswith("linux"):
+        total = re.search(r"(?m)^MemTotal:\s+(\d+) kB$", Path("/proc/meminfo").read_text(encoding="ascii"))
+        ram_total = int(total[1]) * 1024 if total else 0
+    else:
+        return None, None
+
+    with LOCK:
+        managed = {session["process"].pid: session["process"] for session in FFMPEG_SESSIONS.values()}
+    community = COMMUNITY_RELAY
+    for process in (community.process if community else None, LEGACY_RELAY_PROCESS):
+        if process is not None and process.poll() is None:
+            managed[process.pid] = process
+    processes = [None, *managed.values()]
+    start = time.monotonic()
+    before = [encoder_usage(process)[0] for process in processes]
+    time.sleep(0.12)
+    after = [encoder_usage(process) for process in processes]
+    seconds = sum(max(0, current - prior) for prior, (current, _) in zip(before, after)
+                  if prior is not None and current is not None)
+    capacity = (time.monotonic() - start) * (os.cpu_count() or 1)
+    cpu = 100 * seconds / capacity if capacity > 0 and before[0] is not None and after[0][0] is not None else None
+    ram = 100 * sum(resident or 0 for _, resident in after) / ram_total if ram_total and after[0][1] is not None else None
+    return tuple(round(min(100, number), 2) if number is not None else None for number in (cpu, ram))
+
+
+def studio_system_activity():
+    try:
+        cpu, ram = studio_process_usage()
+    except (OSError, ValueError, IndexError):
+        cpu = ram = None
+    broadcasts = channel_activity()
+    now = time.monotonic()
+    with LOCK:
+        active_encoders = sum(session["process"].poll() is None for session in FFMPEG_SESSIONS.values())
+        starting_encoders = len(ENCODER_STARTING)
+    with STUDIO_TRAFFIC_LOCK:
+        bandwidth = sum(size for second, size in STUDIO_TRAFFIC.items() if int(now) - second < 10)
+    return {"sharing": SHARING_STATUS, "registered": bool(REGISTERED_ORIGIN),
+            "uptime_seconds": int(now - STUDIO_START), "cpu_percent": cpu, "ram_percent": ram,
+            "live_channels": sum(row["state"] == "live" for row in broadcasts.values()),
+            "viewer_sessions": sum(row["viewers"] for row in broadcasts.values()),
+            "encoder_count": active_encoders, "encoder_starting": starting_encoders,
+            "video_bps": bandwidth * 8 // 10, "heartbeat": HEARTBEAT_STATUS.copy()}
+
+
 def plex_part_key(item: dict) -> str:
     key = str(item.get("part_key", ""))
     if key.startswith("/library/parts/"):
@@ -2483,6 +3160,13 @@ def start_ffmpeg_session(channel: dict, *, public_delivery: bool = False, constr
         return start_or_reuse_encoder(channel, public_delivery=public_delivery, constrained_live=constrained_live, position=position)
 
 
+def square_pixel_scale(width: int, height: int) -> str:
+    # Size to the displayed picture first, then clear the source pixel aspect ratio.
+    display_width = "(iw*if(gt(sar,0),sar,1))"
+    factor = f"min(1,min({width}/{display_width},{height}/ih))"
+    return f"scale=w='max(2,trunc({display_width}*{factor}/2)*2)':h='max(2,trunc(ih*{factor}/2)*2)',setsar=1"
+
+
 def relay_renditions(constrained=False, *, on_demand=False):
     # name, max dimensions, video target/peak (kbit/s), threads, advertised peak including audio and TS.
     economy = ("economy", 480, 270, 104, 124, 1, 224000) if constrained else ("economy", 480, 270, 128, 165, 1, 270000)
@@ -2506,10 +3190,7 @@ def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool, v
         # FFmpeg advertises its average video target; ABR needs room for the
         # peak video rate, audio and MPEG-TS overhead on difficult scenes.
         peaks[name] = peak - (unscaled_max - maximum) * 1000
-        filters.append(
-            f"[{name}_in]scale=w='min({width},iw)':h='min({height},ih)':"
-            f"force_original_aspect_ratio=decrease:force_divisible_by=2[{name}]"
-        )
+        filters.append(f"[{name}_in]{square_pixel_scale(width, height)}[{name}]")
         maps += ["-map", f"[{name}]", f"-b:v:{index}", f"{bitrate}k",
                  f"-maxrate:v:{index}", f"{maximum}k", f"-bufsize:v:{index}", f"{maximum}k",
                  f"-threads:v:{index}", str(threads)]
@@ -2545,13 +3226,15 @@ def start_or_reuse_encoder(channel: dict, *, public_delivery: bool = False, cons
     if position.get("recovery_key"):
         start_key += ":" + position["recovery_key"]
     profile = "constrained" if constrained_live else "public" if public_delivery else "standard"
-    identity = hashlib.sha256(repr((channel["id"], media_source_identity(item), start_key, profile)).encode()).hexdigest()[:20]
+    reuse_key = (channel["id"], media_source_identity(item), start_key, profile)
     with LOCK:
         generation = ENCODER_GENERATION
-        existing = FFMPEG_SESSIONS.get(identity)
-        if existing and not existing.get("capacity_error") and existing["process"].poll() in (None, 0) and (existing["directory"] / "index.m3u8").exists():
-            existing["last_access"] = time.time()
-            return identity
+        for identity, existing in FFMPEG_SESSIONS.items():
+            if (existing.get("reuse_key") == reuse_key and not existing.get("capacity_error")
+                    and existing["process"].poll() in (None, 0) and (existing["directory"] / "index.m3u8").exists()):
+                existing["last_access"] = time.time()
+                return identity
+    identity = secrets.token_hex(10)
     relay = public_delivery or config()["public_tunnel"]
     # Include audio and transport-stream overhead. VOD retains its full seek history.
     seconds = max(1, (position["stop"] - position["start"]).total_seconds())
@@ -2562,7 +3245,8 @@ def start_or_reuse_encoder(channel: dict, *, public_delivery: bool = False, cons
     minimum = int(seconds * 40_000) + 8 * 1024**2 if on_demand else budget
     budget = reserve_encoder(identity, channel, budget, minimum)
     try:
-        return launch_encoder(identity, channel, position, profile, relay, budget, generation=generation)
+        return launch_encoder(identity, channel, position, profile, relay, budget,
+                              generation=generation, reuse_key=reuse_key)
     finally:
         with LOCK:
             ENCODER_STARTING.pop(identity, None)
@@ -2594,7 +3278,8 @@ def reserve_encoder(identity, channel, budget, minimum=None):
         return granted
 
 
-def launch_encoder(identity, channel, position, profile, relay, budget, *, software_retry=False, generation=None):
+def launch_encoder(identity, channel, position, profile, relay, budget, *, software_retry=False, generation=None,
+                   reuse_key=None):
     item = position["item"]
     on_demand = bool(channel.get("on_demand"))
     public_delivery = profile != "standard"
@@ -2648,8 +3333,7 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
     peaks = {}
     if constrained_live and has_audio is None:
         encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?", "-threads:v", "2",
-                    "-vf", f"{DEINTERLACE_VIDEO},scale=w='min(480,iw)':h='min(270,ih)':"
-                    "force_original_aspect_ratio=decrease:force_divisible_by=2",
+                    "-vf", f"{DEINTERLACE_VIDEO},{square_pixel_scale(480, 270)}",
                     "-b:v", "104k", "-maxrate", "124k", "-bufsize", "124k"]
         output = ["-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8")]
     elif relay and has_audio is not None and (media_rate is None or media_rate >= 750):
@@ -2660,11 +3344,11 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
         encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?"]
         if relay:
             maximum = min(1000, media_rate - audio_rate) if media_rate is not None else 1000
-            encoding += ["-vf", f"{DEINTERLACE_VIDEO},{LIVE_HD_SCALE}",
+            encoding += ["-vf", f"{DEINTERLACE_VIDEO},{square_pixel_scale(1280, 720)}",
                          "-b:v", f"{min(800, maximum)}k", "-maxrate", f"{maximum}k", "-bufsize", f"{maximum}k"]
         else:
             maximum = min(6000, media_rate - audio_rate) if media_rate is not None else 6000
-            filters = DEINTERLACE_VIDEO if on_demand else f"{DEINTERLACE_VIDEO},{LIVE_HD_SCALE}"
+            filters = DEINTERLACE_VIDEO if on_demand else f"{DEINTERLACE_VIDEO},{square_pixel_scale(1280, 720)}"
             encoding += ["-vf", filters, "-crf", "19", "-maxrate", f"{maximum}k", "-bufsize", f"{maximum * 2}k"]
         output = ["-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8")]
     policy = os.environ.get("CHANNELFORGE_VIDEO_ENCODER", "auto").lower()
@@ -2706,8 +3390,15 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
         "-f", "hls", "-hls_time", segment_duration, *hls_options,
         *output,
     ]
+    encoder_flags = 0
+    if sys.platform == "win32":
+        encoder_flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS
+    elif nice := shutil.which("nice"):
+        command = [nice, "-n", "5", *command]
     directory.mkdir(parents=True, exist_ok=True)
+    live_feed = position.get("_broadcast_feed")
     session = {"directory": directory, "channel_id": channel["id"], "created": time.time(),
+               "reuse_key": reuse_key, "feed": live_feed,
                "last_access": time.time(), "on_demand": on_demand, "budget": budget,
                "program": item.get("title", ""), "video_encoder": codec, "profile": profile,
                "audio_codec": "aac" if audio else "none", "segment_seconds": int(segment_duration), "variant_peaks": peaks,
@@ -2716,8 +3407,10 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
         with LOCK:
             if SHUTTING_DOWN.is_set() or (generation is not None and generation != ENCODER_GENERATION):
                 raise InterruptedError("The studio is shutting down.")
+            if live_feed and not live_feed.active():
+                raise InterruptedError("The live viewer lease expired.")
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       creationflags=0x08000000 if sys.platform == "win32" else 0)
+                                       creationflags=encoder_flags)
             session["process"] = process
             ENCODER_LAUNCHES[identity] = process
         def read_progress():
@@ -2743,6 +3436,8 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
         deadline = time.monotonic() + 25
         playlist = directory / "index.m3u8"
         while time.monotonic() < deadline:
+            if live_feed and not live_feed.active():
+                raise InterruptedError("The live viewer lease expired.")
             if playlist.exists() and playlist.stat().st_size:
                 with LOCK:
                     if SHUTTING_DOWN.is_set() or (generation is not None and generation != ENCODER_GENERATION):
@@ -2770,20 +3465,33 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
         if (codec != "libx264" and isinstance(exc, ValueError) and not SHUTTING_DOWN.is_set() and
                 (generation is None or generation == ENCODER_GENERATION)):
             record_broadcast_event(channel["id"], "encoder_fallback", codec)
-            return launch_encoder(identity, channel, position, profile, relay, budget, software_retry=True, generation=generation)
+            return launch_encoder(identity, channel, position, profile, relay, budget, software_retry=True,
+                                  generation=generation, reuse_key=reuse_key)
         raise
 
 
 def stop_encoder(session):
     """Reap the child before releasing its files, including failed startups."""
     process = session.get("process")
-    if process is not None:
+    if process is None:
+        return
+    with LOCK:
+        stop_lock = session.setdefault("stop_lock", threading.Lock())
+    with stop_lock:
+        if session.get("reaped"):
+            return
         if process.poll() is None:
-            process.terminate()
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
             process.wait()
         if session.get("error_reader"):
             session["error_reader"].join()
@@ -2792,6 +3500,7 @@ def stop_encoder(session):
         if session.get("progress_reader"):
             session["progress_reader"].join()
             process.stdout.close()
+        session["reaped"] = True
 
 
 def dispose_encoder(session):
@@ -2870,7 +3579,11 @@ class LivePlayout:
         # segment references live here; the encoder already retains the files.
         self.segments = deque(maxlen=30)
         self.condition = threading.Condition()
-        self.last_request = time.monotonic()
+        self.started_at = self.last_request = time.monotonic()
+        self.viewers = {}
+        self.peak_viewers = 0
+        self.media_bytes = {}
+        self.last_anonymous_request = float("-inf")
         self.error = None
         self.capacity_error = None
         self.finished = False
@@ -2905,16 +3618,70 @@ class LivePlayout:
                 NEXT_PROGRAM_SLOT.release()
         threading.Thread(target=prepare, daemon=True, name="channel-next-program").start()
 
+    def heartbeat(self, viewer=None):
+        with self.condition:
+            if self.stopped:
+                return
+            self.last_request = now = time.monotonic()
+            if viewer:
+                self.expire_viewers(now)
+                self.viewers.pop(viewer, None)
+                if len(self.viewers) >= 2048:
+                    self.viewers.pop(next(iter(self.viewers)))
+                self.viewers[viewer] = now
+                self.peak_viewers = max(self.peak_viewers, len(self.viewers))
+            else:
+                self.last_anonymous_request = now
+
+    def activity(self):
+        with self.condition:
+            now = time.monotonic()
+            self.expire_viewers(now)
+            anonymous = now - self.last_anonymous_request < LIVE_VIEWER_TTL
+            if self.finished or not self.active():
+                state = "idle"
+            elif not self.viewers and not anonymous:
+                state = "cooldown"
+            elif self.segments:
+                state = "live"
+            else:
+                state = "starting"
+            payload = sum(size for second, size in self.media_bytes.items() if int(now) - second < 10)
+            return {"state": state, "viewers": len(self.viewers), "peak_viewers": self.peak_viewers,
+                    "legacy_activity": anonymous, "upload_bps": payload * 8 // 10}
+
+    def expire_viewers(self, now):
+        while self.viewers:
+            viewer = next(iter(self.viewers))
+            if now - self.viewers[viewer] < LIVE_VIEWER_TTL:
+                break
+            self.viewers.pop(viewer)
+
+    def record_upload(self, size):
+        with self.condition:
+            second = int(time.monotonic())
+            self.media_bytes[second] = self.media_bytes.get(second, 0) + size
+            while self.media_bytes and second - next(iter(self.media_bytes)) >= 10:
+                self.media_bytes.pop(next(iter(self.media_bytes)))
+
     def active(self):
-        return not self.stopped and self.error is None and time.monotonic() - self.last_request < 60
+        elapsed = time.monotonic() - self.last_request
+        timeout = LIVE_LEGACY_IDLE if self.last_anonymous_request == self.last_request else LIVE_VIEWER_TTL + LIVE_VIEWER_GRACE
+        return not self.stopped and self.error is None and elapsed < timeout
 
     def session_keys(self):
         with self.condition:
             return {renditions["economy"][1].split("/")[2] for _, _, renditions in self.segments}
 
-    def playlist(self, variant):
+    def advertised_segments(self, session_id):
+        prefix = f"/ffmpeg-stream/{session_id}/"
         with self.condition:
-            self.last_request = time.monotonic()
+            return {path.removeprefix(prefix) for _, _, renditions in self.segments for _, path in renditions.values()
+                    if path.startswith(prefix)}
+
+    def playlist(self, variant, viewer=None):
+        with self.condition:
+            self.heartbeat(viewer)
             self.condition.wait_for(lambda: self.segments or self.error or self.finished or self.stopped, timeout=15)
             if self.capacity_error:
                 raise EncoderCapacityError(self.capacity_error)
@@ -3104,6 +3871,10 @@ def reap_idle_sessions_once(now: float | None = None) -> int:
         for channel_id, feed in list(LIVE_PLAYOUT.items()):
             if not feed.active():
                 del LIVE_PLAYOUT[channel_id]
+                with feed.condition:
+                    feed.stopped = True
+                    feed.condition.notify_all()
+        inactive_live = []
         active_live_directories = []
         for key, value in FFMPEG_SESSIONS.items():
             # Cached, finished movies can resume without starting Plex again.
@@ -3114,17 +3885,23 @@ def reap_idle_sessions_once(now: float | None = None) -> int:
                 # The player may be reading its pre-buffered segments. Playlist
                 # requests still lease the files referenced by that playlist.
                 value["last_access"] = last_access = max(last_access, moment - (time.monotonic() - feed.last_request))
+            elif feed and not feed.active() and value["process"].poll() is None:
+                inactive_live.append(value)
             retention = 600 if value.get("on_demand") and value["process"].poll() == 0 else 60
             if moment - last_access > retention:
                 expired.append((key, value))
             elif not value.get("on_demand") and value.get("directory"):
-                active_live_directories.append(value["directory"])
+                active_live_directories.append((value["directory"], key, feed))
         for key, _value in expired:
             FFMPEG_SESSIONS.pop(key, None)
     for _key, session in expired:
         dispose_encoder(session)
-    for directory in active_live_directories:
-        prune_live_segments(directory, moment - 90)
+    for session in inactive_live:
+        if not any(session is value for _, value in expired):
+            stop_encoder(session)
+    for directory, key, feed in active_live_directories:
+        advertised = feed.advertised_segments(key) if feed and feed.active() else ()
+        prune_live_segments(directory, moment - 90, advertised)
     if STREAM_DIR.is_dir():
         maintain_stream_storage(moment)
     return len(expired)
@@ -3199,17 +3976,18 @@ def maintain_stream_storage(moment):
             break  # Reassess growth before interrupting another active stream.
 
 
-def prune_live_segments(directory: Path, cutoff: float) -> None:
+def prune_live_segments(directory: Path, cutoff: float, advertised=()) -> None:
     for segment in directory.glob("segment*.ts"):
         try:
-            if encoder_file(segment.name) and not segment.is_symlink() and segment.stat().st_mtime < cutoff:
+            if (segment.name not in advertised and encoder_file(segment.name)
+                    and not segment.is_symlink() and segment.stat().st_mtime < cutoff):
                 segment.unlink()
         except OSError:
             continue
 
 
 def reap_idle_sessions() -> None:
-    while not SHUTTING_DOWN.wait(15):
+    while not SHUTTING_DOWN.wait(5):
         try:
             reap_idle_sessions_once()
         except OSError as exc:
@@ -3218,6 +3996,8 @@ def reap_idle_sessions() -> None:
 
 atexit.register(stop_ffmpeg_sessions)
 atexit.register(stop_public_tunnel)
+atexit.register(stop_legacy_relay)
+atexit.register(set_community_relay, None)
 
 
 def register_hls_url(url: str, channel_id: str = "") -> str:
@@ -3313,8 +4093,11 @@ def generate_exports(values: list[dict] | None = None) -> dict:
         stream = base + "/live/" + urllib.parse.quote(channel["id"]) + ".m3u8"
         logo = next((item for item in asset_manifest() if item.get("id") == channel.get("logo_asset_id")), None)
         logo_attribute = f' tvg-logo="{base}/user-assets/{logo["filename"]}"' if logo else ""
+        rating = channel.get("channel_rating", "")
+        level = CHANNEL_RATING_LEVELS.get(rating)
+        rating_attribute = f' tvg-rating="{rating}" tvg-rating-rank="{level}"' if level else ""
         lines.extend([
-            f'#EXTINF:-1 tvg-id="public-channelforge.{channel["id"]}" tvg-chno="{html.escape(str(channel["number"]))}"{logo_attribute},{channel["name"]}',
+            f'#EXTINF:-1 tvg-id="public-channelforge.{channel["id"]}" tvg-chno="{html.escape(str(channel["number"]))}"{logo_attribute}{rating_attribute},{channel["name"]}',
             stream,
         ])
     playlist_path = EXPORT_DIR / "channels.m3u"
@@ -3323,8 +4106,10 @@ def generate_exports(values: list[dict] | None = None) -> dict:
     return {"guide": str(guide_path), "playlist": str(playlist_path), "channels": len(values)}
 
 
-def vault_item_id(item: dict) -> str:
+def vault_item_id(item: dict, *, qualified: bool = True) -> str:
     identity = f'{item.get("source", "plex")}:{item.get("plex_server_id", "")}:{item.get("id", "")}:{item.get("file_path", "")}'
+    if qualified and item.get("source") == "jellyfin":
+        identity += ":" + str(item.get("section", ""))
     return hashlib.sha256(identity.encode()).hexdigest()[:24]
 
 
@@ -3354,7 +4139,9 @@ def unique_vault_movies():
 
 def public_movie(base: str, item_id: str, section: str, item: dict) -> dict:
     thumb = str(item.get("thumb", ""))
-    if item.get("source") == "local" and thumb:
+    if item.get("source") == "jellyfin":
+        poster_url = f"{base}/api/public/movie-art?id={item_id}" if jellyfin_id(thumb) else ""
+    elif item.get("source") == "local" and thumb:
         params = urllib.parse.urlencode({"section": item.get("section") or section, "id": item.get("id", "")})
         poster_url = f"{base}/api/local/image?{params}"
     elif thumb:
@@ -3487,9 +4274,11 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
         if not online and status == "standby":
             status = "reconnecting" if current else "standby"
         logo = assets.get(channel.get("logo_asset_id"))
+        rating = channel.get("channel_rating", "")
         result.append({
             "id": str(channel.get("id", "")), "name": str(channel.get("name", "Untitled")),
             "number": str(channel.get("number", "")), "online": online, "state": status,
+            "channel_rating": rating, "channel_rating_rank": CHANNEL_RATING_LEVELS.get(rating, 0),
             "stream_url": f"{base}/live/{urllib.parse.quote(str(channel.get('id', '')))}.m3u8",
             "air_until": channel.get("air_until", ""),
             "air_until_epoch_ms": int(parse_timestamp(channel["air_until"]).timestamp()*1000) if channel.get("air_until") else 0,
@@ -3520,9 +4309,15 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
 
 
 def vault_source(item_id: str) -> dict:
+    legacy = {}
     for _section, item in vault_movies():
-        if vault_item_id(item) == item_id:
+        current_id = vault_item_id(item)
+        if current_id == item_id:
             return item
+        if item.get("source") == "jellyfin" and vault_item_id(item, qualified=False) == item_id:
+            legacy[current_id] = item
+    if len(legacy) == 1:
+        return next(iter(legacy.values()))
     raise FileNotFoundError("Vault movie was not found.")
 
 
@@ -3581,6 +4376,18 @@ class Handler(BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
     protocol_version = "HTTP/1.1"
 
+    def send_response(self, code, message=None):
+        trace = getattr(self, "stream_trace", None)
+        if trace:
+            trace_id, phase, started = trace
+            report = {"trace_id": trace_id, "phase": phase, "httpError": code,
+                      "elapsed_ms": round((time.monotonic() - started) * 1000),
+                      "at_ms": int(time.time() * 1000)}
+            with LOCK:
+                STREAM_TRACES.append(report)
+            self.stream_trace = None
+        super().send_response(code, message)
+
     def delivery_profile(self):
         settings = config()
         # A studio's local and public listeners serve the same broadcast clock
@@ -3618,6 +4425,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.end_headers()
             self.wfile.write(body)
+            if TESTER_BUILD and status == 200 and content_type == "video/mp2t":
+                second = int(time.monotonic())
+                with STUDIO_TRAFFIC_LOCK:
+                    STUDIO_TRAFFIC[second] = STUDIO_TRAFFIC.get(second, 0) + len(body)
+                    for previous in tuple(STUDIO_TRAFFIC):
+                        if second - previous >= 10:
+                            STUDIO_TRAFFIC.pop(previous, None)
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             self.close_connection = True
 
@@ -3642,9 +4456,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
-    def broadcast(self, channel_id, playlist, token):
+    def broadcast(self, channel_id, playlist, token, viewer=None):
         public, constrained = self.delivery_profile()
-        feed_key = (channel_id, public, constrained)
         if playlist in ("master", "firetv"):
             channel = next((row for row in channels() if row["id"] == channel_id), None)
             if not channel:
@@ -3659,11 +4472,14 @@ class Handler(BaseHTTPRequestHandler):
                 if run_finished(current, boundary):
                     return None
                 position = schedule_position(current, boundary)
+                position["_broadcast_feed"] = feed
+                position["recovery_key"] = feed.token
                 if not warm:
                     feed.source = position["item"]
                     if position.get("substitute_for"):
                         record_broadcast_event(channel_id, "schedule_substitution", "unavailable_source")
-                    position["recovery_key"] = feed.recovery_key
+                    if feed.recovery_key:
+                        position["recovery_key"] += ":" + feed.recovery_key
                 try:
                     identity = start_ffmpeg_session(current, public_delivery=public, constrained_live=constrained, position=position)
                 except ValueError as exc:
@@ -3680,15 +4496,29 @@ class Handler(BaseHTTPRequestHandler):
                         session["feed"] = feed
                     return identity, session["directory"], session["process"], position["stop"]
 
+            retired = []
             with LOCK:
+                feed_key = next((key for key in LIVE_PLAYOUT if key[0] == channel_id), (channel_id, public, constrained))
                 feed = LIVE_PLAYOUT.get(feed_key)
                 if not feed or not feed.active() or feed.run_anchor != channel.get("schedule_anchor"):
                     if feed:
-                        feed.stopped = True
+                        with feed.condition:
+                            feed.stopped = True
+                            feed.condition.notify_all()
+                        retired = [session for session in FFMPEG_SESSIONS.values() if session.get("feed") is feed]
+                        del LIVE_PLAYOUT[feed_key]
+                    feed_key = (channel_id, public, constrained)
                     feed = LIVE_PLAYOUT[feed_key] = LivePlayout(open_program, channel.get("schedule_anchor"),
                                                                channel_id, lambda boundary: open_program(boundary, warm=True))
-                    threading.Thread(target=feed.run, daemon=True, name="channel-playout").start()
-                feed.last_request = time.monotonic()
+                    start_feed = True
+                else:
+                    start_feed = False
+                feed.heartbeat(viewer)
+            for session in retired:
+                stop_encoder(session)
+            if start_feed:
+                threading.Thread(target=feed.run, daemon=True, name="channel-playout").start()
+            constrained = feed_key[2]
             lines = ["#EXTM3U"]
             variants = [(name, peak) for name, *_, peak in relay_renditions(constrained)]
             if playlist == "firetv" and not constrained:
@@ -3697,11 +4527,11 @@ class Handler(BaseHTTPRequestHandler):
                 variants = (variants[1], variants[0], variants[2])
             for name, bandwidth in variants:
                 lines.extend([f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}",
-                              f"/broadcast/{channel_id}/{feed.token}/{name}.m3u8"])
+                              f"/broadcast/{channel_id}/{feed.token}/{name}.m3u8" + (f"?viewer={viewer}" if viewer else "")])
             manifest = "\n".join(lines) + "\n"
         else:
             with LOCK:
-                feed = LIVE_PLAYOUT.get(feed_key)
+                feed = next((feed for key, feed in LIVE_PLAYOUT.items() if key[0] == channel_id), None)
                 if feed and feed.token == token and feed.capacity_error:
                     return self.send_json(503, {"error": feed.capacity_error})
                 if feed and feed.token == token and feed.error:
@@ -3711,7 +4541,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not feed or feed.token != token or not feed.active():
                     return self.send_json(410, {"error": "Tune this channel again."})
             try:
-                manifest = feed.playlist(playlist)
+                manifest = feed.playlist(playlist, viewer)
             except EncoderCapacityError as exc:
                 return self.send_json(503, {"error": str(exc)})
             except ValueError:
@@ -3754,22 +4584,59 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urllib.parse.urlparse(self.path)
             broadcast = BROADCAST_ROUTE.fullmatch(parsed.path)
+            self.stream_trace = None
+            if broadcast or parsed.path.startswith(("/live/", "/vault/")):
+                viewer = urllib.parse.parse_qs(parsed.query).get("viewer", [""])[0]
+                if LIVE_VIEWER_ID.fullmatch(viewer):
+                    phase = "rendition" if broadcast and broadcast[2] else "movie" if parsed.path.startswith("/vault/") else "tune"
+                    self.stream_trace = (viewer, phase, time.monotonic())
             if broadcast:
-                return self.broadcast(broadcast[1], broadcast[3] or broadcast[4], broadcast[2])
+                viewer = urllib.parse.parse_qs(parsed.query).get("viewer", [""])[0]
+                return self.broadcast(broadcast[1], broadcast[3] or broadcast[4], broadcast[2],
+                                      viewer if LIVE_VIEWER_ID.fullmatch(viewer) else None)
             if parsed.path == "/api/local-creator":
                 settings = config()
                 name = settings["creator_profile"].get("name") or settings["plex_profile"].get("server_name")
                 self.send_json(200, {"app": APP_NAME, "version": DISCOVERY_VERSION, "name": name, "channel_count": sum(not run_finished(row) for row in channels()),
                                      "creator_id": settings["creator_id"], "public_url": settings["public_url"]})
+            elif TESTER_BUILD and parsed.path == "/api/tester/automatic":
+                from tester_diagnostics import automatic_reports
+                return self.send_json(200, {"enabled": automatic_reports()})
+            elif TESTER_BUILD and parsed.path == "/api/tester/studio-report":
+                from tester_diagnostics import clean_report
+                with LOCK:
+                    traces = list(STREAM_TRACES)[-24:]
+                activity = studio_system_activity()
+                return self.send_json(200, clean_report({
+                    "app": VERSION, "component": "studio", "platform": "windows" if sys.platform == "win32" else "linux",
+                    "build_revision": json.loads(TESTER_CONFIG.read_text(encoding="utf-8")).get("revision"),
+                    "stream_traces": traces, "channels": len(channels()), **activity,
+                    "relay_constrained": constrained_public_relay()
+                }))
+            elif TESTER_BUILD and parsed.path == "/studio-tester.js":
+                return self.send_bytes(200, (WEB_DIR / "studio-tester.js").read_bytes(), "text/javascript")
+            elif TESTER_BUILD and parsed.path in {"/tester-updates.js", "/tester-report-ui.js", "/tester-report-ui.css"}:
+                content_type = "text/css" if parsed.path.endswith(".css") else "text/javascript"
+                return self.send_bytes(200, (WEB_DIR / parsed.path[1:]).read_bytes(), content_type)
+            elif TESTER_BUILD and parsed.path in {"/api/tester-update", "/api/tester-update/progress", "/api/tester-update/installed"}:
+                from tester_updates import local_update
+                return self.send_json(*local_update("GET", parsed.path, self.headers, self.server.server_port, component="studio"))
+            elif parsed.path == "/api/studio/activity" or (TESTER_BUILD and parsed.path == "/api/tester/activity"):
+                return self.send_json(200, studio_system_activity())
+            elif TESTER_BUILD and parsed.path == "/studio-tester.css":
+                return self.send_bytes(200, (WEB_DIR / "studio-tester.css").read_bytes(), "text/css")
             elif parsed.path == "/api/diagnostics":
+                with LOCK:
+                    traces = list(STREAM_TRACES)
                 return self.send_json(200, {"version": VERSION, "platform": sys.platform, "sharing": SHARING_STATUS,
                                             "registered": bool(REGISTERED_ORIGIN), "heartbeat": HEARTBEAT_STATUS.copy(),
-                                            "broadcast": creator_broadcast_diagnostics()})
+                                            "broadcast": creator_broadcast_diagnostics(), "stream_traces": traces})
             elif parsed.path == "/playback-diagnostics.js":
                 return self.send_bytes(200, (WEB_DIR / "playback-diagnostics.js").read_bytes(), "text/javascript")
             elif parsed.path == "/api/status":
                 if urllib.parse.parse_qs(parsed.query).get("brief") == ["1"]:
-                    return self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True)})
+                    return self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True),
+                                                "broadcasts": channel_activity()})
                 values = channels()
                 now_playing = {}
                 for channel in values:
@@ -3784,7 +4651,7 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     except ValueError:
                         pass
-                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": values, "now_playing": now_playing, "assets": asset_manifest(), "tools": plugin_tools(), "backup_count": len(list(BACKUP_DIR.glob("*.json"))), "data_dir": str(DATA_DIR), "server_base": server_base(), "playback_engine": ffmpeg_status()})
+                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": values, "now_playing": now_playing, "assets": asset_manifest(), "tools": plugin_tools(), "backup_count": len(list(BACKUP_DIR.glob("*.json"))), "data_dir": str(DATA_DIR), "server_base": server_base(), "playback_engine": ffmpeg_status(), "broadcasts": channel_activity()})
             elif parsed.path == "/api/plex/libraries":
                 self.send_json(200, {"libraries": plex_libraries()})
             elif parsed.path == "/api/plex/items":
@@ -3839,7 +4706,13 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/public/vault":
                 query = urllib.parse.parse_qs(parsed.query)
                 payload = {"version": 1, "generated_at": datetime.now(timezone.utc).isoformat()}
-                if "limit" in query:
+                if "id" in query:
+                    item_id = query["id"][0]
+                    record = None
+                    if re.fullmatch(r"[a-f0-9]{24}", item_id):
+                        record = next((row for row in unique_vault_movies() if row[0] == item_id), None)
+                    payload.update(items=[public_movie(self.catalog_base(), *record)] if record else [], next_offset=None)
+                elif "limit" in query:
                     limit = max(1, min(100, int(query["limit"][0])))
                     offset = max(0, int(query.get("offset", ["0"])[0]))
                     if "sort" in query:
@@ -3850,14 +4723,33 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     payload["items"] = vault_items(self.catalog_base())
                 self.send_json(200, payload)
+            elif parsed.path == "/api/public/movie-art":
+                item_id = urllib.parse.parse_qs(parsed.query).get("id", [""])[0]
+                if not re.fullmatch(r"[a-f0-9]{24}", item_id):
+                    raise FileNotFoundError
+                item = vault_source(item_id)
+                image_id = jellyfin_id(item.get("thumb"))
+                if item.get("source") != "jellyfin" or not image_id:
+                    raise FileNotFoundError
+                source, _ = jellyfin_section(item.get("section", ""))
+                image, content_type = jellyfin_request(source, f"/Items/{image_id}/Images/Primary?maxWidth=480", image=True)
+                self.send_bytes(200, image, content_type, {"Cache-Control": "public, max-age=300"})
             elif parsed.path == "/api/public/channels":
                 guide = urllib.parse.parse_qs(parsed.query).get("guide")
                 self.send_json(200, public_channel_catalog(self.catalog_base(), extended=guide == ["extended"],
                                                            brief=guide == ["brief"], continuous=True))
             elif parsed.path == "/api/public/origin":
-                self.send_json(200, {"instance": RELAY_INSTANCE})
+                challenge = urllib.parse.parse_qs(parsed.query).get("sample", [""])[0]
+                with LOCK:
+                    sample_size = RELAY_MEDIA_CHALLENGES.pop(challenge, 0)
+                if sample_size:
+                    self.send_bytes(200, RELAY_MEDIA_SAMPLE[:sample_size], "application/octet-stream")
+                else:
+                    self.send_json(200, {"instance": RELAY_INSTANCE})
             elif parsed.path == "/api/update":
-                release = latest_release()
+                release = ({"current_version": VERSION, "update_available": False,
+                            "notes": "Go to System and select Check for Update."}
+                           if TESTER_BUILD else latest_release())
                 release.pop("assets", None)
                 self.send_json(200, release)
             elif parsed.path == "/api/update/progress":
@@ -3883,21 +4775,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(200, body, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
             elif parsed.path.startswith("/live/") and parsed.path.endswith(".m3u8"):
                 channel_id = Path(parsed.path).stem
-                channel = next((item for item in channels() if item.get("id") == channel_id), None)
-                if not channel:
-                    raise FileNotFoundError
-                if run_finished(channel):
-                    return self.send_json(410, {"error": "This channel has finished its lineup."})
-                try:
-                    public_delivery, constrained_live = self.delivery_profile()
-                    route = start_playback_route(channel, public_delivery=public_delivery, constrained_live=constrained_live)
-                    with LOCK:
-                        PLAYBACK_ERRORS.pop(channel_id, None)
-                except Exception as exc:
-                    with LOCK:
-                        PLAYBACK_ERRORS[channel_id] = (time.monotonic(), sanitized_playback_error(exc))
-                    raise
-                self.send_playback_manifest(route, constrained_live=constrained_live)
+                viewer = urllib.parse.parse_qs(parsed.query).get("viewer", [""])[0]
+                return self.broadcast(channel_id, "master", None, viewer if LIVE_VIEWER_ID.fullmatch(viewer) else None)
             elif parsed.path.startswith("/vault/") and parsed.path.endswith(".m3u8"):
                 item_id = Path(parsed.path).stem
                 if not re.fullmatch(r"[a-f0-9]{24}", item_id):
@@ -3922,7 +4801,11 @@ class Handler(BaseHTTPRequestHandler):
                 if path.suffix == ".m3u8":
                     self.send_bytes(200, viewer_encoder_playlist(session, parts[2]), "application/vnd.apple.mpegurl")
                 else:
-                    self.send_bytes(200, path.read_bytes(), "video/mp2t")
+                    body = path.read_bytes()
+                    headers = {"Cache-Control": "public, max-age=60, immutable"} if isinstance(self, PublicMediaHandler) else None
+                    self.send_bytes(200, body, "video/mp2t", headers)
+                    if feed := session.get("feed"):
+                        feed.record_upload(len(body))
             elif parsed.path.startswith("/hls-proxy/"):
                 proxy_id = parsed.path.rsplit("/", 1)[-1]
                 with LOCK:
@@ -3947,10 +4830,28 @@ class Handler(BaseHTTPRequestHandler):
                 if not match:
                     raise FileNotFoundError
                 self.send_bytes(200, (ASSETS_DIR / filename).read_bytes(), match.get("content_type", "application/octet-stream"))
-            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/tasks.css", "/studio.css", "/desk.css", "/guide.css", "/wizard.css", "/tv-theme.css", "/hls.min.js", "/HLSJS_LICENSE.txt", "/creator-sidebar.png"):
+            elif parsed.path == "/creator-sidebar.png":
+                self.send_bytes(200, CREATOR_ICON.read_bytes(), "image/png")
+            elif parsed.path in ("/", "/index.html", "/app.js", "/styles.css", "/player.css", "/plex.css", "/overlays.css", "/onboarding.css", "/ux.css", "/update.css", "/tasks.css", "/studio.css", "/desk.css", "/guide.css", "/wizard.css", "/tv-theme.css", "/hls.min.js", "/HLSJS_LICENSE.txt"):
                 name = "index.html" if parsed.path in ("/", "/index.html") else parsed.path[1:]
                 path = WEB_DIR / name
-                self.send_bytes(200, path.read_bytes(), mimetypes.guess_type(name)[0] or "text/plain")
+                body = path.read_bytes()
+                if TESTER_BUILD and name == "index.html":
+                    body = body.replace(b"<html", b"<html data-tester", 1)
+                    body = body.replace(b"<title>ChannelForge Studio</title>", b"<title>ChannelForge Studio Tester</title>")
+                    body = body.replace(b"<h1>ChannelForge Studio</h1>", b"<h1>ChannelForge Studio Tester</h1>")
+                    body = body.replace(b"</head>", b'<link rel="stylesheet" href="/studio-tester.css">'
+                                        b'<link rel="stylesheet" href="/tester-report-ui.css"></head>')
+                    body = body.replace(b' data-open-diagnostics>Diagnostics', b' data-view="developer">Developer')
+                    body = body.replace(b'</main>', b'<section id="developer" class="view"><div class="page-heading">'
+                                        b'<div><h2>Developer</h2><p>Private Tester build</p></div>'
+                                        b'<button data-view="system">Back to System</button></div></section></main>')
+                    body = body.replace(b'<script src="/playback-diagnostics.js"></script>', b'')
+                    body = body.replace(b'>Checking for updates', b'>Ready to check for updates', 1)
+                    body = body.replace(b'>Check for updates</button>', b'>Check for Update</button>')
+                    body = body.replace(b"</body>", b'<script src="/tester-report-ui.js"></script>'
+                                        b'<script src="/studio-tester.js"></script><script src="/tester-updates.js"></script></body>')
+                self.send_bytes(200, body, mimetypes.guess_type(name)[0] or "text/plain")
             else:
                 self.send_json(404, {"error": "Not found"})
         except FileNotFoundError:
@@ -3963,6 +4864,39 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urllib.parse.urlparse(self.path)
+            if TESTER_BUILD and parsed.path.startswith("/api/tester-update/"):
+                from tester_updates import local_update
+                return self.send_json(*local_update("POST", parsed.path, self.headers, self.server.server_port))
+            if TESTER_BUILD and parsed.path.startswith("/api/update/"):
+                return self.send_json(403, {"error": "Open the Tester launcher to check for private updates."})
+            if TESTER_BUILD and parsed.path == "/api/tester/automatic":
+                from tester_diagnostics import automatic_reports
+                data = self.body()
+                if self.headers.get("X-ChannelForge-Tester") != "studio" or not isinstance(data.get("agreed"), bool):
+                    return self.send_json(403, {"error": "Open the Developer settings inside Studio Tester."})
+                return self.send_json(200, {"enabled": automatic_reports(data["agreed"])})
+            if TESTER_BUILD and parsed.path == "/api/tester/plex/signout":
+                if self.headers.get("X-ChannelForge-Tester") != "studio":
+                    return self.send_json(403, {"error": "Open Media sources inside Studio Tester."})
+                with LOCK:
+                    settings = load_json(CONFIG_FILE, {})
+                    settings.update(plex_token="", plex_profile={})
+                    atomic_json(CONFIG_FILE, settings)
+                    PLEX_RESOURCE_CACHE.update(expires=0.0, servers={})
+                return self.send_json(200, {"ok": True})
+            if TESTER_BUILD and parsed.path == "/api/tester/studio-report":
+                from tester_diagnostics import post_report
+                if self.headers.get("X-ChannelForge-Tester") != "studio":
+                    return self.send_json(403, {"error": "Open the Developer settings inside Studio Tester."})
+                config_file = WEB_DIR.parent / "assets/tester-config.json"
+                target = json.loads(config_file.read_text(encoding="utf-8")).get("report_url", "")
+                report = self.body()
+                report["platform"] = "windows" if sys.platform == "win32" else "linux"
+                report["component"] = "studio"
+                receipt = post_report(target, report)
+                if receipt:
+                    return self.send_json(201, {"receipt": receipt})
+                return self.send_json(502, {"error": "Could not send the Studio report. Check the Tester link and try again."})
             if parsed.path == "/api/local/upload":
                 query = urllib.parse.parse_qs(parsed.query)
                 result = upload_local_media(self, query.get("section", [""])[0], self.headers.get("X-File-Name", ""))
@@ -4099,6 +5033,8 @@ class Handler(BaseHTTPRequestHandler):
 class PublicMediaHandler(Handler):
     """Limit the public HTTPS origin to the paths TV viewers consume."""
 
+    relay_prefix = ""
+
     def end_headers(self) -> None:
         self.send_header("X-ChannelForge-Version", DISCOVERY_VERSION)
         super().end_headers()
@@ -4111,9 +5047,27 @@ class PublicMediaHandler(Handler):
             payload = {"error": "Published media is temporarily unavailable."}
         super().send_json(status, payload)
 
+    def redirect(self, location: str) -> None:
+        if self.relay_prefix and location.startswith("/") and not location.startswith(("//", "/studio/")):
+            location = self.relay_prefix + location
+        super().redirect(location)
+
+    def send_bytes(self, status: int, body: bytes, content_type: str, extra_headers=None) -> None:
+        if self.relay_prefix and status == 200 and "mpegurl" in content_type:
+            prefix = self.relay_prefix.encode("ascii")
+            body = re.sub(rb'(?m)(^|URI=")/(?!(?:/|studio/))', rb"\1" + prefix + b"/", body)
+        super().send_bytes(status, body, content_type, extra_headers)
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
+        slot = re.match(RELAY_SLOT_PATH + r"(?=/)", path)
+        self.relay_prefix = slot[0] if slot else ""
+        if slot:
+            # Relay maps each exact slot to a distinct loopback tunnel. Keep
+            # the original scope for outgoing HLS references and redirects.
+            path = path[slot.end():]
+            self.path = path + ("?" + parsed.query if parsed.query else "")
         if BROADCAST_ROUTE.fullmatch(path):
             return super().do_GET()
         if path == "/api/plex/image":
@@ -4121,7 +5075,7 @@ class PublicMediaHandler(Handler):
             if not re.fullmatch(r"/library/metadata/\d+/(?:thumb|art)(?:/\d+)?", image):
                 return self.send_json(404, {"error": "Not found"})
         elif path not in {
-            "/api/public/channels", "/api/public/vault", "/api/public/origin", "/api/public/program-art", "/api/local/image",
+            "/api/public/channels", "/api/public/vault", "/api/public/origin", "/api/public/program-art", "/api/public/movie-art", "/api/local/image",
             "/exports/guide.xml", "/exports/channels.m3u",
         } and not re.fullmatch(
             r"/(?:live|vault)/[a-zA-Z0-9_-]+\.m3u8|"
@@ -4140,6 +5094,10 @@ class PublicMediaHandler(Handler):
 
 
 class PublicMediaServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        if not isinstance(sys.exc_info()[1], (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            super().handle_error(request, client_address)
+
     def server_bind(self):
         if sys.platform == "win32":
             self.allow_reuse_address = False
@@ -4153,26 +5111,41 @@ def open_public_media_server(port):
     return server
 
 
-def attach_media_funnel(origin):
-    """Keep the relay listener available until the public Funnel proves ownership."""
+@contextmanager
+def stage_media_funnel(origin):
+    """Keep the old listener available until the verified Funnel is accepted."""
     global PUBLIC_MEDIA_SERVER
     with PUBLIC_MEDIA_LOCK:
+        if SHUTTING_DOWN.is_set():
+            raise InterruptedError("Creator is shutting down.")
         previous = PUBLIC_MEDIA_SERVER
-        if previous.server_port == PUBLIC_MEDIA_PORT:
-            return relay_reaches_this_creator(origin)
-        try:
-            candidate = open_public_media_server(PUBLIC_MEDIA_PORT)
-        except OSError:
-            return False
+        candidate = previous
+        if previous is None or previous.server_port != PUBLIC_MEDIA_PORT:
+            try:
+                candidate = open_public_media_server(PUBLIC_MEDIA_PORT)
+            except OSError as exc:
+                raise ValueError(f"Studio media port {PUBLIC_MEDIA_PORT} is busy. Close the other listener and try again.") from exc
         try:
             if not relay_reaches_this_creator(origin):
-                return False
+                raise ValueError(f"This Funnel does not reach Studio. Forward port {PUBLIC_MEDIA_PORT} and check its HTTPS URL.")
+            if not relay_transfers_media(origin, hd=True):
+                raise ValueError("Funnel could not deliver the 720p test payload in time. Check the upload connection and try again.")
+            yield
             PUBLIC_MEDIA_SERVER = candidate
         finally:
-            retired = previous if PUBLIC_MEDIA_SERVER is candidate else candidate
-            retired.shutdown()
-            retired.server_close()
-        return True
+            if candidate is not previous:
+                retired = previous if PUBLIC_MEDIA_SERVER is candidate else candidate
+                if retired is not None:
+                    retired.shutdown()
+                    retired.server_close()
+
+
+def attach_media_funnel(origin):
+    try:
+        with stage_media_funnel(origin):
+            return True
+    except ValueError:
+        return False
 
 
 def start_public_media_server(*, automatic: bool = False) -> None:
@@ -4318,7 +5291,28 @@ def restore_public_sharing() -> None:
     relay_misses = 0
     next_relay_check = 0.0
     next_heartbeat = 0.0
+
+    def heartbeat(settings, state, now):
+        nonlocal next_heartbeat
+        if not settings["creator_profile"].get("heartbeat_supported") or now < next_heartbeat:
+            return
+        HEARTBEAT_STATUS["last_attempt"] = int(time.time())
+        try:
+            directory_request("POST", f'/v1/creators/{settings["creator_id"]}/heartbeat',
+                              {"state": state}, settings["creator_key"])
+        except ValueError:
+            HEARTBEAT_STATUS["failures"] += 1
+            next_heartbeat = now + min(120, 10 * 2 ** min(4, HEARTBEAT_STATUS["failures"] - 1))
+            raise
+        HEARTBEAT_STATUS.update(last_success=int(time.time()), failures=0)
+        next_heartbeat = now + 60
+        try:
+            sync_public_channel_numbers(settings)
+        except ValueError:
+            pass  # Reconcile an interrupted number update on the next heartbeat.
+
     while not SHUTTING_DOWN.is_set():
+        wait_seconds = 20
         PUBLISH_CHANGED.clear()
         if SHUTTING_DOWN.is_set():
             return
@@ -4326,48 +5320,94 @@ def restore_public_sharing() -> None:
             settings = config()
             profile = settings["creator_profile"]
             pending = settings["pending_creator_profile"]
+            migrate = (not pending and profile and settings.get("auto_publish_channels")
+                       and can_use_managed_relay(settings))
+            if migrate:
+                pending = {**profile, "managed_relay": True}
+            failed_origin = ""
             try:
-                if pending and not profile and settings["auto_publish_channels"]:
-                    SHARING_STATUS = "connecting"
+                if pending and settings["auto_publish_channels"]:
+                    if migrate and is_funnel_origin(settings["public_url"]) and PUBLIC_MEDIA_SERVER is None:
+                        # Restore the existing endpoint on restart before attempting migration.
+                        start_public_media_server()
+                    if not REGISTERED_ORIGIN:
+                        SHARING_STATUS = "connecting"
                     publish_studio(pending)
+                    next_heartbeat = 0.0
+                    wait_seconds = 1
                 elif profile:
-                    start_public_media_server(automatic=settings["public_tunnel"])
-                    origin = start_public_tunnel() if settings["public_tunnel"] else settings["public_url"]
+                    saved_origin = settings.get("public_url", "")
+                    if not saved_origin or is_legacy_relay(saved_origin):
+                        if not REGISTERED_ORIGIN:
+                            SHARING_STATUS = "connecting"
+                        publish_studio({**profile, "public_url": saved_origin})
+                        settings = config()
+                        profile = settings["creator_profile"]
+                        next_heartbeat = 0.0
+                    automatic = not settings.get("community_relay_origin") and (
+                        settings["public_tunnel"] or is_funnel_origin(settings.get("public_url", "")))
+                    relays = () if automatic else community_relay_candidates(
+                        settings.get("community_relay_origin") or settings["public_url"])
+                    with LOCK:
+                        check_transfer = len(relays) > 1 and any(
+                            session["process"].poll() is None for session in FFMPEG_SESSIONS.values())
+                    if not automatic:
+                        start_public_media_server(automatic=bool(relays))
+                    origin = start_public_tunnel() if automatic else settings["public_url"]
+                    if relays:
+                        previous = COMMUNITY_RELAY
+                        connection = accept_community_relay(relays, origin, profile)
+                        origin = connection.profile.origin
+                        if connection is not previous:
+                            relay_misses = 0
+                            next_relay_check = time.monotonic() + 15
+                            next_heartbeat = 0.0
+                            settings = config()
+                            profile = settings["creator_profile"]
+                    elif COMMUNITY_RELAY is not None:
+                        set_community_relay(None)
                     now = time.monotonic()
                     if origin != REGISTERED_ORIGIN:
                         SHARING_STATUS = "connecting"
-                        raw = load_json(CONFIG_FILE, {})
-                        raw["public_url"] = origin
-                        atomic_json(CONFIG_FILE, raw)
-                        generate_exports()
-                        publish_creator(profile)
+                        publish_creator(profile, origin=origin)
                         REGISTERED_ORIGIN = origin
+                        generate_exports()
+                        settings = config()
+                        profile = settings["creator_profile"]
+                        next_heartbeat = 0.0
                         relay_misses = 0
                         next_relay_check = now + 60
-                    elif settings["public_tunnel"] and now >= next_relay_check:
-                        if relay_reaches_this_creator(origin):
+                    elif (automatic or relays) and now >= next_relay_check:
+                        healthy = relay_transfers_media(origin) if check_transfer else relay_reaches_this_creator(origin)
+                        if healthy:
                             relay_misses = 0
-                            next_relay_check = now + 60
+                            next_relay_check = now + (15 if relays else 60)
                         else:
                             relay_misses += 1
-                            next_relay_check = now + 15
+                            next_relay_check = now + (5 if relays else 15)
                             if relay_misses >= 2:
-                                stop_public_tunnel()
-                                REGISTERED_ORIGIN = ""
-                                raise ValueError("The public relay stopped responding. Reconnecting.")
+                                if len(relays) > 1:
+                                    accept_community_relay(relays, origin, profile, unavailable=origin)
+                                    settings = config()
+                                    profile = settings["creator_profile"]
+                                    next_heartbeat = 0.0
+                                    relay_misses = 0
+                                    next_relay_check = now + 15
+                                elif relays:
+                                    failed_origin = origin
+                                    set_community_relay(None)
+                                    accept_community_relay(relays, origin, profile)
+                                    relay_misses = 0
+                                    next_relay_check = now + 15
+                                    next_heartbeat = 0.0
+                                else:
+                                    stop_public_tunnel()
+                                    REGISTERED_ORIGIN = ""
+                                    raise ValueError("The public relay stopped responding. Reconnecting.")
+                    if relays:
+                        wait_seconds = max(1, min(wait_seconds, next_relay_check - now))
                     if profile.get("heartbeat_supported") and now >= next_heartbeat:
-                        state = "reconnecting" if relay_misses else broadcast_health(None)
-                        HEARTBEAT_STATUS["last_attempt"] = int(time.time())
-                        try:
-                            directory_request("POST", f'/v1/creators/{settings["creator_id"]}/heartbeat',
-                                              {"state": state}, settings["creator_key"])
-                        except ValueError:
-                            HEARTBEAT_STATUS["failures"] += 1
-                            next_heartbeat = now + min(120, 10 * 2 ** min(4, HEARTBEAT_STATUS["failures"] - 1))
-                            raise
-                        else:
-                            HEARTBEAT_STATUS.update(last_success=int(time.time()), failures=0)
-                            next_heartbeat = now + 60
+                        heartbeat(settings, "reconnecting" if relay_misses else broadcast_health(None), now)
                     SHARING_STATUS = "retrying" if relay_misses or HEARTBEAT_STATUS["failures"] else "live"
                 else:
                     REGISTERED_ORIGIN = ""
@@ -4381,13 +5421,47 @@ def restore_public_sharing() -> None:
                 if failures == 1:
                     print(f"ChannelForge public sharing could not connect: {sanitized_playback_error(exc)}")
                 SHARING_STATUS = "retrying"
-        PUBLISH_CHANGED.wait(min(120, 5 * 2 ** min(max(0, failures - 1), 5)) if failures else 20)
+                saved = settings.get("public_url", "")
+                if (profile and settings.get("auto_publish_channels") and settings.get("creator_id")
+                        and settings.get("creator_key") and settings.get("directory_url") == DEFAULT_DIRECTORY_URL
+                        and (settings.get("managed_relay") or pending.get("managed_relay") or is_legacy_relay(saved))
+                        and not SHUTTING_DOWN.is_set()):
+                    previous_origin = REGISTERED_ORIGIN
+                    served = previous_origin or saved
+                    try:
+                        if served and served != failed_origin and relay_reaches_this_creator(served):
+                            REGISTERED_ORIGIN = served
+                        else:
+                            fallback_studio_relay(profile)
+                            set_community_relay(None)
+                            stop_public_tunnel()
+                        if REGISTERED_ORIGIN != previous_origin:
+                            next_heartbeat = 0.0
+                        if REGISTERED_ORIGIN and not SHUTTING_DOWN.is_set():
+                            current = config()
+                            if current["creator_profile"].get("heartbeat_supported"):
+                                heartbeat(current, broadcast_health(None), time.monotonic())
+                            SHARING_STATUS = "live"
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        pass
+        PUBLISH_CHANGED.wait(min(120, 5 * 2 ** min(max(0, failures - 1), 5)) if failures else wait_seconds)
 
 
 def shut_down_creator_host(server, *, serving_in_background=True):
     """Release this host's listeners and child processes, preserving published configuration."""
     SHUTTING_DOWN.set()
     PUBLISH_CHANGED.set()
+    if REGISTERED_ORIGIN and PUBLISH_LOCK.acquire(timeout=0.25):
+        try:
+            published = config()
+            if published["creator_profile"].get("heartbeat_supported") and published["creator_id"] and published["creator_key"]:
+                directory_request("POST", f'/v1/creators/{published["creator_id"]}/heartbeat',
+                                  {"state": "offline"}, published["creator_key"], timeout=2)
+        except (OSError, ValueError):
+            # Existing directories can omit this state. Their origin probes still expire it.
+            pass
+        finally:
+            PUBLISH_LOCK.release()
     try:
         if serving_in_background:
             server.shutdown()
@@ -4399,13 +5473,92 @@ def shut_down_creator_host(server, *, serving_in_background=True):
             try:
                 stop_ffmpeg_sessions()
             finally:
-                stop_public_tunnel()
+                try:
+                    stop_public_tunnel()
+                finally:
+                    try:
+                        stop_legacy_relay()
+                    finally:
+                        set_community_relay(None)
 
 
 def stop_creator_preview(window):
     """Stop only the dashboard decoder. The studio hosts viewers independently."""
     if window.events.loaded.is_set():
         window.run_js("window.stopCreatorPreview?.()")
+
+
+def run_windows_studio(url, server=None) -> None:
+    """Provide a single tray window whether Studio owns or joins the local server."""
+    global APP_WINDOW
+    import pystray
+    import webview
+    from PIL import Image
+
+    if server is not None:
+        threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server").start()
+    state = {"quitting": False, "notified": False}
+    tray = None
+
+    class TrayControls:
+        def hide_studio(self):
+            minimize_to_tray()
+
+    window = webview.create_window(APP_TITLE, url=url, js_api=TrayControls(), width=1500, height=920,
+                                   min_size=(1100, 720), background_color="#08111f")
+    APP_WINDOW = window
+
+    def open_window(_icon=None, _item=None):
+        activate_desktop_window()
+
+    def exit_application(_icon=None, _item=None):
+        state["quitting"] = True
+        if server is not None:
+            SHUTTING_DOWN.set()
+            PUBLISH_CHANGED.set()
+        window.destroy()
+
+    if TESTER_BUILD:
+        from tester_updates import watch_restart
+        window.events.loaded += lambda: watch_restart(exit_application)
+
+    def minimize_to_tray(*_event):
+        if state["quitting"] or UPDATE_EXITING:
+            return True
+        if tray is None or not tray.visible:
+            return True
+        # The close event runs on the native UI thread. Stop the preview without
+        # waiting for WebView2 to return a JavaScript result.
+        if window.events.loaded.is_set():
+            native = getattr(getattr(window.native, "browser", None), "webview", None)
+            if native is not None:
+                native.ExecuteScriptAsync("window.stopCreatorPreview?.()")
+        window.hide()
+        if not state["notified"]:
+            state["notified"] = True
+            if tray and tray.HAS_NOTIFICATION:
+                tray.notify("Studio is in the system tray. Open it from the tray or the Desktop shortcut.")
+        return False
+
+    window.events.closing += minimize_to_tray
+    icon = CREATOR_ICON
+    ico = icon.with_name("channel-forge-creator.ico")
+    quit_label = "Exit and stop channels" if server is not None else "Close Studio window"
+    with Image.open(icon) as image:
+        tray = pystray.Icon(APP_TITLE, image.copy(), APP_TITLE + " · hosting channels", pystray.Menu(
+            pystray.MenuItem("Open " + APP_TITLE, open_window, default=True),
+            pystray.MenuItem("Hide Studio", minimize_to_tray),
+            pystray.MenuItem(quit_label, exit_application),
+        ))
+    tray.run_detached()
+    try:
+        webview.start(debug=False, icon=str(ico))
+    finally:
+        try:
+            if server is not None:
+                shut_down_creator_host(server)
+        finally:
+            tray.stop()
 
 
 def main() -> None:
@@ -4417,8 +5570,10 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--data-dir", action="store_true", help="Open the application data directory and exit")
     args = parser.parse_args()
+    if TESTER_BUILD and sys.platform == "win32" and args.no_browser:
+        parser.error("Open Windows Studio Tester normally so hosting can be managed from its tray icon.")
     ensure_files()
-    if sys.platform == "win32" and getattr(sys, "frozen", False):
+    if sys.platform == "win32" and getattr(sys, "frozen", False) and not TESTER_BUILD:
         threading.Thread(target=clean_windows_update_cache, args=(VERSION,), daemon=True).start()
     if args.data_dir:
         open_data_folder()
@@ -4426,7 +5581,7 @@ def main() -> None:
     if not args.no_browser and not claim_creator_desktop():
         return
     port = args.port or config()["port"]
-    bind_host = config()["bind_host"]
+    bind_host = HOST if TESTER_BUILD else config()["bind_host"]
     url = f"http://{HOST if bind_host in {'0.0.0.0', '::'} else bind_host}:{port}"
     try:
         server = ThreadingHTTPServer((bind_host, port), Handler)
@@ -4440,14 +5595,18 @@ def main() -> None:
         except OSError:
             is_creator = False
         if not is_creator:
-            raise SystemExit(f"ChannelForge Creator could not listen on {url}: {error}") from error
+            raise SystemExit(f"{APP_TITLE} could not listen on {url}: {error}") from error
         if args.no_browser:
-            print(f"ChannelForge Creator is already running at {url}")
+            print(f"{APP_TITLE} is already running at {url}")
+            return
+        if sys.platform == "win32":
+            run_windows_studio(url)
             return
         try:
             import webview
-            APP_WINDOW = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(760, 480), background_color="#08111f")
-            start_webview(webview)
+            APP_WINDOW = webview.create_window(APP_TITLE, url=url, width=1500, height=920, min_size=(760, 480), background_color="#08111f")
+            start_webview(webview, application_id="public-channelforge-tester" if TESTER_BUILD else "public-channelforge",
+                          icon=CREATOR_ICON)
         except ImportError:
             webbrowser.open(url)
         return
@@ -4462,68 +5621,28 @@ def main() -> None:
     threading.Thread(target=restore_public_sharing, daemon=True, name="channel-forge-public-sharing").start()
     sync_plex_movies_async()
     if not args.no_browser and sys.platform == "win32":
-        import webview
-        import pystray
-        from PIL import Image
-        thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server")
-        thread.start()
-        window = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(1100, 720), background_color="#08111f")
-        APP_WINDOW = window
-        state = {"quitting": False, "notified": False}
-        tray: pystray.Icon | None = None
-
-        def open_window(_icon=None, _item=None) -> None:
-            activate_desktop_window()
-
-        def exit_application(_icon=None, _item=None) -> None:
-            state["quitting"] = True
-            SHUTTING_DOWN.set()
-            PUBLISH_CHANGED.set()
-            # Closing the native window releases the renderer even if its JS is unresponsive.
-            window.destroy()
-
-        def minimize_to_tray(*_event) -> bool:
-            if state["quitting"] or UPDATE_EXITING:
-                return True
-            # FormClosing runs on the WinForms UI thread. Waiting for a JS result
-            # here deadlocks WebView2's completion callback and the tray Exit command.
-            if window.events.loaded.is_set():
-                window.native.browser.webview.ExecuteScriptAsync("window.stopCreatorPreview?.()")
-            window.hide()
-            if not state["notified"]:
-                state["notified"] = True
-                if tray and tray.HAS_NOTIFICATION:
-                    tray.notify("Creator is hosting in the tray. Choose Exit and stop channels to shut down.")
-            return False
-
-        window.events.closing += minimize_to_tray
-        tray = pystray.Icon("ChannelForge Creator", Image.open(CREATOR_ICON), "ChannelForge Creator — hosting channels", pystray.Menu(
-            pystray.MenuItem("Open ChannelForge Creator", open_window, default=True),
-            pystray.MenuItem("Exit and stop channels", exit_application),
-        ))
-        tray.run_detached()
-        try:
-            webview.start(debug=False)
-        finally:
-            try:
-                shut_down_creator_host(server)
-            finally:
-                if tray:
-                    tray.stop()
+        run_windows_studio(url, server)
         return
     if not args.no_browser:
         try:
             import webview
             thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server")
             thread.start()
-            APP_WINDOW = webview.create_window("ChannelForge Creator", url=url, width=1500, height=920, min_size=(760, 480), background_color="#08111f")
+            APP_WINDOW = webview.create_window(APP_TITLE, url=url, width=1500, height=920, min_size=(760, 480), background_color="#08111f")
+            if TESTER_BUILD:
+                from tester_updates import watch_restart
+                APP_WINDOW.events.loaded += lambda: watch_restart(APP_WINDOW.destroy)
             try:
-                start_webview(webview)
+                start_webview(webview, application_id="public-channelforge-tester" if TESTER_BUILD else "public-channelforge",
+                              icon=CREATOR_ICON)
             finally:
                 shut_down_creator_host(server)
             return
         except ImportError:
             threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    if TESTER_BUILD:
+        from tester_updates import watch_restart
+        watch_restart(server.shutdown)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

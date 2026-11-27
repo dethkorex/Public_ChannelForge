@@ -1,7 +1,7 @@
-"""Compare the installed desktop webview to embedded libVLC using the same HLS asset.
+"""Measure HLS playback in the built-in desktop WebView.
 
 Run once per fresh process. Pass a directory containing test.m3u8 and TS segments.
-QA dependencies: psutil, python-vlc, tkinter, pywebview. No production configuration.
+QA dependencies: psutil and pywebview. No production configuration.
 """
 import argparse
 import json
@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ChannelForge_TV as tv
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("engine", choices=("webview", "vlc"))
+parser.add_argument("engine", choices=("webview",))
 parser.add_argument("fixture", type=Path)
 args = parser.parse_args()
 sent = 0
@@ -84,47 +84,19 @@ def measure(start, read):
     raise RuntimeError(f"{args.engine} did not advance to seven seconds: {frames} frames at {pos}")
 
 
-if args.engine == "vlc":
-    import tkinter
-    import vlc
-    root = tkinter.Tk()
-    root.geometry("640x400")
-    root.update()
-    instance = vlc.Instance("--no-video-title-show", "--avcodec-hw=any")
-    player = instance.media_player_new()
-    media = instance.media_new(base + "/stream?url=" + origin)
-    player.set_media(media)
-    (player.set_hwnd if sys.platform == "win32" else player.set_xwindow)(root.winfo_id())
-    player.audio_set_mute(True)
+import webview
+win = webview.create_window("ChannelForge playback benchmark", base, width=640, height=400)
 
-    def sample():
-        root.update()
-        stats = vlc.MediaStats()
-        media.get_stats(stats)
-        return stats.displayed_pictures, stats.lost_pictures, player.get_time() / 1000
-
+def run():
     try:
-        measure(player.play, sample)
+        assert win.events.loaded.wait(15)
+        def sample():
+            return json.loads(win.evaluate_js("JSON.stringify([$('#player').getVideoPlaybackQuality().totalVideoFrames,$('#player').getVideoPlaybackQuality().droppedVideoFrames,$('#player').currentTime])"))
+        measure(lambda: win.evaluate_js(f"$('#player').muted=true;play('{origin}',{{kind:'movie', title:'Benchmark'}});true"), sample)
     finally:
-        player.stop()
-        player.release()
-        media.release()
-        instance.release()
-        root.destroy()
-else:
-    import webview
-    win = webview.create_window("ChannelForge playback benchmark", base, width=640, height=400)
+        win.destroy()
 
-    def run():
-        try:
-            assert win.events.loaded.wait(15)
-            def sample():
-                return json.loads(win.evaluate_js("JSON.stringify([$('#player').getVideoPlaybackQuality().totalVideoFrames,$('#player').getVideoPlaybackQuality().droppedVideoFrames,$('#player').currentTime])"))
-            measure(lambda: win.evaluate_js(f"$('#player').muted=true;play('{origin}',{{kind:'movie', title:'Benchmark'}});true"), sample)
-        finally:
-            win.destroy()
-
-    webview.start(run, gui="edgechromium" if sys.platform == "win32" else "gtk")
+webview.start(run, gui="edgechromium" if sys.platform == "win32" else "gtk")
 server.shutdown()
 server.server_close()
 if "frames" not in result or "first_frame_s" not in result:

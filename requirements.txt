@@ -1,7 +1,6 @@
 # PyInstaller packages the Windows executables; pywebview provides their native app windows.
 pyinstaller>=6.11,<7
 pywebview>=5.4,<7
-python-vlc>=3.0.20123,<4
 Pillow>=11,<13
 pystray>=0.19,<1
 urllib3>=2.5,<3

@@ -7,7 +7,9 @@ sub load()
   if m.top.url = "" then m.top.loaded = true : m.top.content = root : return
   joiner = "?"
   if Instr(1, m.top.url, "?") > 0 then joiner = "&"
-  transfer = CreateObject("roUrlTransfer") : transfer.SetCertificatesFile("common:/certs/ca-bundle.crt") : transfer.InitClientCertificates() : transfer.SetUrl(m.top.url + joiner + "limit=24&offset=" + m.top.offset.ToStr())
+  query = "limit=24&offset=" + m.top.offset.ToStr()
+  if m.top.movieId <> "" then query = "limit=1&id=" + m.top.movieId
+  transfer = CreateObject("roUrlTransfer") : transfer.SetCertificatesFile("common:/certs/ca-bundle.crt") : transfer.InitClientCertificates() : transfer.SetUrl(m.top.url + joiner + query)
   transfer.EnableEncodings(true)
   transfer.SetMinimumTransferRate(128, 10)
   port = CreateObject("roMessagePort")
@@ -27,7 +29,9 @@ sub load()
     seen = {}
     match = CreateObject("roRegex", "[^[:alnum:]]+", "")
     for each item in payload.items
-      appendMovie(root, seen, match, item)
+      if type(item) = "roAssociativeArray" and (m.top.movieId = "" or item.id = m.top.movieId)
+        appendMovie(root, seen, match, item)
+      end if
     end for
   end if
   m.top.content = root

@@ -6,6 +6,7 @@ import unittest
 import http.client
 import gzip
 import io
+from urllib.request import urlopen
 from unittest import mock
 from pathlib import Path
 
@@ -80,6 +81,7 @@ class CoreTests(unittest.TestCase):
                 ("GET", "/api/public/vault", 200),
                 ("GET", "/api/local-creator", 404),
                 ("GET", "/api/status", 404),
+                ("GET", "/api/studio/activity", 404),
                 ("GET", "/api/plex/image?path=/library/sections", 404),
                 ("POST", "/api/setup", 405),
                 ("POST", "/api/update/prepare", 405),
@@ -97,6 +99,47 @@ class CoreTests(unittest.TestCase):
             server.server_close()
             worker.join(timeout=5)
 
+    def test_scoped_media_origin_keeps_playlists_redirects_and_viewer_leases_inside_the_slot(self):
+        scope = "/studio/" + "a" * 16
+        master = "/broadcast/demo/master.m3u8"
+        viewer_id = "d" * 32
+        variant = "/broadcast/demo/" + "b" * 24 + "/hd.m3u8?viewer=" + viewer_id
+        manifest = ('#EXTM3U\n#EXT-X-MEDIA:URI="/hls-proxy/audio"\n' + variant + '\n').encode()
+
+        def respond(handler, channel_id, playlist, token, viewer=None):
+            self.assertEqual(channel_id, "demo")
+            if playlist == "master":
+                handler.send_bytes(200, manifest, "application/vnd.apple.mpegurl")
+            else:
+                self.assertEqual(viewer, viewer_id)
+                handler.redirect("/ffmpeg-stream/" + "c" * 20 + "/index_hd.m3u8?viewer=" + viewer_id)
+
+        with app.open_public_media_server(0) as server, mock.patch.object(app.Handler, "broadcast", respond):
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            try:
+                client.request("GET", master)
+                response = client.getresponse()
+                self.assertEqual((response.status, response.read()), (200, manifest))
+                client.request("GET", scope + master)
+                response = client.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read().decode().splitlines(),
+                                 ["#EXTM3U", f'#EXT-X-MEDIA:URI="{scope}/hls-proxy/audio"', scope + variant])
+                client.request("GET", scope + variant)
+                response = client.getresponse()
+                self.assertEqual(response.status, 302)
+                self.assertTrue(response.getheader("Location").startswith(scope + "/ffmpeg-stream/"))
+                self.assertTrue(response.getheader("Location").endswith("?viewer=" + viewer_id))
+                response.read()
+                client.request("GET", scope + "/api/studio/activity")
+                self.assertEqual(client.getresponse().status, 404)
+            finally:
+                client.close()
+                server.shutdown()
+                worker.join(timeout=5)
+
     def test_automatic_media_origin_does_not_take_over_a_busy_port(self):
         with app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler) as occupied:
             with mock.patch.object(app, "PUBLIC_MEDIA_PORT", occupied.server_port), mock.patch.object(app, "PUBLIC_MEDIA_SERVER", None):
@@ -112,17 +155,57 @@ class CoreTests(unittest.TestCase):
                 finally:
                     app.stop_public_media_server()
 
-    def test_failed_funnel_probe_keeps_the_verified_relay_listener(self):
+    def test_slow_funnel_keeps_the_verified_relay_listener(self):
         with mock.patch.object(app, "PUBLIC_MEDIA_PORT", 0), mock.patch.object(app, "PUBLIC_MEDIA_SERVER", None):
             try:
                 app.start_public_media_server(automatic=True)
                 relay = app.PUBLIC_MEDIA_SERVER
-                with mock.patch.object(app, "relay_reaches_this_creator", return_value=False):
+                with (mock.patch.object(app, "relay_reaches_this_creator", return_value=True),
+                      mock.patch.object(app, "relay_transfers_media", return_value=False) as probe):
                     self.assertFalse(app.attach_media_funnel("https://studio.example"))
+                probe.assert_called_once_with("https://studio.example", hd=True)
                 self.assertIs(app.PUBLIC_MEDIA_SERVER, relay)
                 self.assertTrue(app.relay_reaches_this_creator(f"http://127.0.0.1:{relay.server_port}"))
             finally:
                 app.stop_public_media_server()
+
+    def test_saved_funnel_requires_a_verified_funnel_address(self):
+        app.atomic_json(app.CONFIG_FILE, {"public_url": "https://old.app.lhr.life", "public_tunnel": True})
+        with (mock.patch.object(app, "TESTER_BUILD", False), mock.patch.object(app, "TUNNEL_URL", ""),
+              mock.patch.object(app.subprocess, "run") as run):
+            with self.assertRaisesRegex(ValueError, "saved Tailscale media origin"):
+                app.start_public_tunnel()
+            run.assert_not_called()
+
+    def test_tester_can_verify_saved_funnel_without_cli_status(self):
+        origin = "https://studio.example.ts.net:8443"
+        app.atomic_json(app.CONFIG_FILE, {"public_url": origin})
+        with (mock.patch.object(app, "TESTER_BUILD", True), mock.patch.object(app, "TUNNEL_URL", ""),
+              mock.patch.object(app.subprocess, "run") as run,
+              mock.patch.object(app, "stage_media_funnel") as verify):
+            self.assertEqual(app.start_public_tunnel(), origin)
+            verify.assert_called_once_with(origin)
+            run.assert_not_called()
+
+    def test_funnel_directory_failure_keeps_the_accepted_listener_and_origin(self):
+        accepted = "https://verified.relay.example"
+        candidate_origin = "https://studio.example.ts.net"
+        app.atomic_json(app.CONFIG_FILE, {"public_url": accepted})
+        previous, candidate = mock.Mock(server_port=48600), mock.Mock(server_port=18790)
+        with (mock.patch.object(app, "TESTER_BUILD", True), mock.patch.object(app, "PUBLIC_MEDIA_PORT", 18790),
+              mock.patch.object(app, "PUBLIC_MEDIA_SERVER", previous),
+              mock.patch.object(app, "open_public_media_server", return_value=candidate),
+              mock.patch.object(app, "relay_reaches_this_creator", return_value=True) as check,
+              mock.patch.object(app, "relay_transfers_media", return_value=True),
+              mock.patch.object(app, "generate_exports"),
+              mock.patch.object(app, "publish_creator", side_effect=ValueError("Directory unavailable"))):
+            with self.assertRaisesRegex(ValueError, "Directory unavailable"):
+                app.publish_studio({"name": "Test", "public_url": candidate_origin})
+            check.assert_called_once_with(candidate_origin)
+            self.assertIs(app.PUBLIC_MEDIA_SERVER, previous)
+            self.assertEqual(app.config()["public_url"], accepted)
+            previous.shutdown.assert_not_called()
+            candidate.shutdown.assert_called_once()
 
     def test_new_channel_publication_is_queued_and_can_be_disabled(self):
         with mock.patch.object(app, "PUBLISH_CHANGED", threading.Event()):
@@ -217,6 +300,12 @@ class CoreTests(unittest.TestCase):
                 self.assertNotIn("next_offset", original)
                 self.assertEqual(first["items"] + following["items"], original["items"])
                 self.assertEqual([movie["title"] for movie in original["items"]], ["First", "Second", "Third"])
+                last_movie = following["items"][0]
+                linked = read(f"?limit=1&id={last_movie['id']}")
+                self.assertEqual(linked["items"], [last_movie])
+                self.assertIsNone(linked["next_offset"])
+                self.assertEqual(read("?id=" + "0" * 24)["items"], [])
+                self.assertEqual(read("?id=invalid")["items"], [])
             finally:
                 client.close()
                 local.shutdown()
@@ -239,6 +328,37 @@ class CoreTests(unittest.TestCase):
         self.assertIn("public-channelforge.", playlist)
         self.assertIn(f"http://127.0.0.1:8787/live/{channel['id']}.m3u8", playlist)
         self.assertNotIn("web/index.html", playlist)
+
+    def test_channel_rating_limit_applies_to_every_episode_and_is_exported(self):
+        title = {"id": "9", "title": "Example", "type": "movie", "duration_ms": 3600000}
+        payload = {"name": "Afternoon TV", "number": "12", "channel_rating": "PG-13",
+                   "items": [{**title, "content_rating": "PG-13"},
+                             {**title, "id": "8", "content_rating": "US:TV-PG"}]}
+        for rating in ("R", "TV-MA", "TV-14", ""):
+            with self.subTest(rating=rating), self.assertRaisesRegex(ValueError, "PG-13 or lower"):
+                app.save_channel({**payload, "items": [*payload["items"], {**title, "id": "7", "content_rating": rating}]})
+        channel = app.save_channel(payload)
+        row = app.public_channel_catalog(brief=True)["channels"][0]
+        self.assertEqual((row["channel_rating"], row["channel_rating_rank"]), ("PG-13", 5))
+        self.assertIn('tvg-rating="PG-13" tvg-rating-rank="5"', (app.EXPORT_DIR / "channels.m3u").read_text(encoding="utf-8"))
+        legacy_edit = {key: value for key, value in payload.items() if key != "channel_rating"}
+        self.assertEqual(app.save_channel(legacy_edit, channel["id"])["channel_rating"], "PG-13")
+
+    def test_public_number_conflict_preserves_lineup_and_deletion_syncs_remaining_numbers(self):
+        payload = {"name": "Existing", "number": "07", "items": [{"id": "9", "title": "Title", "duration_ms": 3600000}]}
+        channel = app.save_channel(payload)
+        with self.assertRaisesRegex(ValueError, "already used in this Studio"):
+            app.save_channel({**payload, "name": "Duplicate", "number": "7"})
+        settings = {**app.config(), "creator_id": "a" * 32, "creator_key": "secret", "auto_publish_channels": True}
+        with (mock.patch.object(app, "config", return_value=settings),
+              mock.patch.object(app, "SYNCED_CHANNEL_NUMBERS", None),
+              mock.patch.object(app, "directory_request", side_effect=[ValueError("already reserved"), {}]) as request):
+            with self.assertRaisesRegex(ValueError, "already reserved"):
+                app.save_channel({**payload, "number": "40"}, channel["id"])
+            self.assertEqual(app.channels()[0]["number"], "07")
+            app.delete_channel(channel["id"])
+            self.assertEqual(request.call_args.args[2], {"mode": "sync", "channels": []})
+        self.assertEqual(app.channels(), [])
 
     def test_public_channel_catalog_supplies_online_guide_without_starting_playback(self):
         channel = app.save_channel({"name": "Public Guide", "number": "12", "section": "1", "items": [{"id": "9", "title": "Example", "type": "movie", "duration_ms": 3600000, "key": "/library/metadata/9", "series_thumb": "/library/metadata/8/thumb/3", "art": "/library/metadata/9/art/1"}]})
@@ -319,6 +439,32 @@ class CoreTests(unittest.TestCase):
         app.save_channel({**edited, "restore_preset": True}, channel["id"])
         self.assertEqual(ids(app.channels()[0]), expected)
         self.assertNotIn("shuffle_seed", app.channels()[0])
+
+    def test_manual_lineup_order_overrides_an_old_reshuffle_without_restarting(self):
+        initial = {"name": "Evening", "number": "9", "playback_mode": "ordered",
+                   "items": [{"id": "one"}, {"id": "two"}, {"id": "three"}]}
+        channel = app.save_channel(initial)
+        shuffled = app.update_channel_run(channel["id"], "shuffle")
+        self.assertIn("shuffle_seed", shuffled)
+        saved = app.save_channel({**initial, "items": list(reversed(initial["items"])),
+                                  "lineup_reordered": True}, channel["id"])
+        self.assertEqual([item["id"] for item in app.scheduled_items(saved)], ["three", "two", "one"])
+        self.assertEqual(saved["schedule_anchor"], shuffled["schedule_anchor"])
+
+    def test_presets_keep_same_named_series_from_different_libraries_separate(self):
+        items = [dict(id=str(episode), title=f"Episode {episode}", series="Remake", type="episode",
+                      section=section, episode=episode, season=1)
+                 for section in ("library-a", "library-b") for episode in (2, 1)]
+        ordered = [("library-a", 1), ("library-a", 2), ("library-b", 1), ("library-b", 2)]
+        for mode in ("marathon", "franchise", "shuffle_in_order"):
+            with self.subTest(mode=mode):
+                channel = app.clean_channel({"name": "Test", "number": "1", "items": items, "playback_mode": mode})
+                positions = [(item["section"], item["episode"]) for item in app.scheduled_items(channel)]
+                self.assertCountEqual(positions, ordered)
+                if mode == "shuffle_in_order":
+                    self.assertTrue(all(a[0] != b[0] for a, b in zip(positions, positions[1:])))
+                else:
+                    self.assertEqual(positions, ordered)
 
     def test_shuffle_shows_rotates_series_and_never_repeats_an_episode(self):
         items = [
@@ -616,12 +762,15 @@ class CoreTests(unittest.TestCase):
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
             self.assertIn(f"/live/{channel['id']}.m3u8".encode(), response.read())
-            with mock.patch.object(app, "start_playback_route", return_value="/hls-proxy/plex-session"):
+            with mock.patch.object(app.LivePlayout, "run"), mock.patch.object(app, "LIVE_PLAYOUT", {}):
                 connection.request("GET", f"/live/{channel['id']}.m3u8")
                 response = connection.getresponse()
-                self.assertEqual(response.status, 302)
-                self.assertEqual(response.getheader("Location"), "/hls-proxy/plex-session")
-                response.read()
+                self.assertEqual(response.status, 200)
+                legacy = response.read()
+                connection.request("GET", f"/broadcast/{channel['id']}/master.m3u8")
+                response = connection.getresponse()
+                self.assertEqual(response.read(), legacy)
+                self.assertEqual(len(app.LIVE_PLAYOUT), 1)
         finally:
             connection.close()
             server.shutdown()
@@ -792,6 +941,135 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(len(request.call_args.args[3]), 64)
             self.assertNotIn(request.call_args.args[3], str(app.config(True)))
 
+    def test_failed_community_relay_publication_retires_only_the_candidate(self):
+        old = app.CommunityRelayProfile("https://old.example", "relay.example", "studio", 22, 18101, "")
+        new = old._replace(origin="https://new.example", remote_port=18102)
+        current = app.CommunityRelayConnection(old, 8790, mock.Mock(poll=mock.Mock(return_value=None)))
+        candidate = app.CommunityRelayConnection(new, 8790, mock.Mock(poll=mock.Mock(return_value=None)))
+        app.atomic_json(app.CONFIG_FILE, {**app.config(), "public_url": old.origin})
+        with (
+            mock.patch.object(app, "COMMUNITY_RELAY", current),
+            mock.patch.object(app, "PUBLIC_MEDIA_SERVER", mock.Mock(server_port=8790)),
+            mock.patch.object(app, "community_relay_profile", return_value=new),
+            mock.patch.object(app, "connect_community_relay", return_value=candidate),
+            mock.patch.object(app, "relay_transfers_media", return_value=True),
+            mock.patch.object(app, "start_public_media_server") as start,
+            mock.patch.object(app, "generate_exports"),
+            mock.patch.object(app, "publish_creator", side_effect=ValueError("directory unavailable")),
+        ):
+            with self.assertRaisesRegex(ValueError, "directory unavailable"):
+                app.publish_studio({"name": "Studio", "public_url": new.origin})
+            self.assertIs(app.COMMUNITY_RELAY, current)
+            self.assertEqual(app.config()["public_url"], old.origin)
+            start.assert_called_once_with(automatic=True)
+            candidate.process.terminate.assert_called_once()
+            current.process.terminate.assert_not_called()
+
+    def test_slow_community_relay_cannot_replace_existing_publication(self):
+        old_origin = "https://old.app.lhr.life"
+        new = app.CommunityRelayProfile("https://new.example", "relay.example", "studio", 22, 18102, "")
+        candidate = app.CommunityRelayConnection(new, 8790, mock.Mock())
+        app.atomic_json(app.CONFIG_FILE, {"public_url": old_origin, "public_tunnel": True})
+        with (
+            mock.patch.object(app, "PUBLIC_MEDIA_SERVER", mock.Mock(server_port=8790)),
+            mock.patch.object(app, "community_relay_profile", return_value=new),
+            mock.patch.object(app, "connect_community_relay", return_value=candidate),
+            mock.patch.object(app, "relay_transfers_media", return_value=False) as probe,
+            mock.patch.object(app, "start_public_media_server"),
+            mock.patch.object(app, "generate_exports"),
+            mock.patch.object(app, "publish_creator") as publish,
+            mock.patch.object(app, "stop_relay_process") as stop,
+            mock.patch.object(app, "stop_public_tunnel") as stop_old,
+        ):
+            with self.assertRaisesRegex(ValueError, "720p test segment"):
+                app.publish_studio({"name": "Studio", "public_url": new.origin})
+            probe.assert_called_once_with(new.origin, hd=True)
+            publish.assert_not_called()
+            stop.assert_called_once_with(candidate.process)
+            stop_old.assert_not_called()
+            self.assertEqual(app.config()["public_url"], old_origin)
+
+    def test_community_backup_keeps_legacy_relay_configuration_and_studio_identity(self):
+        primary = app.CommunityRelayProfile("https://primary.example", "relay-a.example", "studio", 22, 18101, "")
+        backup = primary._replace(origin="https://backup.example", ssh_host="relay-b.example")
+        connection = app.CommunityRelayConnection(backup, 8790, mock.Mock())
+        app.atomic_json(app.CONFIG_FILE, {"public_url": primary.origin, "creator_id": "studio-id",
+                                         "creator_key": "existing-key", "creator_profile": {"name": "Test"}})
+        with (
+            mock.patch.object(app, "REGISTERED_ORIGIN", primary.origin),
+            mock.patch.object(app, "connect_community_relay", side_effect=[ValueError("primary down"), connection]) as connect,
+            mock.patch.object(app, "relay_transfers_media", return_value=True),
+            mock.patch.object(app, "directory_request", return_value={"creator": {"id": "studio-id"}}) as directory,
+            mock.patch.object(app, "generate_exports"),
+            mock.patch.object(app, "set_community_relay") as activate,
+        ):
+            self.assertIs(app.accept_community_relay((primary, backup), primary.origin, {"name": "Test"}), connection)
+            self.assertEqual(connect.call_args_list, [mock.call(primary), mock.call(backup)])
+            method, path, payload, key = directory.call_args.args
+            self.assertEqual((method, path, key), ("PUT", "/v1/creators/studio-id", "existing-key"))
+            self.assertEqual(payload["status_url"], backup.origin + "/api/public/channels")
+            self.assertEqual(app.config()["public_url"], backup.origin)
+            self.assertEqual(app.config()["community_relay_origin"], primary.origin)
+            self.assertEqual(app.REGISTERED_ORIGIN, backup.origin)
+            activate.assert_called_once_with(connection)
+
+    def test_community_backup_waits_for_directory_acceptance_before_switching(self):
+        primary = app.CommunityRelayProfile("https://primary.example", "relay-a.example", "studio", 22, 18101, "")
+        backup = primary._replace(origin="https://backup.example", ssh_host="relay-b.example")
+        current = app.CommunityRelayConnection(primary, 8790, mock.Mock())
+        candidate = app.CommunityRelayConnection(backup, 8790, mock.Mock())
+        with (
+            mock.patch.object(app, "REGISTERED_ORIGIN", primary.origin),
+            mock.patch.object(app, "COMMUNITY_RELAY", current),
+            mock.patch.object(app, "connect_community_relay", return_value=candidate) as connect,
+            mock.patch.object(app, "relay_transfers_media", return_value=True),
+            mock.patch.object(app, "publish_creator", side_effect=ValueError("directory unavailable")),
+            mock.patch.object(app, "stop_relay_process") as stop,
+            mock.patch.object(app, "set_community_relay") as activate,
+        ):
+            with self.assertRaisesRegex(ValueError, "directory unavailable"):
+                app.accept_community_relay((primary, backup), primary.origin, {"name": "Test"}, unavailable=primary.origin)
+            connect.assert_called_once_with(backup)
+            activate.assert_not_called()
+            stop.assert_called_once_with(candidate.process)
+            self.assertEqual(app.REGISTERED_ORIGIN, primary.origin)
+
+    def test_relay_transfer_probe_consumes_challenge_without_starting_encoding(self):
+        server = app.open_public_media_server(0)
+        origin = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with mock.patch.object(app.secrets, "token_urlsafe", return_value="one-use"), \
+                    mock.patch.object(app, "start_ffmpeg_session") as start:
+                self.assertTrue(app.relay_transfers_media(origin))
+                self.assertTrue(app.relay_transfers_media(origin, hd=True))
+                with urlopen(origin + "/api/public/origin?sample=one-use", timeout=2) as used:
+                    self.assertEqual(json.load(used), {"instance": app.RELAY_INSTANCE})
+                start.assert_not_called()
+                self.assertNotIn("one-use", app.RELAY_MEDIA_CHALLENGES)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_community_backup_that_cannot_transfer_video_is_not_published(self):
+        primary = app.CommunityRelayProfile("https://primary.example", "relay-a.example", "studio", 22, 18101, "")
+        backup = primary._replace(origin="https://backup.example", ssh_host="relay-b.example")
+        current = app.CommunityRelayConnection(primary, 8790, mock.Mock())
+        candidate = app.CommunityRelayConnection(backup, 8790, mock.Mock())
+        with (
+            mock.patch.object(app, "REGISTERED_ORIGIN", primary.origin),
+            mock.patch.object(app, "COMMUNITY_RELAY", current),
+            mock.patch.object(app, "connect_community_relay", return_value=candidate),
+            mock.patch.object(app, "relay_transfers_media", return_value=False) as probe,
+            mock.patch.object(app, "publish_creator") as publish,
+            mock.patch.object(app, "stop_relay_process") as stop,
+        ):
+            with self.assertRaisesRegex(ValueError, "720p test segment"):
+                app.accept_community_relay((primary, backup), primary.origin, {"name": "Test"}, unavailable=primary.origin)
+            probe.assert_called_once_with(backup.origin, hd=True)
+            publish.assert_not_called()
+            stop.assert_called_once_with(candidate.process)
+            self.assertIs(app.COMMUNITY_RELAY, current)
+
     def test_old_channel_without_id_receives_one_persistent_id(self):
         app.atomic_json(app.CHANNELS_FILE, [{"name":"Archive", "items":[]}])
         first = app.channels()[0]["id"]
@@ -799,11 +1077,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(app.load_json(app.CHANNELS_FILE, [])[0]["id"], first)
         self.assertEqual(app.channels()[0]["id"], first)
 
-    def test_worldwide_sharing_reconnects_a_broken_tunnel_even_while_ssh_is_alive(self):
+    def test_worldwide_sharing_reconnects_a_broken_funnel(self):
         old = "https://previous.example.com"
         new = "https://reconnected.example.com"
         profile = {"name": "Test studio"}
-        settings = {"creator_profile": profile, "pending_creator_profile": {}, "public_tunnel": True}
+        settings = {"creator_profile": profile, "pending_creator_profile": {}, "public_tunnel": True, "public_url": old}
         with (
             mock.patch.object(app, "REGISTERED_ORIGIN", old),
             mock.patch.object(app, "SHARING_STATUS", "live"),
@@ -821,7 +1099,7 @@ class CoreTests(unittest.TestCase):
                 app.restore_public_sharing()
             self.assertEqual(health.call_args_list, [mock.call(old)] * 3)
             stop.assert_called_once()
-            publish.assert_called_once_with(profile)
+            publish.assert_called_once_with(profile, origin=new)
             self.assertEqual(app.REGISTERED_ORIGIN, new)
             self.assertEqual(app.SHARING_STATUS, "live")
 
@@ -837,6 +1115,89 @@ class CoreTests(unittest.TestCase):
             fetch.assert_not_called()
             self.assertEqual(app.library_items("44", prefer_index=True), [])
             fetch.assert_called_once_with("44")
+
+    def test_legacy_relay_migrates_to_configured_vps_before_funnel(self):
+        old = "https://current.app.lhr.life"
+        new = "https://studio.relay.example.com"
+        profile = app.CommunityRelayProfile(new, "relay.example.com", "studio", 22, 18102, "")
+        with (
+            mock.patch.object(app, "load_json", return_value={"origin": new}),
+            mock.patch.object(app, "parse_community_relay_profile", return_value=profile),
+        ):
+            self.assertEqual(app.studio_publication_origin(old, old), new)
+            self.assertEqual(app.studio_publication_origin("", old), new)
+
+    def test_relay_changes_from_an_existing_studio_keep_its_directory_id(self):
+        profile = {"name": "Upgraded Studio", "slug": "upgraded-studio"}
+        studio_id = "aabbccdd"
+        app.atomic_json(app.CONFIG_FILE, {"creator_id": studio_id, "creator_key": "test-key",
+                                          "creator_profile": profile,
+                                          "public_url": "https://previous.app.lhr.life"})
+        with mock.patch.object(app, "directory_request", return_value={"creator": {"id": studio_id}}) as publish:
+            for origin in ("https://new.example.org", "https://after-restart.example.org"):
+                self.assertEqual(app.publish_creator(profile, origin=origin)["id"], studio_id)
+                self.assertEqual(app.config()["public_url"], origin)
+        self.assertEqual([call.args[:2] for call in publish.call_args_list],
+                         [("PUT", f"/v1/creators/{studio_id}")] * 2)
+
+    def test_published_studio_migrates_automatically_and_keeps_its_live_route_on_failure(self):
+        origin = "https://old.app.lhr.life"
+        profile = {"name": "Test Studio"}
+        app.atomic_json(app.CONFIG_FILE, {"public_url": origin, "creator_id": "aabbccdd",
+                                          "creator_key": "test-key", "creator_profile": profile,
+                                          "auto_publish_channels": True})
+        with (mock.patch.object(app, "REGISTERED_ORIGIN", origin),
+              mock.patch.object(app, "SHARING_STATUS", "live"),
+              mock.patch.object(app, "publish_studio", side_effect=ValueError("relay unavailable")) as migrate,
+              mock.patch.object(app, "relay_reaches_this_creator", return_value=True),
+              mock.patch.object(app.PUBLISH_CHANGED, "wait", side_effect=InterruptedError)):
+            with self.assertRaises(InterruptedError):
+                app.restore_public_sharing()
+            migrate.assert_called_once_with({**profile, "managed_relay": True})
+            self.assertEqual(app.REGISTERED_ORIGIN, origin)
+            self.assertEqual(app.SHARING_STATUS, "live")
+        settings = app.config()
+        self.assertEqual(settings["public_url"], origin)
+        self.assertEqual(settings["creator_profile"], profile)
+        self.assertEqual(settings["pending_creator_profile"], {})
+
+    def test_relay_recovery_keeps_healthy_origin_when_upgrade_fails(self):
+        self.assert_relay_recovery(current_healthy=True)
+
+    def test_relay_recovery_uses_legacy_when_preferred_routes_and_old_origin_fail(self):
+        self.assert_relay_recovery(current_healthy=False)
+
+    def assert_relay_recovery(self, *, current_healthy):
+        origin = "https://existing.tailnet.ts.net"
+        profile = {"name": "Test Studio"}
+        settings = {"public_url": origin, "creator_profile": profile, "creator_id": "aabbccdd",
+                    "creator_key": "test-key", "directory_url": app.DEFAULT_DIRECTORY_URL,
+                    "auto_publish_channels": True, "pending_creator_profile": {**profile, "managed_relay": True}}
+
+        def publish_fallback(_profile):
+            app.REGISTERED_ORIGIN = "https://backup.app.lhr.life"
+
+        with (mock.patch.object(app, "REGISTERED_ORIGIN", origin),
+              mock.patch.object(app, "SHARING_STATUS", "live"),
+              mock.patch.object(app, "config", return_value=settings),
+              mock.patch.object(app, "publish_studio", side_effect=ValueError("preferred unavailable")) as upgrade,
+              mock.patch.object(app, "relay_reaches_this_creator", return_value=current_healthy) as probe,
+              mock.patch.object(app, "fallback_studio_relay", side_effect=publish_fallback) as fallback,
+              mock.patch.object(app, "set_community_relay") as retire,
+              mock.patch.object(app.PUBLISH_CHANGED, "wait", side_effect=InterruptedError)):
+            with self.assertRaises(InterruptedError):
+                app.restore_public_sharing()
+            upgrade.assert_called_once_with(settings["pending_creator_profile"])
+            probe.assert_called_once_with(origin)
+            if current_healthy:
+                fallback.assert_not_called()
+                retire.assert_not_called()
+                self.assertEqual(app.REGISTERED_ORIGIN, origin)
+            else:
+                fallback.assert_called_once_with(profile)
+                retire.assert_called_once_with(None)
+                self.assertEqual(app.REGISTERED_ORIGIN, "https://backup.app.lhr.life")
+            self.assertEqual(app.SHARING_STATUS, "live")
 
     def test_failed_encoder_launch_leaves_no_stream_directory_or_registry_entry(self):
         channel = {"id": "test-launch", "items": [{"id": "local", "duration_ms": 90000, "source": "local"}]}
@@ -927,16 +1288,6 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(start.call_args.args[0]["on_demand"])
             self.assertTrue(start.call_args.kwargs["public_delivery"])
 
-    def test_funnel_detection_requires_exclusive_verified_media_mapping(self):
-        host = "studio.tailnet.ts.net:8443"
-        handlers = {"/": {"Proxy": "http://127.0.0.1:8790"}}
-        block = {"Web": {host: {"Handlers": handlers}}, "AllowFunnel": {host: True}}
-        status = {"Foreground": {"connection": block}}
-        self.assertEqual(app.media_funnel_origin(status, 8790), "https://" + host)
-        self.assertEqual(app.media_funnel_origin(status, 8787), "")
-        handlers["/other"] = {"Proxy": "http://127.0.0.1:8787"}
-        self.assertEqual(app.media_funnel_origin(status, 8790), "")
-
     def test_encoder_cleanup_kills_stuck_child_before_removing_segments(self):
         process = mock.Mock()
         process.poll.return_value = None
@@ -954,7 +1305,8 @@ class CoreTests(unittest.TestCase):
     def test_encoder_capacity_reserves_live_handoff_and_reuses_existing_stream(self):
         channel = {"id": "live", "items": [{"id": "one", "duration_ms": 60000}]}
         position = app.schedule_position(channel)
-        key = app.hashlib.sha256(repr(("live", app.media_source_identity(position["item"]), position["start"].isoformat(), "standard")).encode()).hexdigest()[:20]
+        reuse_key = ("live", app.media_source_identity(position["item"]), position["start"].isoformat(), "standard")
+        key = "a" * 20
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(app, "STREAM_DIR", Path(temporary)), \
                 mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "ENCODER_STARTING", {}):
             directory = Path(temporary)
@@ -963,7 +1315,8 @@ class CoreTests(unittest.TestCase):
             running.poll.return_value = None
             for index in range(app.MAX_ENCODERS - 1):
                 app.FFMPEG_SESSIONS[key if index == 0 else str(index)] = {
-                    "process": running, "channel_id": "live" if index == 0 else str(index), "directory": directory}
+                    "process": running, "channel_id": "live" if index == 0 else str(index), "directory": directory,
+                    "reuse_key": reuse_key if index == 0 else None}
             self.assertEqual(app.start_ffmpeg_session(channel, position=position), key)
             with self.assertRaises(app.EncoderCapacityError):
                 app.reserve_encoder("other", {"id": "other"}, 1)
@@ -1030,7 +1383,8 @@ class CoreTests(unittest.TestCase):
             handler.path = "/ffmpeg-stream/movie/segment000001.ts"
             handler.send_bytes = mock.Mock()
             handler.do_GET()
-            handler.send_bytes.assert_called_once_with(200, b"first-segment", "video/mp2t")
+            handler.send_bytes.assert_called_once_with(
+                200, b"first-segment", "video/mp2t", {"Cache-Control": "public, max-age=60, immutable"})
             process.terminate.assert_not_called()
 
     def test_transient_pressure_allows_active_movie_to_keep_encoding(self):

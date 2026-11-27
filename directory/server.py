@@ -79,7 +79,7 @@ def public_creator(row: sqlite3.Row) -> dict:
     state = row["state"] or "standby"
     # An old Creator never negotiated heartbeats. Its media endpoint remains
     # the authority for playback health.
-    if row["state"] or row["last_heartbeat"]:
+    if state != "offline" and (row["state"] or row["last_heartbeat"]):
         if age >= grace:
             state = "offline"
         elif age >= grace // 2:
@@ -138,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
             heartbeat = re.fullmatch(r"/v1/creators/([a-f0-9-]+)/heartbeat", path)
             if heartbeat:
                 state = self.body().get("state")
-                if state not in {"starting", "standby", "broadcasting", "overloaded", "reconnecting"}:
+                if state not in {"starting", "standby", "broadcasting", "overloaded", "reconnecting", "offline"}:
                     return self.send_json(400, {"error": "Unknown studio state."})
                 with connection() as db:
                     row = db.execute("SELECT * FROM creators WHERE id=? AND active=1", (heartbeat[1],)).fetchone()

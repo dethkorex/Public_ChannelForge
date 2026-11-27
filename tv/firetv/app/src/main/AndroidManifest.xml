@@ -5,11 +5,19 @@
     <uses-permission android:name="${applicationId}.permission.UPDATE_RESULT" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
-    <application android:theme="@style/AppTheme" android:label="ChannelForge TV" android:icon="@mipmap/channel_forge_tv_icon" android:roundIcon="@mipmap/channel_forge_tv_icon" android:banner="@drawable/channel_forge_tv_banner" android:usesCleartextTraffic="false">
-        <activity android:name=".MainActivity" android:screenOrientation="landscape" android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize" android:exported="true">
+    <application android:name=".TesterApplication" android:theme="@style/AppTheme" android:label="${channelForgeLabel}" android:icon="${channelForgeIcon}" android:roundIcon="${channelForgeIcon}" android:banner="${channelForgeBanner}" android:usesCleartextTraffic="false">
+        <receiver android:name=".TesterUpdateReceiver" android:exported="false" android:enabled="${channelForgeTester}">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+        <activity android:name=".MainActivity" android:screenOrientation="${channelForgeOrientation}" android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>

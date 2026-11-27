@@ -87,6 +87,33 @@ class JellyfinFixture(BaseHTTPRequestHandler):
 
 
 class JellyfinTests(unittest.TestCase):
+    def test_public_movies_route_artwork_and_reused_ids_to_the_correct_jellyfin_account(self):
+        items = [
+            {"source": "jellyfin", "type": "movie", "title": name, "id": "a" * 32,
+             "thumb": "a" * 32, "section": "jellyfin:" + name + ":" + "b" * 32}
+            for name in ("first", "second")
+        ]
+        calls = []
+
+        def fetch(connection, path, **_kwargs):
+            calls.append((connection["id"], path))
+            return b"movie poster", "image/jpeg"
+
+        with ExitStack() as scope:
+            scope.enter_context(mock.patch.object(app, "vault_movies", side_effect=lambda: iter((item["section"], item) for item in items)))
+            scope.enter_context(mock.patch.object(app, "jellyfin_connection", side_effect=lambda identity: {"id": identity}))
+            scope.enter_context(mock.patch.object(app, "jellyfin_request", side_effect=fetch))
+            public = scope.enter_context(running_server(app.PublicMediaHandler))
+            first, second = [app.vault_item_id(item) for item in items]
+            self.assertNotEqual(first, second)
+            old = app.vault_item_id(items[0], qualified=False)
+            with self.assertRaises(FileNotFoundError):
+                app.vault_source(old)
+            for item_id, expected in ((first, "first"), (second, "second")):
+                movie = app.public_movie(public, item_id, "", app.vault_source(item_id))
+                self.assertEqual(request(movie["poster_url"]), b"movie poster")
+                self.assertEqual(calls[-1][0], expected)
+
     def test_mixed_libraries_save_schedule_and_publish_only_selected_artwork(self):
         with ExitStack() as context:
             root = Path(context.enter_context(tempfile.TemporaryDirectory()))

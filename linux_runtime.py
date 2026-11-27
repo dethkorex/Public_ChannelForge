@@ -17,12 +17,25 @@ from release_metadata import RELEASE_VERSION
 
 LINUX_APP_FILES = (
     "Public_ChannelForge.py", "ChannelForge_TV.py", "windows_distribution.py", "linux_runtime.py", "release_metadata.py",
-    "native_vlc.py", "PLUGIN_DEVELOPMENT.md", "web", "plugins", "assets", "install.sh", "uninstall.sh",
+    "PLUGIN_DEVELOPMENT.md", "web", "plugins", "assets", "install.sh", "uninstall.sh",
 )
+LINUX_OBSOLETE_APP_FILES = ("native_vlc.py",)
 
 
-def start_webview(webview) -> None:
+def start_webview(webview, *, application_id: str, icon: Path) -> None:
     if sys.platform.startswith("linux"):
+        import gi
+
+        gi.require_version("Gtk", "3.0")
+        gi.require_version("Gdk", "3.0")
+        from gi.repository import GLib
+
+        GLib.set_prgname(application_id)
+        from gi.repository import Gdk, Gtk
+
+        Gdk.set_program_class(application_id)
+        if icon.is_file():
+            Gtk.Window.set_default_icon_from_file(str(icon))
         webview.start(gui="gtk", debug=False)
     else:
         webview.start(debug=False)
@@ -141,6 +154,11 @@ def install_linux_files(source: Path, destination: Path) -> None:
             else:
                 shutil.copy2(entry, prepared / name)
         try:
+            for name in LINUX_OBSOLETE_APP_FILES:
+                target = destination / name
+                if target.is_file() or target.is_symlink():
+                    os.replace(target, backups / name)
+                    saved.append(name)
             for name in LINUX_APP_FILES:
                 target = destination / name
                 if target.exists() or target.is_symlink():
@@ -160,7 +178,7 @@ def install_linux_files(source: Path, destination: Path) -> None:
             raise
         cache = destination / "__pycache__"
         if cache.is_dir() and not cache.is_symlink():
-            for name in LINUX_APP_FILES:
+            for name in (*LINUX_APP_FILES, *LINUX_OBSOLETE_APP_FILES):
                 if name.endswith(".py"):
                     for bytecode in cache.glob(Path(name).stem + ".*.pyc"):
                         try:

@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -16,6 +17,29 @@ from tests.creator_fixture import app
 
 
 class BroadcastTests(unittest.TestCase):
+    def test_known_viewers_move_from_starting_through_live_and_cooldown(self):
+        with patch.object(app.time, "monotonic", return_value=100) as clock:
+            feed = app.LivePlayout(lambda _: None, channel_id="sample")
+            self.assertEqual(feed.activity()["state"], "cooldown")
+            feed.heartbeat("1" * 32)
+            self.assertEqual(feed.activity()["state"], "starting")
+            feed.segments.append((0, 0, {"economy": ("#EXTINF:2,", "/ffmpeg-stream/prog/segment0.ts")}))
+            feed.heartbeat("2" * 32)
+            feed.heartbeat("2" * 32)
+            self.assertEqual(feed.activity()["state"], "live")
+            self.assertEqual(feed.activity()["viewers"], 2)
+            feed.record_upload(2000)
+            self.assertEqual(feed.activity()["upload_bps"], 1600)
+            clock.return_value += app.LIVE_VIEWER_TTL
+            self.assertEqual(feed.activity()["state"], "cooldown")
+            self.assertEqual(feed.activity()["viewers"], 0)
+            feed.heartbeat("3" * 32)
+            self.assertEqual(feed.activity()["state"], "live")
+            self.assertEqual(feed.activity()["peak_viewers"], 2)
+            clock.return_value += app.LIVE_VIEWER_TTL + app.LIVE_VIEWER_GRACE
+            self.assertEqual(feed.activity()["state"], "idle")
+            self.assertEqual(feed.activity()["upload_bps"], 0)
+
     def test_public_hd_live_has_separate_bitrate_from_the_relay_and_movie_profiles(self):
         direct = app.relay_renditions()
         constrained = app.relay_renditions(constrained=True)
@@ -53,6 +77,27 @@ class BroadcastTests(unittest.TestCase):
             result = app.viewer_encoder_playlist({"directory": directory, "variant_peaks": {"balanced": 690000}},
                                                  "index.m3u8")
             self.assertEqual(result, master.read_bytes().replace(b":BANDWIDTH=570000", b":BANDWIDTH=690000"))
+
+    def test_cleanup_retains_old_segments_still_advertised_by_live_playlist(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            feed = app.LivePlayout(lambda _: None)
+            feed.heartbeat("1" * 32)
+            keep = directory / "segment000001.ts"
+            remove = directory / "segment000000.ts"
+            now = time.time()
+            for path in (keep, remove):
+                path.write_bytes(b"ts")
+                os.utime(path, (now - 100, now - 100))
+            feed.segments.append((0, 0, {"economy": ("#EXTINF:2,", f"/ffmpeg-stream/shared/{keep.name}")}))
+            session = {"feed": feed, "last_access": now, "directory": directory, "process": Mock()}
+            with (patch.object(app, "STREAM_DIR", directory),
+                  patch.dict(app.LIVE_PLAYOUT, {("channel", True, True): feed}, clear=True),
+                  patch.dict(app.FFMPEG_SESSIONS, {"shared": session}, clear=True),
+                  patch.object(app, "maintain_stream_storage")):
+                app.reap_idle_sessions_once(now)
+            self.assertTrue(keep.exists())
+            self.assertFalse(remove.exists())
 
     def test_shutdown_reaps_child_during_first_playlist_wait(self):
         popen = subprocess.Popen

@@ -1,0 +1,27 @@
+[Unit]
+Description=ChannelForge managed media relay
+After=network-online.target channelforge-enrollment.service
+Wants=network-online.target
+
+[Service]
+User=channelforge-relay
+Group=channelforge-relay
+StateDirectory=channelforge-managed-relay
+StateDirectoryMode=0700
+ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/channelforge-managed-relay/logs
+ExecStartPre=/usr/sbin/nginx -t -p /var/lib/channelforge-managed-relay/ -c /etc/channelforge-relay/managed-nginx.conf
+ExecStart=/usr/sbin/nginx -p /var/lib/channelforge-managed-relay/ -c /etc/channelforge-relay/managed-nginx.conf -g "daemon off;"
+ExecReload=/usr/sbin/nginx -t -p /var/lib/channelforge-managed-relay/ -c /etc/channelforge-relay/managed-nginx.conf
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGQUIT
+KillMode=mixed
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=3
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

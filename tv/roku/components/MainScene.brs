@@ -1,14 +1,23 @@
 sub init()
-  m.guide = m.top.findNode("guide") : m.video = m.top.findNode("video") : m.creators = m.top.findNode("creators") : m.channels = m.top.findNode("channels") : m.vault = m.top.findNode("vault") : m.pair = m.top.findNode("pair") : m.updates = m.top.findNode("updates") : m.status = m.top.findNode("status") : m.directoryTimer = m.top.findNode("directoryTimer")
-  m.creators.observeField("itemSelected", "creatorSelected") : m.channels.observeField("itemSelected", "channelSelected") : m.vault.observeField("itemSelected", "vaultSelected") : m.pair.observeField("buttonSelected", "showPairing") : m.updates.observeField("buttonSelected", "checkUpdates")
+  m.guide = m.top.findNode("guide") : m.video = m.top.findNode("video") : m.creators = m.top.findNode("creators") : m.channels = m.top.findNode("channels") : m.vault = m.top.findNode("vault") : m.updates = m.top.findNode("updates") : m.status = m.top.findNode("status") : m.directoryTimer = m.top.findNode("directoryTimer")
+  m.creators.observeField("itemSelected", "creatorSelected") : m.channels.observeField("itemSelected", "channelSelected") : m.vault.observeField("itemSelected", "vaultSelected") : m.updates.observeField("buttonSelected", "showSystem")
   m.home = m.top.findNode("home")
   m.homeLive = m.top.findNode("homeLive")
   m.homeCinema = m.top.findNode("homeCinema")
   m.homeUpdate = m.top.findNode("homeUpdate")
+  m.homeContinue = m.top.findNode("homeContinue")
+  m.continuePage = m.top.findNode("continuePage")
+  m.continueMovies = m.top.findNode("continueMovies")
+  m.homeContinue.observeField("buttonSelected", "showContinueWatching")
+  m.continueMovies.observeField("itemSelected", "resumeSavedMovie")
   m.homeMenu = m.top.findNode("homeMenu")
+  m.guideSort = m.top.findNode("guideSort")
+  m.guideSort.observeField("buttonSelected", "toggleGuideSort")
+  m.sortByRating = false
+  m.navigationTick = m.top.findNode("navigationTick")
   m.homeLive.observeField("buttonSelected", "openLiveGuide")
   m.homeCinema.observeField("buttonSelected", "openCinema")
-  m.homeUpdate.observeField("buttonSelected", "checkUpdates")
+  m.homeUpdate.observeField("buttonSelected", "showSystem")
   m.homeMenu.observeField("buttonSelected", "showHome")
   m.programArt = m.top.findNode("programArt")
   m.channels.observeField("itemFocused", "updateGuideArtwork")
@@ -17,9 +26,16 @@ sub init()
   m.liveRetryTimer = m.top.findNode("liveRetryTimer")
   m.liveRetryTimer.observeField("fire", "resumePlayback")
   appInfo = CreateObject("roAppInfo")
+  m.relayPilot = appInfo.GetValue("channelforge_relay_pilot")
   installedVersion = appInfo.GetValue("channelforge_version")
   if installedVersion = "" then installedVersion = appInfo.GetVersion()
-  m.updates.text = "UPDATES  •  v" + installedVersion
+  if appInfo.GetValue("channelforge_tester_portal") <> ""
+    m.testerVersionLabel = alphaVersionLabel(installedVersion)
+    m.updateButtonLabel = "SYSTEM  •  " + m.testerVersionLabel
+  else
+    m.updateButtonLabel = "SYSTEM  •  v" + installedVersion
+  end if
+  m.updates.text = m.updateButtonLabel
   m.progressTimer = m.top.findNode("progressTimer")
   m.progressTimer.observeField("fire", "checkPlaybackProgress")
   m.upcomingTimer = m.top.findNode("upcomingTimer")
@@ -52,9 +68,17 @@ sub init()
   m.upcomingDue = false
   m.upcomingShown = false
   m.catalogLoading = false
+  m.launchComplete = false
+  m.deepLinkTimer = m.top.findNode("deepLinkTimer")
+  m.deepLinkTimer.observeField("fire", "deepLinkTimedOut")
+  m.top.observeField("deepLinkRequest", "deepLinkRequested")
   m.creatorUrl = ""
   m.creatorId = ""
   m.movieKeys = {}
+  m.viewerLease = ""
+  for digit = 1 to 32
+    m.viewerLease = m.viewerLease + Mid("0123456789abcdef", Rnd(16), 1)
+  end for
   m.pairBase = CreateObject("roRegistrySection", "ChannelForge").Read("creator_url")
   refreshCatalog()
 end sub
@@ -64,17 +88,181 @@ sub refreshCatalog()
   requestCatalog()
 end sub
 sub showHome()
+  cancelDeepLink()
+  playMenuSound()
+  m.continuePage.visible = false
   m.home.visible = true
   m.homeLive.SetFocus(true)
+  completeAppLaunch()
 end sub
 sub openLiveGuide()
+  cancelDeepLink()
+  completeAppLaunch()
+  m.top.signalBeacon("EPGLaunchInitiate")
+  playMenuSound()
   m.home.visible = false
   m.channels.SetFocus(true)
   updateGuideArtwork()
+  m.top.signalBeacon("EPGLaunchComplete")
 end sub
 sub openCinema()
+  cancelDeepLink()
+  completeAppLaunch()
+  playMenuSound()
   m.home.visible = false
   m.vault.SetFocus(true)
+end sub
+sub playMenuSound()
+  if m.navigationTick <> invalid and m.navigationTick.state <> "playing" then m.navigationTick.control = "play"
+end sub
+sub showSystem()
+  playMenuSound()
+  panel = CreateObject("roSGNode", "Dialog")
+  panel.title = "System"
+  diagnostics = "Playback diagnostics"
+  if m.testerVersionLabel <> invalid then diagnostics = "Developer"
+  panel.buttons = ["Check for Update", diagnostics, "Pair a Studio", "Close"]
+  panel.observeField("buttonSelected", "systemSelected")
+  m.top.dialog = panel
+end sub
+sub systemSelected()
+  if m.top.dialog = invalid then return
+  choice = m.top.dialog.buttonSelected
+  m.top.dialog = invalid
+  if choice = 0 then checkUpdates()
+  if choice = 1 then showDiagnostics()
+  if choice = 2 then showPairing()
+  if choice = 3 then focusSystemButton()
+end sub
+sub focusSystemButton()
+  if not m.guide.visible or m.continuePage.visible then return
+  if m.home.visible then m.homeUpdate.SetFocus(true) else m.updates.SetFocus(true)
+end sub
+sub showDiagnostics()
+  playMenuSound()
+  panel = CreateObject("roSGNode", "Dialog")
+  panel.title = "Playback diagnostics"
+  panel.message = "Player state: " + m.video.state + Chr(10) + "Live retries: " + m.liveRetries.ToStr()
+  if m.movieRetries <> invalid then panel.message = panel.message + Chr(10) + "Movie retries: " + m.movieRetries.ToStr()
+  panel.buttons = ["Close"]
+  appInfo = CreateObject("roAppInfo")
+  if appInfo.GetValue("channelforge_tester_portal") <> ""
+    retries = 0
+    if m.liveItem <> invalid and m.liveRetries <> invalid then retries = m.liveRetries
+    if m.activeMovie <> invalid and m.movieRetries <> invalid then retries = m.movieRetries
+    report = {
+      platform: "roku", app: appInfo.GetValue("channelforge_version"), engine: "Roku SceneGraph",
+      state: m.video.state, position_seconds: m.video.position, retries: retries,
+      build_revision: Val(appInfo.GetValue("channelforge_tester_revision"))
+    }
+    if m.rebufferCount <> invalid then report.stalls = m.rebufferCount
+    if m.video.errorCode > 0 then report.playerErrorCode = m.video.errorCode
+    if m.liveItem <> invalid then report.kind = "live"
+    if m.activeMovie <> invalid then report.kind = "movie"
+    if m.liveItem <> invalid or m.activeMovie <> invalid
+      report.delivery_route = "registered-route"
+      if m.skipPreferredRelay = true then report.delivery_route = "registered-fallback"
+      if m.usingPreferredRelay = true then report.delivery_route = "preferred-relay"
+    end if
+    m.rokuPlaybackReport = report
+    panel.message = panel.message + Chr(10) + "Position: " + report.position_seconds.ToStr() + " s"
+    if report.stalls <> invalid then panel.message = panel.message + Chr(10) + "Buffer events: " + report.stalls.ToStr()
+    if report.playerErrorCode <> invalid then panel.message = panel.message + Chr(10) + "Error code: " + report.playerErrorCode.ToStr()
+    panel.message = panel.message + Chr(10) + Chr(10) + "Reports include the Tester build and playback metrics. Accounts, titles and addresses are excluded."
+    panel.buttons = ["Close", "Send report"]
+  end if
+  panel.observeField("buttonSelected", "dismissDiagnostics")
+  m.top.dialog = panel
+end sub
+sub dismissDiagnostics()
+  selected = m.top.dialog.buttonSelected
+  m.top.dialog = invalid
+  focusSystemButton()
+  if selected <> 1 or m.rokuPlaybackReport = invalid then return
+  if m.reportTask <> invalid and m.reportTask.state = "run" then return
+  m.reportTask = CreateObject("roSGNode", "ReportTask")
+  m.reportTask.report = m.rokuPlaybackReport
+  m.reportTask.observeField("result", "diagnosticReportSent")
+  m.reportTask.control = "run"
+end sub
+sub diagnosticReportSent()
+  dialog = CreateObject("roSGNode", "Dialog")
+  dialog.title = "Developer"
+  dialog.message = m.reportTask.result
+  dialog.buttons = ["Close"]
+  dialog.observeField("buttonSelected", "dismissDiagnostics")
+  m.top.dialog = dialog
+end sub
+function savedMovies() as object
+  registry = CreateObject("roRegistrySection", "ChannelForge")
+  raw = registry.Read("movie_history")
+  if raw <> ""
+    rows = ParseJson(raw)
+    if type(rows) = "roArray" then return rows
+  end if
+  return []
+end function
+sub saveMoviePosition(completed as boolean)
+  if m.activeMovie = invalid then return
+  if not completed and m.moviePosition <= 0 then return
+  movie = m.activeMovie
+  key = movieBookmarkKey(m.movieStudioId, movie.movieKey)
+  time = CreateObject("roDateTime")
+  writeMovieBookmark(CreateObject("roRegistrySection", "ChannelForgePlayheads"), key, m.moviePosition, completed, time.AsSeconds())
+  rows = []
+  if not completed
+    rows.Push({key: key, movieKey: movie.movieKey, studioId: m.movieStudioId,
+        title: movie.title, url: movie.url, poster: movie.hdPosterUrl, position: m.moviePosition})
+  end if
+  for each previous in savedMovies()
+    if previous.key <> key and rows.Count() < 12 then rows.Push(previous)
+  end for
+  registry = CreateObject("roRegistrySection", "ChannelForge")
+  registry.Write("movie_history", FormatJson(rows))
+  registry.Flush()
+end sub
+function resumePositionFor(studioId as string, movieKey as string) as dynamic
+  key = movieBookmarkKey(studioId, movieKey)
+  return movieResumePosition(CreateObject("roRegistrySection", "ChannelForgePlayheads"), key, savedMovies())
+end function
+sub showContinueWatching()
+  cancelDeepLink()
+  completeAppLaunch()
+  m.home.visible = false
+  m.continuePage.visible = true
+  root = CreateObject("roSGNode", "ContentNode")
+  for each row in savedMovies()
+    if row.position > 0 and row.url <> ""
+      item = root.CreateChild("ContentNode")
+      item.AddFields({movieKey: row.movieKey, savedStudioId: row.studioId, resumePosition: row.position})
+      item.title = row.title
+      item.url = row.url
+      item.streamFormat = "hls"
+      item.hdPosterUrl = row.poster
+      item.shortDescriptionLine1 = "• Resume at " + movieTimeLabel(row.position)
+    end if
+  end for
+  m.continueMovies.content = root
+  label = m.top.findNode("continueStatus")
+  if root.GetChildCount() > 0
+    label.text = "Select a movie to resume"
+    m.continueMovies.SetFocus(true)
+  else
+    label.text = "No unfinished movies yet. Press Back to return home."
+    m.continuePage.SetFocus(true)
+  end if
+end sub
+function movieTimeLabel(position as float) as string
+  seconds = Int(position)
+  minutes = Int(seconds / 60)
+  remainder = (seconds MOD 60).ToStr()
+  if Len(remainder) < 2 then remainder = "0" + remainder
+  return minutes.ToStr() + ":" + remainder
+end function
+sub resumeSavedMovie()
+  item = m.continueMovies.content.GetChild(m.continueMovies.itemSelected)
+  if item = invalid then return
+  startCinemaMovie(item, item.resumePosition, item.savedStudioId, false)
 end sub
 sub updateGuideArtwork()
   if m.home.visible or not m.guide.visible or m.channels.content = invalid then return
@@ -118,6 +306,11 @@ sub catalogLoaded(event as object)
   root = event.GetData()
   if m.pairBase <> "" then addPaired(root, m.pairBase)
   m.creators.content = root
+  if m.deepLink <> invalid
+    if m.deepLink.phase <> "directory" then return
+    if openLinkedStudio(root) then return
+    showHome()
+  end if
   selected = -1
   for index = 0 to root.GetChildCount() - 1
     creator = root.GetChild(index)
@@ -131,13 +324,7 @@ sub catalogLoaded(event as object)
       loadCreator(selected)
     else if m.resolvingMovie and m.activeMovie <> invalid and not m.ejectingMovie
       m.resolvingMovie = false
-      creator = root.GetChild(selected)
-      suffix = "/api/public/vault"
-      endpoint = creator.shortDescriptionLine2
-      path = Instr(9, m.activeMovie.url, "/vault/")
-      if Right(endpoint, Len(suffix)) = suffix and path > 0 and Instr(path, m.activeMovie.url, "?") = 0
-        m.activeMovie.url = Left(endpoint, Len(endpoint) - Len(suffix)) + Mid(m.activeMovie.url, path)
-      end if
+      refreshMovieAddress(m.activeMovie, m.movieStudioId)
       restartMovie()
     else if m.resolvingLive
       creator = root.GetChild(selected)
@@ -159,7 +346,7 @@ sub catalogLoaded(event as object)
   else
     m.status.text = "No studios are registered."
   end if
-  m.pair.SetFocus(true)
+  if not m.home.visible and not m.continuePage.visible then m.updates.SetFocus(true)
 end sub
 function currentTask(event as object, task as dynamic) as boolean
   if task = invalid then return false
@@ -225,15 +412,19 @@ sub pairingSelected()
     suffix = "/api/public/channels"
     if len(base) > len(suffix) and right(base, len(suffix)) = suffix then base = left(base, len(base) - len(suffix))
     if left(base, 8) <> "https://"
-      m.status.text = "Pairing URLs must begin with https://"
+      dialog.message = "Pairing URLs must begin with https://. Check the address and retry."
+      return
     else
       registry = CreateObject("roRegistrySection", "ChannelForge")
       registry.Write("creator_url", base)
       registry.Flush()
+      dialog.close = true
       connectPaired(base)
+      return
     end if
   end if
   dialog.close = true
+  focusSystemButton()
 end sub
 sub connectPaired(base as string)
   m.pairBase = base
@@ -242,6 +433,8 @@ sub connectPaired(base as string)
   index = addPaired(root, base)
   m.creators.content = root
   m.creators.jumpToItem = index
+  m.home.visible = false
+  m.creators.SetFocus(true)
   loadCreator(index)
 end sub
 function addPaired(root as object, base as string) as integer
@@ -258,6 +451,7 @@ function addPaired(root as object, base as string) as integer
   return root.GetChildCount() - 1
 end function
 sub creatorSelected()
+  cancelDeepLink()
   loadCreator(m.creators.itemSelected)
 end sub
 sub loadCreator(index as integer)
@@ -267,13 +461,14 @@ sub loadCreator(index as integer)
   id = ""
   if creator.studioId <> invalid then id = creator.studioId
   switched = m.creatorUrl <> creator.url or m.creatorId <> id
-  if switched then clearStudio()
+  if switched and (id = "" or m.creatorId <> id) then clearStudio()
   m.creatorId = id
   m.creatorUrl = creator.url
   m.status.text = "Loading " + creator.title + "…"
   task = CreateObject("roSGNode", "PlaylistTask") : task.url = creator.url
   if creator.studioId <> invalid then task.studioId = creator.studioId
   if creator.statusUrl <> invalid and creator.statusUrl <> ""
+    task.fallbackUrl = creator.url
     task.url = creator.statusUrl + "?guide=brief"
     task.onlineCatalog = true
   end if
@@ -314,6 +509,7 @@ sub vaultLoaded(event as object)
       if not m.movieKeys.DoesExist(movie.movieKey)
         m.movieKeys[movie.movieKey] = true
         entry = current.CreateChild("ContentNode")
+        entry.AddFields({movieKey: movie.movieKey})
         entry.title = movie.title
         entry.hdPosterUrl = movie.hdPosterUrl
         entry.description = movie.description
@@ -343,23 +539,52 @@ sub loadMoreMovies()
 end sub
 sub playlistLoaded(event as object)
   if not currentTask(event, m.playlistTask) then return
-  if m.playlistTask.stale and m.playlistTask.content.GetChildCount() = 0 and m.lastGuideUrl = m.creatorUrl
+  if m.playlistTask.stale and m.playlistTask.content.GetChildCount() = 0 and m.channels.content <> invalid
     m.status.text = "Studio unavailable. Showing the last guide."
     return
   end if
   m.lastGuideUrl = m.creatorUrl
   firstGuide = m.channels.content = invalid
   m.channels.content = m.playlistTask.content
+  m.guideRows = m.channels.content.GetChildren(-1, 0)
+  if m.sortByRating then applyGuideSort()
   m.status.text = m.playlistTask.content.GetChildCount().ToStr() + " channels ready"
   if m.catalogTask <> invalid and m.catalogTask.stale then m.status.text += " • Directory incomplete"
   if m.playlistTask.stale then m.status.text = "Studio unavailable. Reconnecting..."
   if firstGuide and m.guide.visible and not m.home.visible and not m.vault.HasFocus() and not m.insertMovie.HasFocus() and not m.moreMovies.HasFocus() then m.channels.SetFocus(true)
+  updateGuideArtwork()
+  playLinkedChannel()
+end sub
+sub toggleGuideSort()
+  m.sortByRating = not m.sortByRating
+  m.guideSort.text = "SORT: CHANNEL"
+  if m.sortByRating then m.guideSort.text = "SORT: RATING"
+  applyGuideSort()
+end sub
+sub applyGuideSort()
+  root = m.channels.content
+  if root = invalid or m.guideRows = invalid or m.guideRows.Count() < 2 then return
+  ordered = []
+  if m.sortByRating
+    for rank = 1 to 10
+      for each channel in m.guideRows
+        if channel.ratingRank = rank then ordered.Push(channel)
+      end for
+    end for
+  else
+    ordered = m.guideRows
+  end if
+  root.RemoveChildrenIndex(root.GetChildCount(), 0)
+  root.AppendChildren(ordered)
+  m.channels.jumpToItem = 0
   updateGuideArtwork()
 end sub
 sub vaultSelected()
   if m.vault.content = invalid then return
   item = m.vault.content.GetChild(m.vault.itemSelected)
   if item = invalid then return
+  cancelDeepLink()
+  playMenuSound()
   m.selectedMovie = item
   m.top.findNode("movieTitle").text = item.title
   m.top.findNode("moviePoster").uri = item.hdPosterUrl
@@ -369,12 +594,38 @@ end sub
 sub insertSelectedMovie()
   item = m.selectedMovie
   if item = invalid then return
+  playMenuSound()
+  startCinemaMovie(item, resumePositionFor(m.creatorId, item.movieKey), m.creatorId, false)
+end sub
+sub refreshMovieAddress(item as object, studioId as string)
+  if studioId = "" or m.creators.content = invalid then return
+  root = m.creators.content
+  suffix = "/api/public/vault"
+  path = Instr(9, item.url, "/vault/")
+  if path <= 0 or Instr(path, item.url, "?") > 0 then return
+  for index = 0 to root.GetChildCount() - 1
+    creator = root.GetChild(index)
+    endpoint = creator.shortDescriptionLine2
+    if creator.studioId = studioId and Right(endpoint, Len(suffix)) = suffix
+      item.url = Left(endpoint, Len(endpoint) - Len(suffix)) + Mid(item.url, path)
+      return
+    end if
+  end for
+end sub
+sub startCinemaMovie(item as object, position as float, studioId as string, direct as boolean)
   m.activeMovie = item
-  m.moviePosition = 0
+  m.moviePosition = position
+  m.bookmarkCheckpoint = CreateObject("roTimespan")
+  m.bookmarkCheckpoint.Mark()
+  m.movieCompleted = false
+  m.movieStudioId = studioId
+  refreshMovieAddress(item, studioId)
+  item.playStart = position
   m.movieRetries = 0
   m.retryPending = false
   m.resolvingLive = false
   m.resolvingMovie = false
+  m.skipPreferredRelay = false
   clearPlaybackDeadline()
   m.liveItem = invalid
   m.liveRetryTimer.control = "stop"
@@ -382,9 +633,13 @@ sub insertSelectedMovie()
   m.programBoundaryTimer.control = "stop"
   hideChannelBanner()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
-  configureHls(item, false, false)
-  m.video.content = item : m.video.visible = true : m.guide.visible = false : m.video.SetFocus(true)
-  animateTape(true)
+  m.video.content = playbackContent(item, false, false) : m.video.visible = true : m.guide.visible = false : m.video.SetFocus(true)
+  if direct
+    m.video.control = "play"
+    startPlaybackDeadline()
+  else
+    animateTape(true)
+  end if
 end sub
 sub animateTape(inserting as boolean)
   if m.activeMovie = invalid then return
@@ -401,6 +656,7 @@ sub animateTape(inserting as boolean)
     m.top.findNode("insertTapeMotion").control = "start"
     m.tapeTimer.duration = 1.85
   else
+    saveMoviePosition(m.movieCompleted)
     clearPlaybackDeadline()
     m.resolvingMovie = false
     m.retryPending = false
@@ -422,7 +678,13 @@ sub tapeMotionDone()
     m.guide.visible = true
     m.bufferPanel.visible = false
     m.video.control = "stop"
-    m.insertMovie.SetFocus(true)
+    if m.continuePage.visible
+      showContinueWatching()
+    else if m.top.findNode("movieDetails").visible
+      m.insertMovie.SetFocus(true)
+    else
+      m.vault.SetFocus(true)
+    end if
   else if m.crtLit = true
     m.top.findNode("tapeMotion").visible = false
     m.crtLit = false
@@ -433,24 +695,34 @@ sub tapeMotionDone()
   end if
 end sub
 sub checkUpdates()
-  task = CreateObject("roSGNode", "UpdateTask") : task.observeField("result", "updateLoaded") : task.control = "run" : m.updateTask = task
+  if m.updateTask <> invalid and m.updateTask.result = "" then return
+  task = CreateObject("roSGNode", "UpdateTask") : task.observeField("result", "updateLoaded") : m.updateTask = task
   m.updates.text = "UPDATES  •  CHECKING…"
+  task.control = "run"
 end sub
 sub updateLoaded()
-  m.updates.text = m.updateTask.result
-  if m.updateTask.releaseTag = "" then return
+  m.updates.text = m.updateButtonLabel
+  showUpdateDialog(m.updateTask.releaseTag, m.updateTask.notes, m.updateTask.result)
+end sub
+sub showUpdateDialog(releaseTag as string, notes as string, status as string)
   dialog = CreateObject("roSGNode", "Dialog")
-  dialog.title = "What's new in " + m.updateTask.releaseTag
-  dialog.message = m.updateTask.notes
-  if dialog.message = "" then dialog.message = "Playback and reliability improvements."
+  dialog.title = "What's new in " + releaseTag
+  if releaseTag = ""
+    dialog.title = "Roku updates"
+    if m.testerVersionLabel <> invalid then dialog.title = "Tester updates"
+  end if
+  if status <> "" and notes <> "" then status = status + Chr(10) + Chr(10)
+  dialog.message = status + notes
   dialog.buttons = ["DONE"]
   dialog.observeField("buttonSelected", "dismissUpdateNotes")
   m.top.dialog = dialog
 end sub
 sub dismissUpdateNotes()
   if m.top.dialog <> invalid then m.top.dialog.close = true
+  focusSystemButton()
 end sub
 sub channelSelected()
+  cancelDeepLink()
   playChannel(m.channels.itemSelected)
 end sub
 sub playChannel(index as integer)
@@ -474,11 +746,11 @@ sub playChannel(index as integer)
   m.liveItem = item
   m.checkingOffline = false
   m.liveRetries = 0
+  m.skipPreferredRelay = false
   m.liveProgramStop = 0
   updateLiveProgramStop()
   showBuffering("CONNECTING TO THE STUDIO", item.title)
-  configureHls(item, false, item.continuous = true)
-  m.video.content = item : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
+  m.video.content = playbackContent(item, false, item.continuous = true) : m.video.visible = true : m.video.control = "play" : m.guide.visible = false : m.video.SetFocus(true)
   startPlaybackDeadline()
   showChannelBanner(item)
 end sub
@@ -509,6 +781,7 @@ sub videoStateChanged()
       scheduleNextProgram()
     end if
   else if state = "finished" and m.activeMovie <> invalid and not m.ejectingMovie
+    m.movieCompleted = true
     animateTape(false)
   else if state = "paused"
     clearPlaybackDeadline()
@@ -559,6 +832,12 @@ sub playbackTimedOut()
   m.programBoundaryTimer.control = "stop"
   m.upcomingTimer.control = "stop"
   m.video.control = "stop"
+  if m.usingPreferredRelay = true
+    m.skipPreferredRelay = true
+    if m.activeMovie <> invalid then restartMovie()
+    if m.liveItem <> invalid then restartLive()
+    return
+  end if
   if scheduleMovieRetry() then return
   if m.liveItem <> invalid and m.liveRetries < 2
     m.liveRetries = m.liveRetries + 1
@@ -585,11 +864,18 @@ sub trackPlaybackPosition()
     return
   end if
   if delta < 0.25 then return
+  completeAppLaunch()
   m.lastPosition = position
   m.lastProgress.Mark()
   m.windowMedia += delta
   m.stableSeconds += delta
-  if m.activeMovie <> invalid then m.moviePosition = position
+  if m.activeMovie <> invalid
+    m.moviePosition = position
+    if m.bookmarkCheckpoint <> invalid and m.bookmarkCheckpoint.TotalSeconds() >= 60
+      saveMoviePosition(false)
+      m.bookmarkCheckpoint.Mark()
+    end if
+  end if
   if m.stableSeconds >= 30
     m.liveRetries = 0
     m.movieRetries = 0
@@ -646,8 +932,7 @@ sub restartMovie()
   item.streamFormat = m.activeMovie.streamFormat
   item.title = m.activeMovie.title
   item.playStart = m.moviePosition
-  configureHls(item, true, false)
-  m.video.content = item
+  m.video.content = playbackContent(item, true, false)
   m.video.control = "play"
   startPlaybackDeadline()
 end sub
@@ -753,6 +1038,7 @@ sub refreshOnAirGuide()
   cancelContentTask(m.onAirGuideTask)
   task = CreateObject("roSGNode", "PlaylistTask")
   task.url = m.guideStatusUrl
+  task.fallbackUrl = m.creatorUrl
   task.onlineCatalog = true
   task.studioId = m.creatorId
   task.observeField("content", "onAirGuideLoaded")
@@ -809,15 +1095,48 @@ sub restartLive()
   item.url = m.liveItem.url
   item.title = m.liveItem.title
   item.streamFormat = m.liveItem.streamFormat
-  configureHls(item, m.liveRetries > 0, m.liveItem.continuous = true)
+  item = playbackContent(item, m.liveRetries > 0, m.liveItem.continuous = true)
   m.video.control = "stop"
   m.video.content = item
   m.video.control = "play"
   startPlaybackDeadline()
 end sub
+function playbackContent(item as object, recovering as boolean, live as boolean) as object
+  selected = item
+  m.usingPreferredRelay = false
+  if m.skipPreferredRelay <> true and m.relayPilot <> invalid
+    alternate = preferredRelayUrl(item.url, m.relayPilot)
+    if alternate <> item.url
+      selected = CreateObject("roSGNode", "ContentNode")
+      selected.title = item.title
+      selected.streamFormat = item.streamFormat
+      selected.playStart = item.playStart
+      selected.url = alternate
+      m.usingPreferredRelay = true
+    end if
+  end if
+  configureHls(selected, recovering, live)
+  return selected
+end function
+function preferredRelayUrl(url as string, pilot as string) as string
+  separator = Instr(1, pilot, "=")
+  if separator < 2 or separator = Len(pilot) then return url
+  registered = "https://" + Left(pilot, separator - 1) + "/"
+  if Left(url, Len(registered)) <> registered then return url
+  path = Mid(url, Len(registered))
+  if Left(path, 11) <> "/broadcast/" and Left(path, 6) <> "/live/" and Left(path, 7) <> "/vault/" then return url
+  return "https://" + Mid(pilot, separator + 1) + path
+end function
 sub configureHls(item as object, recovering as boolean, live as boolean)
   item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
   item.live = live
+  if live and m.viewerLease <> invalid and (Instr(1, item.url, "/broadcast/") > 0 or Instr(1, item.url, "/live/") > 0)
+    if Instr(1, item.url, "viewer=") = 0
+      separator = "?"
+      if Instr(1, item.url, "?") > 0 then separator = "&"
+      item.url = item.url + separator + "viewer=" + m.viewerLease
+    end if
+  end if
   if live or Instr(1, item.url, "/vault/") > 0
     ' Roku measures bandwidth after startup and may use every advertised variant.
     initialKibps = 800
@@ -827,11 +1146,20 @@ sub configureHls(item as object, recovering as boolean, live as boolean)
 end sub
 function onKeyEvent(key as string, press as boolean) as boolean
   if not press then return false
+  if key = "back" and m.deepLink <> invalid then showHome() : return true
   if m.home <> invalid and m.home.visible
     if key = "right" and m.homeLive.HasFocus() then m.homeCinema.SetFocus(true) : return true
     if key = "left" and m.homeCinema.HasFocus() then m.homeLive.SetFocus(true) : return true
-    if key = "down" and not m.homeUpdate.HasFocus() then m.homeUpdate.SetFocus(true) : return true
-    if key = "up" and m.homeUpdate.HasFocus() then m.homeLive.SetFocus(true) : return true
+    if key = "right" and m.homeContinue.HasFocus() then m.homeUpdate.SetFocus(true) : return true
+    if key = "left" and m.homeUpdate.HasFocus() then m.homeContinue.SetFocus(true) : return true
+    if key = "down" and m.homeLive.HasFocus() then m.homeContinue.SetFocus(true) : return true
+    if key = "down" and m.homeCinema.HasFocus() then m.homeUpdate.SetFocus(true) : return true
+    if key = "up" and m.homeUpdate.HasFocus() then m.homeCinema.SetFocus(true) : return true
+    if key = "up" and m.homeContinue.HasFocus() then m.homeLive.SetFocus(true) : return true
+    return false
+  end if
+  if m.guide.visible and m.continuePage.visible
+    if key = "back" then showHome() : return true
     return false
   end if
   if m.guide.visible = false
@@ -875,21 +1203,22 @@ function onKeyEvent(key as string, press as boolean) as boolean
     end if
   end if
   if key = "back" and m.guide.visible and m.home <> invalid then showHome() : return true
-  if key = "right" and m.guide.visible and m.homeMenu <> invalid and m.homeMenu.HasFocus() then m.pair.SetFocus(true) : return true
-  if key = "left" and m.guide.visible and m.pair.HasFocus() and m.homeMenu <> invalid then m.homeMenu.SetFocus(true) : return true
+  if key = "right" and m.guide.visible and m.homeMenu.HasFocus() then m.guideSort.SetFocus(true) : return true
+  if key = "left" and m.guide.visible and m.guideSort.HasFocus() then m.homeMenu.SetFocus(true) : return true
+  if key = "right" and m.guide.visible and m.guideSort.HasFocus() then m.updates.SetFocus(true) : return true
+  if key = "left" and m.guide.visible and m.updates.HasFocus() then m.guideSort.SetFocus(true) : return true
   if m.guide.visible and m.insertMovie.HasFocus() and key = "left" then m.vault.SetFocus(true) : return true
+  if key = "right" and m.guide.visible and m.vault.HasFocus() and m.selectedMovie <> invalid then m.insertMovie.SetFocus(true) : return true
   if m.guide.visible and m.moreMovies.HasFocus() and key = "up" then m.vault.SetFocus(true) : return true
   if m.guide.visible and m.vault.HasFocus() and key = "down" and m.moreMovies.visible
     if m.vault.itemFocused = m.vault.content.GetChildCount() - 1 then m.moreMovies.SetFocus(true) : return true
   end if
-  if key = "right" and m.guide.visible and m.pair.HasFocus() then m.updates.SetFocus(true) : return true
-  if key = "left" and m.guide.visible and m.updates.HasFocus() then m.pair.SetFocus(true) : return true
   if key = "left" and m.guide.visible and not m.vault.HasFocus() then m.creators.SetFocus(true) : return true
   if key = "right" and m.guide.visible and not m.vault.HasFocus() then m.channels.SetFocus(true) : return true
   if key = "down" and m.guide.visible and m.channels.HasFocus() and m.channels.content <> invalid and m.channels.itemFocused >= m.channels.content.GetChildCount() - 1 then m.vault.SetFocus(true) : return true
   if key = "up" and m.guide.visible and m.vault.HasFocus() then m.channels.SetFocus(true) : return true
-  if key = "up" and m.guide.visible and m.creators.HasFocus() then m.pair.SetFocus(true) : return true
-  if key = "down" and m.guide.visible and m.updates.HasFocus() then m.channels.SetFocus(true) : return true
-  if key = "down" and m.guide.visible and m.pair.HasFocus() then m.creators.SetFocus(true) : return true
+  if key = "up" and m.guide.visible and m.creators.HasFocus() then m.updates.SetFocus(true) : return true
+  if key = "up" and m.guide.visible and m.channels.HasFocus() and m.channels.itemFocused <= 0 then m.guideSort.SetFocus(true) : return true
+  if key = "down" and m.guide.visible and (m.updates.HasFocus() or m.guideSort.HasFocus()) then m.channels.SetFocus(true) : return true
   return false
 end function

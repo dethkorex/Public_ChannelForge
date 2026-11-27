@@ -36,6 +36,35 @@ class FakeResponse:
 
 
 class TvAppTests(unittest.TestCase):
+    def test_public_build_loads_only_an_explicit_valid_studio_relay_pair(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "playback-relay.json"
+            with mock.patch.object(tv, "TESTER_BUILD", False), mock.patch.object(tv, "resource", return_value=config):
+                self.assertEqual(tv.configured_playback_relay(), "")
+                route = "studio.example=relay.example"
+                config.write_text(json.dumps({"relay_route": route}), encoding="utf-8")
+                self.assertEqual(tv.configured_playback_relay(), route)
+                config.write_text(json.dumps({"relay_route": "studio.example=https://relay.example/"}), encoding="utf-8")
+                self.assertEqual(tv.configured_playback_relay(), "")
+                config.write_text("{malformed", encoding="utf-8")
+                self.assertEqual(tv.configured_playback_relay(), "")
+
+    def test_movie_progress_survives_new_port_original_tunnel_rotation_and_completion(self):
+        first = {"title": "Example", "id": "film-1", "studio_id": "demo",
+                 "stream_url": "https://old.example/vault/film-1.m3u8"}
+        next_url = {**first, "stream_url": "https://new.example/vault/film-1.m3u8"}
+        now = int(time.time()*1000)
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(tv, "UPDATE_DIR", Path(temporary)/"updates"):
+            self.assertEqual(tv.movie_progress(), [])
+            tv.movie_progress({"movie": first, "resumeAt": .75, "changed": now})
+            self.assertEqual(tv.movie_progress()[0]["resumeAt"], .75)
+            tv.movie_progress({"movie": next_url, "resumeAt": 15.25, "changed": now+2})
+            tv.movie_progress({"movie": first, "resumeAt": 11, "changed": now+1})
+            self.assertEqual(tv.movie_progress(), [{"movie": next_url, "resumeAt": 15.25}])
+            tv.movie_progress({"movie": next_url, "resumeAt": 15.25, "finished": True, "changed": now+3})
+            tv.movie_progress({"movie": next_url, "resumeAt": 12, "changed": now+2})
+            self.assertEqual(tv.movie_progress(), [])
+
     def test_linux_archive_update_replaces_bundles_in_same_folder(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -137,8 +166,10 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("DIRECTORY_FALLBACK_URL", activity)
         self.assertIn("DIRECTORY_REFRESH_MS", activity)
         self.assertIn("guide.postDelayed(directoryRefresh", activity)
-        self.assertIn("android:icon=\"@mipmap/channel_forge_tv_icon\"", manifest)
-        self.assertIn("android:banner=\"@drawable/channel_forge_tv_banner\"", manifest)
+        self.assertIn("android:icon=\"${channelForgeIcon}\"", manifest)
+        self.assertIn("android:banner=\"${channelForgeBanner}\"", manifest)
+        self.assertIn("'@mipmap/channel_forge_tv_icon'", gradle)
+        self.assertIn("'@drawable/channel_forge_tv_banner'", gradle)
         self.assertIn("DIRECTORY_FALLBACK_URL", gradle)
         for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi"):
             self.assertTrue((root / f"tv/firetv/app/src/main/res/mipmap-{density}/channel_forge_tv_icon.png").is_file())
@@ -220,14 +251,16 @@ class TvAppTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise desktop player events")
     def test_desktop_player_recovers_continuous_end_and_repeated_stalls(self):
-        start = tv.HTML.index("{\n    const video=$('#player');")
+        start = tv.HTML.index("{\n    const video=$('#player');", tv.HTML.index("function stopPlayer("))
         end = tv.HTML.index("$('#scan-channels').onclick", start)
         refresh_start = tv.HTML.index("async function refreshTunedChannel(")
         refresh_end = tv.HTML.index("function advanceLive(", refresh_start)
+        audio_start = tv.HTML.index("let volumeBeforeGuide=")
+        audio_end = tv.HTML.index("function minimizePlayer(", audio_start)
         setup = '''
 const assert = require('node:assert/strict');
 const handlers = {}, retries = [], messages = [];
-const video = {currentTime: 10, addEventListener: (event, fn) => handlers[event] = fn};
+const video = {currentTime: 10, volume: 0.8, addEventListener: (event, fn) => handlers[event] = fn};
 const $ = () => video, programAt = () => null, setBuffering = () => {}, armPlaybackDeadline = () => {};
 const advanceLive = failed => retries.push(failed), setPlayerState = message => messages.push(message);
 let now = 100, playingSince = 0, lastPlaybackTime = -1, playbackTimer, liveBoundaryTimer, playbackGeneration = 1;
@@ -248,6 +281,12 @@ const scanStudio = async creator => {
 };
 '''
         checks = '''
+setGuideAudio(true);
+assert.equal(video.volume, 0.8 * 0.35);
+setGuideAudio(true);
+assert.equal(video.volume, 0.8 * 0.35);
+setGuideAudio(false);
+assert.equal(video.volume, 0.8);
 handlers.ended();
 assert.deepEqual(retries, [true]);
 activeMedia.channel.air_until = new Date(0).toISOString();
@@ -279,7 +318,8 @@ assert.equal(retries.at(-1), true);
     assert.deepEqual(requested, ['new', 'old']);
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
-        checked = subprocess.run(["node", "-"], input=setup + tv.HTML[refresh_start:refresh_end] + tv.HTML[start:end] + checks,
+        checked = subprocess.run(["node", "-"], input=setup + tv.HTML[refresh_start:refresh_end]
+                                 + tv.HTML[audio_start:audio_end] + tv.HTML[start:end] + checks,
                                  encoding="utf-8", capture_output=True, timeout=10)
         self.assertEqual(checked.returncode, 0, checked.stderr)
 
@@ -287,12 +327,94 @@ assert.equal(retries.at(-1), true);
         self.assertIn('id="scan-channels"', tv.HTML)
         self.assertIn('id="tv-guide"', tv.HTML)
         self.assertIn("async function scanChannels", tv.HTML)
-        self.assertIn("value.channels.filter(channel=>channel.stream_url)", tv.HTML)
+        self.assertIn("return value.channels.filter(channel=>channel.stream_url", tv.HTML)
         self.assertIn('id="home-changelog"', tv.HTML)
         self.assertIn('data-section-block="cinema" hidden><h2>Creator studios', tv.HTML)
         self.assertIn("if(name==='cinema'&&selectedCreator)studio(selectedCreator)", tv.HTML)
         self.assertIn("channelsByStudio.set(creator.playlist_url,channels)", tv.HTML)
         self.assertIn("directoryScan=refreshDirectory()", tv.HTML)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise TV guide merging")
+    def test_guide_prefers_fresh_route_without_hiding_other_studios(self):
+        start = tv.HTML.index("function refreshGuideFromStudios()")
+        end = tv.HTML.index("function sameStudio(", start)
+        script = r'''
+const assert = require('node:assert/strict');
+const id = '0123456789abcdef';
+const allCreators = [
+    {name:'Example',playlist_url:'old',updated_at:1},
+    {name:'Other',playlist_url:'other',updated_at:3},
+    {name:'example',playlist_url:'new',updated_at:2},
+];
+const row = (stream_url, state='standby') => ({id, name:'Channel one', number:1, stream_url, state});
+const channelsByStudio = new Map([['old',[row('https://old.example/live','reconnecting')]],
+    ['new',[row('https://new.example/live')]], ['other',[row('https://other.example/live')]]]);
+let liveChannels, pendingGuideRender = 1;
+'''
+        script += tv.HTML[start:end]
+        script += r'''
+refreshGuideFromStudios();
+assert.deepEqual(liveChannels.map(row=>row.stream_url).sort(), ['https://new.example/live', 'https://other.example/live']);
+channelsByStudio.set('new',[row('https://new.example/live','offline')]);
+refreshGuideFromStudios();
+assert.deepEqual(liveChannels.map(row=>row.stream_url).sort(), ['https://old.example/live', 'https://other.example/live']);
+'''
+        result = subprocess.run(["node", "-"], input=script, encoding="utf-8", capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise remote viewer recovery")
+    def test_remote_guide_falls_back_to_playlist_and_movie_route_tracks_studio(self):
+        def js(start, end):
+            i = tv.HTML.index(start)
+            return tv.HTML[i:tv.HTML.index(end, i)]
+
+        script = r'''
+const assert = require('node:assert/strict');
+const previous = 'https://old.studio.example', current = 'https://new.studio.example';
+const creator = {id:'studio', name:'Studio', status_url:current+'/api/public/channels',
+    playlist_url:current+'/exports/channels.m3u', vault_url:current+'/api/public/vault'};
+const allCreators = [creator], channelsByStudio = new Map();
+const unreachableStudioOrigins = new Set();
+let mode = 'guide-down', tester = false;
+const document = {documentElement:{hasAttribute: () => tester}};
+const localJson = async () => null, refreshGuideFromStudios = () => {};
+const discoverDirectory = async () => ({creators:[{...creator, id:'other', vault_url:previous+'/api/public/vault'},creator]});
+async function readStudioGuide(url, asJson){
+    assert(url.startsWith(current));
+    if(asJson){
+        if(mode==='empty')return {channels:[]};
+        throw Error('guide unavailable');
+    }
+    if(mode==='both-down')throw Error('playlist unavailable');
+    return '#EXTM3U\n#EXTINF:-1 tvg-id="public-channelforge.channel" tvg-chno="8",Channel\n/live/channel.m3u8\n';
+}
+'''
+        script += js("function parsePlaylist(", "function programAt(")
+        script += js("function creatorMedia(", "function supportsCinema(")
+        script += js("function studioGuideRows(", "async function refreshDirectory(")
+        script += js("async function refreshMovieRoute(", "function recoverMovie(")
+        script += r'''
+(async () => {
+    const channels = await scanStudio(creator);
+    assert.equal(channels.length, 1);
+    assert.equal(channels[0].id,'channel');
+    assert.equal(channels[0].number,'8');
+    assert.equal(channels[0].stream_url,current+'/live/channel.m3u8');
+    mode='both-down';
+    assert.equal((await scanStudio(creator))[0].state,'reconnecting');
+    tester=true;
+    assert.deepEqual(await scanStudio(creator),[]);
+    assert(unreachableStudioOrigins.has(creator.playlist_url));
+    mode='empty';
+    assert.deepEqual(await scanStudio(creator),[]);
+    assert(!unreachableStudioOrigins.has(creator.playlist_url));
+    const path='/vault/0123456789abcdef01234567.m3u8';
+    assert.equal(await refreshMovieRoute({studio_id:'studio',stream_url:previous+path}),current+path);
+    assert.equal(await refreshMovieRoute({studio_id:'studio',local_studio:true,stream_url:previous+path}),'');
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "-"], input=script, encoding="utf-8", capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_cached_guide_survives_failure_and_an_authoritative_empty_catalog_is_kept(self):
         guide = "https://studio.example/api/public/channels?guide=extended"

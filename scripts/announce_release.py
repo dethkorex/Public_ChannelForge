@@ -16,7 +16,11 @@ def messages(tag, repository, notes):
         raise ValueError("Only stable release tags are announced.")
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
         raise ValueError("Expected a GitHub repository name.")
-    title = f"**ChannelForge {tag} is available**"
+    first = notes.splitlines()[0] if notes else ""
+    if re.fullmatch(r"# ChannelForge Alpha \d+\.\d+(?:\.\d+)?", first):
+        title = f"**{first[2:]} is available**"
+    else:
+        title = f"**ChannelForge {tag} is available**"
     link = f"Downloads and full notes · <https://github.com/{repository}/releases/tag/{tag}>"
     # Leave room for the heading and link in each message, including UTF-16 pairs.
     limit = 1900 - len(title) - len(link)
@@ -68,7 +72,15 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print the messages without making network requests.")
     args = parser.parse_args()
     notes = Path("RELEASE_NOTES.md").read_text(encoding="utf-8-sig")
-    announcements = messages(os.environ["GITHUB_REF_NAME"], os.environ["GITHUB_REPOSITORY"], notes)
+    tag, repository = os.environ["GITHUB_REF_NAME"], os.environ["GITHUB_REPOSITORY"]
+    announcements = messages(tag, repository, notes)
+    summary = Path("docs/releases") / f"{tag}-announcement.md"
+    if summary.is_file():
+        message = summary.read_text(encoding="utf-8").strip()
+        message += f"\n\n<https://github.com/{repository}/releases/tag/{tag}>"
+        if len(message.encode("utf-16-le")) // 2 > 2000:
+            raise ValueError("Keep the Discord announcement under 2,000 characters.")
+        announcements.insert(0, message)
     if args.dry_run:
         print("\n\n".join(announcements))
         return

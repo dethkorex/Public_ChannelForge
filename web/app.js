@@ -4,6 +4,8 @@ let mediaLoadRequest = 0, workspaceLibraryRequest = 0, workspaceMediaRequest = 0
 let libraryRequest, libraryFetchedAt = 0;
 let builderLibraryKind = "all", builderLibraries = [], builderLibraryRequest = 0;
 const builderLibrarySelections = new Map();
+const builderLibraryPool = "@all";
+let builderPoolSignature = "";
 const builderPageSize = 100;
 let builderDisplayLimit = builderPageSize, builderReturnView = "channels", builderTrigger, builderSaving = false;
 const workspaceBatchSize = 96;
@@ -18,11 +20,12 @@ const nextChannelNumber=()=>String(Math.max(0,...state.channels.map(channel=>Num
 if(window.Hls){Hls.DefaultConfig.manifestLoadingTimeOut=30000;Hls.DefaultConfig.fragLoadingTimeOut=30000}
 async function api(path,options={}){const response=await fetch(path,{headers:{"Content-Type":"application/json"},...options});const data=await response.json();if(!response.ok)throw new Error(data.error||`Request failed (${response.status})`);return data}
 function toast(message,error=false){const el=$("#toast");el.textContent=message;el.className=error?"show error":"show";setTimeout(()=>el.className="",3500)}
-function renderChannels(){const box=$("#channel-list");box.innerHTML=state.channels.length?state.channels.map(c=>{const logo=state.assets.find(a=>a.id===c.logo_asset_id),live=state.now_playing?.[c.id],finished=Date.parse(c.air_until)<=Date.now(),mode={ordered:"In order",shuffle:"Shuffled",shuffle_in_order:"Shuffle shows · episodes in order",marathon:"Series marathon",franchise:"Smart franchise timeline"}[c.playback_mode||"ordered"];return `<article class="channel-card" draggable="true" data-channel-card="${c.id}" data-search="${escapeHtml(`${c.name} ${c.number}`.toLowerCase())}">${logo?`<img class="channel-logo-small" src="/user-assets/${encodeURIComponent(logo.filename)}" alt="">`:""}<span class="drag-handle">⋮⋮</span><span class="channel-number">CH ${escapeHtml(c.number)} · ${finished?"OFFLINE":"LIVE"}</span><h3>${escapeHtml(c.name)}</h3><p class="meta">${finished?"Lineup finished":live?`Now playing: ${escapeHtml(live.title)}`:`${c.items.length} titles in rotation`} · ${mode}</p><div class="actions">${finished?`<button class="primary" data-channel-action="reair" data-id="${c.id}">Put back on TV</button>`:`<button class="primary" data-watch="${c.id}" data-view="watch">Test in player</button>`}<button data-channel-action="refresh" data-id="${c.id}">Refresh guide</button><button data-channel-action="shuffle" data-id="${c.id}">Reshuffle lineup</button><button data-edit="${c.id}">Edit</button><button class="danger" data-delete="${c.id}">Delete</button></div></article>`}).join(""):`<div class="empty">No channels yet. Add a local folder or connect Plex in Media Sources, then create your first channel.</div>`}
+function renderChannels(){const box=$("#channel-list");box.innerHTML=state.channels.length?state.channels.map(c=>{const logo=state.assets.find(a=>a.id===c.logo_asset_id),live=state.now_playing?.[c.id],finished=Date.parse(c.air_until)<=Date.now(),mode={ordered:"In order",shuffle:"Shuffled",shuffle_in_order:"Shuffle shows · episodes in order",marathon:"Series marathon",franchise:"Smart franchise timeline"}[c.playback_mode||"ordered"];return `<article class="channel-card" draggable="true" data-channel-card="${c.id}" data-search="${escapeHtml(`${c.name} ${c.number}`.toLowerCase())}">${logo?`<img class="channel-logo-small" src="/user-assets/${encodeURIComponent(logo.filename)}" alt="">`:""}<span class="drag-handle">⋮⋮</span><span class="channel-number">CH ${escapeHtml(c.number)} · ${finished?"OFFLINE":"LIVE"}</span><h3>${escapeHtml(c.name)}</h3><p class="meta">${finished?"Lineup finished":live?`Now playing: ${escapeHtml(live.title)}`:`${c.items.length} titles in rotation`} · ${mode}</p><div class="actions">${finished?`<button class="primary" data-channel-action="reair" data-id="${c.id}">Put back on TV</button>`:`<button class="primary" data-watch="${c.id}" data-view="watch">Test in player</button>`}<button data-channel-action="refresh" data-id="${c.id}">Refresh guide</button><button data-channel-action="shuffle" data-id="${c.id}">Reshuffle lineup</button><button data-edit="${c.id}">Edit</button><button class="danger" data-delete="${c.id}">Delete</button></div></article>`}).join(""):`<div class="empty">No channels yet. Add a local folder or connect Plex in Media Sources, then create your first channel.</div>`;window.ChannelForgeTesterDecorateChannels?.()}
 function builderIsOpen(){return $("#channel-builder").classList.contains("active")}
 function showView(view) {
   const building = view === "channel-builder";
-  const navView = building ? "channels" : ["updates", "tools"].includes(view) ? "system" : view;
+  const navView = building || view === "channel-analytics" ? "channels" :
+    ["updates", "tools", "developer", "studio-activity"].includes(view) ? "system" : view;
   if (!building && builderIsOpen()) {
     ++builderLibraryRequest;
     ++mediaLoadRequest;
@@ -45,6 +48,49 @@ function selectSettingsPanel(panel) {
     document.getElementById(button.getAttribute("aria-controls")).hidden = !selected;
   }
 }
+const studioActivityView = $("#studio-activity");
+let readingStudioActivity = false;
+async function refreshStudioActivity() {
+  if (document.hidden || !studioActivityView.classList.contains("active") || readingStudioActivity) return;
+  readingStudioActivity = true;
+  const status = $("#studio-activity-status");
+  try {
+    const current = await api("/api/studio/activity");
+    const percent = value => Number.isFinite(value) ? value.toFixed(2) + "%" : "Unavailable";
+    const minutes = Math.floor(current.uptime_seconds / 60);
+    const heartbeat = current.heartbeat.last_success;
+    const sharing = {live:"Online", retrying:"Reconnecting", connecting:"Connecting", private:"Private"};
+    const metrics = [
+      ["Studio CPU", percent(current.cpu_percent)],
+      ["Studio RAM", percent(current.ram_percent)],
+      ["Video served", (current.video_bps / 1_000_000).toFixed(2) + " Mbps"],
+      ["Studio sharing", sharing[current.sharing] || "Standby"],
+      ["Active live channels", current.live_channels],
+      ["Current viewer sessions", current.viewer_sessions],
+      ["Running encoders", current.encoder_count],
+      ["Encoders starting", current.encoder_starting],
+      ["Studio uptime", Math.floor(minutes / 60) + " h " + (minutes % 60) + " min"],
+      ["Last directory heartbeat", heartbeat ? new Date(heartbeat * 1000).toLocaleTimeString() : "—"]
+    ];
+    $("#studio-activity-metrics").replaceChildren(...metrics.map(([label, value]) => {
+      const tile = document.createElement("div");
+      const name = document.createElement("dt");
+      const number = document.createElement("dd");
+      name.textContent = label;
+      number.textContent = value;
+      tile.append(name, number);
+      return tile;
+    }));
+    status.textContent = "Updated " + new Date().toLocaleTimeString();
+  } catch {
+    status.textContent = "Could not read the latest Studio activity. Retrying…";
+  } finally {
+    readingStudioActivity = false;
+  }
+}
+new MutationObserver(refreshStudioActivity).observe(studioActivityView, {attributes:true, attributeFilter:["class"]});
+document.addEventListener("visibilitychange", refreshStudioActivity);
+setInterval(refreshStudioActivity, 3000);
 for (const button of document.querySelectorAll("[data-settings-panel]")) {
   button.addEventListener("click", () => selectSettingsPanel(button.dataset.settingsPanel));
 }
@@ -96,7 +142,11 @@ async function loadWorkspaceLibraries(force = false) {
 }
 function renderWorkspaceMedia(){
   const query=$("#workspace-library-search").value.trim().toLowerCase();
-  const visible=workspaceMedia.filter(item=>`${item.title} ${item.year}`.toLowerCase().includes(query));
+  const tester = document.documentElement.hasAttribute("data-tester");
+  const terms = tester ? testerSearchText(query).split(" ").filter(Boolean) : [];
+  const visible=workspaceMedia.filter(item=>tester
+    ? matchesTesterSearch(item.testerSearch ||= testerSearchIndex(item), terms)
+    : `${item.title} ${item.year}`.toLowerCase().includes(query));
   const grid=$("#workspace-library-grid"),section=$("#workspace-library").value;
   $("#workspace-library-count").textContent=`${visible.length} playable titles`;
   grid.innerHTML=visible.length?visible.slice(0,workspaceDisplayLimit).map(item=>
@@ -118,14 +168,18 @@ function renderWorkspaceMedia(){
 function updateMediaSelection() {
   const choices = [...selectedLineup.values()];
   const videos = choices.reduce((total, choice) => total + choice.items.length, 0);
-  $("#selection-count").textContent = `${choices.length.toLocaleString()} selected`;
+  $("#selection-count").textContent = choices.length ? `${choices.length.toLocaleString()} selected · Reorder` : "0 selected";
   $("#selection-count").title = `${videos.toLocaleString()} playable videos`;
   const list = $("#selected-media-list");
   if (!$("#selected-media-panel").hidden) list.innerHTML = choices.length ? choices.map((choice, index) => `
-    <button type="button" data-remove-media="${index}">
-      <span><b>${escapeHtml(choice.title)}</b>
-      <small>${choice.type === "show" ? choice.items.length + " episodes" : escapeHtml(choice.type)}${choice.year ? " · " + escapeHtml(choice.year) : ""}</small></span><i>×</i>
-    </button>`).join("") : '<div class="muted">No shows or movies selected yet.</div>';
+    <article class="lineup-row" data-lineup-index="${index}" draggable="true">
+      <span class="lineup-position" aria-hidden="true">${index + 1}</span>
+      <span class="lineup-title"><b>${escapeHtml(choice.title)}</b>
+      <small>${choice.type === "show" ? choice.items.length + " episodes" : escapeHtml(choice.type)}${choice.year ? " · " + escapeHtml(choice.year) : ""}</small></span>
+      <button type="button" data-lineup-move="-1" aria-label="Move ${escapeHtml(choice.title)} up" ${index === 0 ? "disabled" : ""}>↑</button>
+      <button type="button" data-lineup-move="1" aria-label="Move ${escapeHtml(choice.title)} down" ${index === choices.length - 1 ? "disabled" : ""}>↓</button>
+      <button type="button" data-remove-media aria-label="Remove ${escapeHtml(choice.title)}">×</button>
+    </article>`).join("") : '<div class="muted">No shows or movies selected yet.</div>';
   document.querySelectorAll("#media-list input").forEach(input => {
     input.checked = selectedLineup.has(mediaChoices[Number(input.value)]?.key);
   });
@@ -150,17 +204,18 @@ function setBuilderStep(step) {
   builderStep = step;
   document.querySelectorAll("[data-builder-step]").forEach(section => section.classList.toggle("active", Number(section.dataset.builderStep) === step));
   const editing = Boolean($("#channel-id").value);
-  $("#dialog-title").textContent = [editing ? "Edit channel" : "Create channel", "Name & playback", "Channel branding", "Review channel"][step - 1];
-  $("#builder-description").textContent = ["Build a custom channel from your Plex or local libraries.", "Choose the channel name, number, and lineup order.", "Choose how your channel looks in the guide and player.", "Confirm your lineup and sharing settings."][step - 1];
+  $("#dialog-title").textContent = [editing ? "Edit channel rating" : "Set channel rating", "Choose titles", "Name & playback", "Channel branding", "Review channel"][step];
+  $("#builder-description").textContent = ["Choose the highest rating you want this channel to carry.", "Build a custom channel from your Plex, Jellyfin, or local libraries.", "Choose the channel name, number, and lineup order.", "Choose how your channel looks in the guide and player.", "Confirm your lineup and sharing settings."][step];
   $("#selection-count").hidden = step !== 1;
-  $("#builder-back").hidden = step === 1;
+  $("#builder-back").hidden = step === 0;
   $("#builder-next").hidden = step === 4;
   $("#builder-save").hidden = step !== 4;
   if (step === 4) {
     const choices = [...selectedLineup.values()];
     const videos = choices.reduce((count, choice) => count + choice.items.length, 0);
-    $("#builder-summary").innerHTML = `<b>CH ${escapeHtml($("#channel-number").value)} · ${escapeHtml($("#channel-name").value)}</b><p>${choices.length} selected · ${videos} playable videos</p><small>${escapeHtml($("#playback-mode").selectedOptions[0]?.textContent || "")}</small>`;
+    $("#builder-summary").innerHTML = `<b>CH ${escapeHtml($("#channel-number").value)} · ${escapeHtml($("#channel-name").value)}</b><p>${choices.length} selected · ${videos} playable videos</p><small>${escapeHtml($("#channel-rating").value || "Unrated")} · ${escapeHtml($("#playback-mode").selectedOptions[0]?.textContent || "")}</small>`;
   }
+  if (step === 0) showRatingImpact();
   $("#dialog-title").focus({preventScroll:true});
   window.scrollTo({top:0});
 }
@@ -179,7 +234,7 @@ function renderCreatorPublish(){
   logoSelect.innerHTML='<option value="">No studio asset</option>'+state.assets.filter(asset=>asset.kind==="logo").map(asset=>`<option value="${asset.id}">${escapeHtml(asset.name)}</option>`).join("");
   logoSelect.value=selected;
   set("#directory-url",state.config.directory_url);
-  set("#creator-pairing-url",state.config.public_tunnel?"":state.config.public_url);
+  set("#creator-pairing-url",state.config.public_tunnel||state.config.legacy_relay?"":state.config.public_url);
   renderSharingStatus(state.config);
 }
 function renderSharingStatus(config){
@@ -190,12 +245,12 @@ function renderSharingStatus(config){
   const status=$("#creator-publish-status");
   let host="";
   try { host=new URL(config.public_url).hostname; } catch {}
-  const route=host.endsWith(".app.lhr.life")?"Free relay":host.endsWith(".ts.net")?"Tailscale Funnel":"Public HTTPS";
+  const route=config.community_relay_active?"ChannelForge VPS relay":host.endsWith(".ts.net")?"Tailscale Funnel":config.legacy_relay?"localhost.run fallback":"Public HTTPS";
   status.className="connection-result"+(sharing==="live"?" success":"");
   status.textContent=({
     live:`Your studio is listed in ChannelForge TV via ${route}. Keep Creator running while sharing.`,
     connecting:"Connecting your studio to ChannelForge TV…",
-    retrying:"The connection dropped. Creator will retry automatically.",
+    retrying:"The connection dropped. Studio will retry automatically.",
     private:"Your studio is offline.",
   })[sharing]||"Channels and scanned Plex movies appear in ChannelForge TV automatically.";
   const overview=$("#overview-sharing");
@@ -281,7 +336,7 @@ function renderJellyfinConnections() {
 }
 async function refresh() {
   state = await api("/api/status");
-  $("#version").textContent = `v${state.version}`;
+  if (!document.documentElement.hasAttribute("data-tester")) $("#version").textContent = `v${state.version}`;
   $("#plex-url").value = state.config.plex_url;
   $("#guide-hours").value = state.config.guide_hours;
   $("#bind-host").value = state.config.bind_host;
@@ -298,30 +353,64 @@ async function refresh() {
   $("#m3u-url").textContent = `${base}/exports/channels.m3u`;
   renderChannels(); renderWatchChannels(); renderAssets(); renderTools(); renderPlexProfile();
   renderLocalLibraries(); renderJellyfinConnections(); renderStudioSummary();
+  window.ChannelForgeTesterSources?.();
+  renderBroadcasts(state.broadcasts);
   if ($("#watch.active")) loadGuide();
   if (sources.length && $("#plex-onboarding").open) $("#plex-onboarding").close();
+}
+function renderBroadcasts(broadcasts) {
+  if (window.ChannelForgeTesterBroadcasts) return window.ChannelForgeTesterBroadcasts(broadcasts);
+  const container=$("#studio-broadcast-list");
+  if(!container||!state.channels)return;
+  const statusLabels={idle:"Idle",starting:"Starting",live:"Live",cooldown:"Cooling down"};
+  const fragment=document.createDocumentFragment();
+  for (const channel of state.channels) {
+    const current=broadcasts?.[channel.id]||{};
+    const row=document.createElement("div");
+    row.className="broadcast-monitor-row";
+    row.dataset.status=current.state||"idle";
+    const title=document.createElement("strong");
+    title.textContent=channel.name;
+    const status=document.createElement("span");
+    status.textContent=statusLabels[row.dataset.status]||"Idle";
+    const viewers=document.createElement("span");
+    const count=current.viewers||0;
+    viewers.textContent=count+" "+(count===1?"viewer":"viewers")+(current.legacy_activity?" · legacy activity":"");
+    const details=document.createElement("small");
+    details.textContent="Peak "+(current.peak_viewers||0)+" · "+((current.upload_bps||0)/1000000).toFixed(2)+" Mbps served";
+    row.append(title,status,viewers,details);
+    fragment.append(row);
+  }
+  if(fragment.childNodes.length)container.replaceChildren(fragment);
+  else container.textContent="Create a channel to monitor its broadcast.";
 }
 function resetBuilderFilters() {
   $("#media-filter").value = "";
   $("#smart-genre").value = $("#smart-rating").value = "all";
   $("#smart-year-min").value = $("#smart-year-max").value = "";
 }
+function builderSources() {
+  return builderLibraries.filter(library => builderLibraryKind === "all" || library.type === builderLibraryKind);
+}
 function setBuilderLibraries(preferred = "") {
-  const select = $("#channel-library"), old = select.value;
-  const sources = builderLibraries.filter(library => builderLibraryKind === "all" || library.type === builderLibraryKind);
+  const select = $("#channel-library"), old = select.value, sources = builderSources();
   const remembered = builderLibrarySelections.get(builderLibraryKind) || preferred;
-  const available = sources.find(library => library.key === remembered) || sources[0];
+  const combined = sources.length > 1;
   select.innerHTML = libraryOptions(sources);
-  select.value = available?.key || "";
+  if (combined) select.add(new Option("Search all matching libraries", builderLibraryPool), 1);
+  select.value = sources.some(library => library.key === remembered) ? remembered
+    : combined ? builderLibraryPool : sources[0]?.key || "";
   for (const button of document.querySelectorAll("[data-builder-library-kind]")) {
     button.setAttribute("aria-pressed", String(button.dataset.builderLibraryKind === builderLibraryKind));
   }
-  if (!available) {
+  if (!select.value) {
     loadMedia("");
     return;
   }
-  if (select.value !== old) {
-    resetBuilderFilters();
+  const signature = sources.map(library => library.key).join("\n");
+  if (select.value !== old || (select.value === builderLibraryPool && signature !== builderPoolSignature)) {
+    if (select.value !== old) resetBuilderFilters();
+    builderPoolSignature = signature;
     loadMedia(select.value);
   }
 }
@@ -350,10 +439,66 @@ async function loadBuilderLibraries(preferred) {
     if (request === builderLibraryRequest && builderIsOpen()) status.textContent = error.message;
   }
 }
-function smartMatches(choice){const genre=$("#smart-genre").value.toLocaleLowerCase(),rating=$("#smart-rating").value.toLocaleLowerCase(),min=Number($("#smart-year-min").value)||0,max=Number($("#smart-year-max").value)||9999,year=Number(choice.year)||0,genres=(choice.genres||[]).map(value=>String(value).toLocaleLowerCase()),contentRating=String(choice.content_rating||"Unrated").toLocaleLowerCase();return(genre==="all"||genres.includes(genre))&&(rating==="all"||contentRating===rating)&&(!year||year>=min&&year<=max)}
+function smartMatches(choice){const genre=$("#smart-genre").value.toLocaleLowerCase(),rating=$("#smart-rating").value.toLocaleLowerCase(),min=Number($("#smart-year-min").value)||0,max=Number($("#smart-year-max").value)||9999,year=Number(choice.year)||0,genres=[...choice.genres,...choice.tags].map(value=>String(value).toLocaleLowerCase()),contentRating=String(choice.content_rating||"Unrated").toLocaleLowerCase();return(genre==="all"||genres.includes(genre))&&(rating==="all"||contentRating===rating)&&(!year||year>=min&&year<=max)}
+function mediaSearchText(value) {
+  return String(value || "").normalize("NFKC").toLocaleLowerCase();
+}
+function testerSearchText(value) {
+  return String(value ?? "").normalize("NFKD").toLowerCase()
+    .replace(/(\p{Script=Latin})\p{M}+/gu, "$1")
+    .replace(/['’ʼ＇]/gu, "")
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, " ").trim();
+}
+function testerSearchIndex(item) {
+  const titles = [item.title, item.series, ...(item.aliases || [])].map(testerSearchText).filter(Boolean);
+  const tags = [...(item.genres || []), ...(item.tags || [])].map(testerSearchText).filter(Boolean);
+  const fields = [...titles, ...tags, ...[item.year, item.content_rating, item.summary, item.libraryName,
+    ...(item.credits || []), ...(item.actors || []), ...(item.directors || [])].map(testerSearchText).filter(Boolean)];
+  return {titles, tags, text: fields.join(" "), compact: [...titles, ...tags].map(value => value.replaceAll(" ", ""))};
+}
+function matchesTesterSearch(index, terms) {
+  return terms.every(term => index.text.includes(term) ||
+    (term.length >= 3 && index.compact.some(value => value.includes(term))));
+}
+const CHANNEL_RATING_LEVELS = new Map([
+  ["TV-Y", 1], ["TV-Y7", 2], ["TV-Y7-FV", 2], ["G", 3], ["TV-G", 3], ["PG", 4], ["TV-PG", 4],
+  ["PG-13", 5], ["TV-14", 6], ["R", 7], ["TV-MA", 8], ["NC-17", 9]
+]);
+function aboveRatingLimit(choice, ceiling) {
+  return Boolean(ceiling) && (!choice.ratingLevel || choice.ratingLevel > ceiling);
+}
+function showRatingImpact() {
+  const ceiling = CHANNEL_RATING_LEVELS.get($("#channel-rating").value);
+  const removed = [...selectedLineup.values()].filter(choice => aboveRatingLimit(choice, ceiling)).length;
+  const note = $("#channel-rating-impact");
+  note.hidden = removed === 0;
+  note.textContent = removed ? `Continuing will remove ${removed} ineligible ${removed === 1 ? "title" : "titles"} from this draft.` : "";
+}
+$("#channel-rating").addEventListener("change", showRatingImpact);
 function filteredMediaChoices() {
-  const query = $("#media-filter").value.trim().toLocaleLowerCase();
-  return mediaChoices.filter(choice => smartMatches(choice) && (!query || choice.searchText.includes(query)));
+  const ceiling = CHANNEL_RATING_LEVELS.get($("#channel-rating").value);
+  const eligible = mediaChoices.filter(choice => !aboveRatingLimit(choice, ceiling));
+  if (document.documentElement.hasAttribute("data-tester")) {
+    const query = testerSearchText($("#media-filter").value);
+    const terms = query.split(" ").filter(Boolean);
+    const genre = testerSearchText($("#smart-genre").value);
+    const rating = testerSearchText($("#smart-rating").value);
+    const min = Number($("#smart-year-min").value) || 0, max = Number($("#smart-year-max").value) || 9999;
+    const matches = eligible.filter(choice => {
+      const year = Number(choice.year) || 0;
+      return (genre === "all" || choice.testerSearch.tags.includes(genre)) &&
+        (rating === "all" || testerSearchText(choice.content_rating || "Unrated") === rating) &&
+        (!year || year >= min && year <= max) && matchesTesterSearch(choice.testerSearch, terms);
+    });
+    if (!terms.length) return matches;
+    const rank = ({testerSearch: {titles, tags}}) => titles.includes(query) ? 0 :
+      titles.some(value => value.startsWith(query)) ? 1 :
+      titles.some(value => value.includes(query) || value.replaceAll(" ", "").includes(query)) ? 2 :
+      tags.includes(query) ? 3 : 4;
+    return matches.map(choice => ({choice, rank: rank(choice)})).sort((a, b) => a.rank - b.rank).map(entry => entry.choice);
+  }
+  const terms = mediaSearchText($("#media-filter").value).match(/[\p{L}\p{N}]+/gu) || [];
+  return eligible.filter(choice => smartMatches(choice) && terms.every(term => choice.searchText.includes(term)));
 }
 function renderMediaChoices() {
   const matches = filteredMediaChoices();
@@ -368,7 +513,7 @@ function renderMediaChoices() {
       <span class="builder-card-info"><b>${escapeHtml(choice.title)}</b><small>${escapeHtml(meta)}</small></span>
     </label>`;
   }).join("");
-  if (!matches.length && mediaChoices.length) box.innerHTML = '<div class="empty">No titles match your search or filters.</div>';
+  if (!matches.length && mediaChoices.length) box.innerHTML = '<div class="empty">No titles match the channel rating, search, and filters.</div>';
   if (matches.length > builderDisplayLimit) {
     const more = document.createElement("button");
     more.type = "button";
@@ -388,7 +533,7 @@ function refreshSmartMatches() {
   $("#media-list").scrollTop = 0;
   renderMediaChoices();
 }
-function buildMediaChoices(items, librarySection) {
+function buildMediaChoices(items, librarySection, libraryName = "") {
   const groups = new Map();
   for (const item of items) {
     const section = item.section || librarySection;
@@ -407,13 +552,32 @@ function buildMediaChoices(items, librarySection) {
   }
   for (const choice of groups.values()) {
     choice.items.sort((a, b) => (a.season - b.season) || (a.episode - b.episode) || a.title.localeCompare(b.title));
+    let highest = 0;
+    for (const item of choice.items) {
+      const rating = String(item.content_rating || "").trim().toUpperCase().replace(/^(?:US|USA)[: -]+/, "");
+      const level = CHANNEL_RATING_LEVELS.get(rating);
+      if (!level) { highest = 0; break; }
+      if (level > highest) {
+        highest = level;
+        choice.content_rating = rating;
+      }
+    }
+    choice.ratingLevel = highest;
     choice.genres = [...new Set(choice.items.flatMap(item => item.genres || []).filter(Boolean))].sort();
+    choice.tags = [...new Set(choice.items.flatMap(item => item.tags || []).filter(Boolean))].sort();
+    if ([libraryName,...choice.tags].some(value => /\banime\b|アニメ/iu.test(String(value))) &&
+        !choice.tags.some(value => mediaSearchText(value) === "anime")) choice.tags.push("Anime");
     if (choice.type === "show") {
       const years = choice.items.map(item => Number(item.year)).filter(Boolean);
       if (years.length) choice.year = Math.min(...years);
     }
     const credits = new Set(choice.items.flatMap(item => [...(item.actors || []), ...(item.directors || [])]));
-    choice.searchText = [choice.title, choice.year, choice.content_rating, choice.summary, ...choice.genres, ...credits].join(" ").toLocaleLowerCase();
+    choice.searchText = mediaSearchText([choice.title, choice.year, choice.content_rating, choice.summary,
+      libraryName, ...choice.genres, ...choice.tags, ...credits].join(" "));
+    if (document.documentElement.hasAttribute("data-tester")) {
+      const aliases = [...new Set(choice.items.flatMap(item => item.aliases || []))];
+      choice.testerSearch = testerSearchIndex({...choice, aliases, libraryName, credits});
+    }
   }
   return [...groups.values()];
 }
@@ -431,18 +595,34 @@ async function loadMedia(section) {
   status.textContent = "Loading titles…";
   refreshSmartMatches();
   try {
-    const data = libraryMediaCache.get(section) || await api(`/api/library/items?section=${encodeURIComponent(section)}`);
-    libraryMediaCache.set(section, data);
+    const sources = section === builderLibraryPool ? builderSources() : builderSources().filter(library => library.key === section);
+    const choices = [], failures = [];
+    let index = 0;
+    async function fetchTitles() {
+      while (request === mediaLoadRequest && builderIsOpen() && index < sources.length) {
+        const library = sources[index++];
+        try {
+          const data = libraryMediaCache.get(library.key) || await api(`/api/library/items?section=${encodeURIComponent(library.key)}`);
+          libraryMediaCache.set(library.key, data);
+          for (const choice of buildMediaChoices(data.items, library.key, library.title)) choices.push(choice);
+        } catch (error) {
+          failures.push(error.message);
+        }
+      }
+    }
+    await Promise.all(Array.from({length: Math.min(3, sources.length)}, fetchTitles));
     if (request !== mediaLoadRequest || !builderIsOpen()) return;
-    mediaChoices = buildMediaChoices(data.items, section).sort((a,b) => a.title.localeCompare(b.title));
+    if (failures.length && failures.length === sources.length) throw new Error(failures[0]);
+    mediaChoices = choices.sort((a,b) => a.title.localeCompare(b.title) || a.section.localeCompare(b.section));
     mediaChoices.forEach((choice, index) => { choice.index = index; });
-    const genres = [...new Set(mediaChoices.flatMap(choice => choice.genres))].sort();
+    const genres = [...new Set(mediaChoices.flatMap(choice => [...choice.genres,...choice.tags]))].sort();
     const ratings = [...new Set(mediaChoices.map(choice => choice.content_rating))].sort();
     const options = (title, values) => '<option value="all">' + title + '</option>'
       + values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
-    $("#smart-genre").innerHTML = options("All genres", genres);
+    $("#smart-genre").innerHTML = options("All genres and tags", genres);
     $("#smart-rating").innerHTML = options("All ratings", ratings);
-    status.textContent = mediaChoices.length ? "" : "No playable titles were found in this library.";
+    status.textContent = failures.length ? `${failures.length} ${failures.length === 1 ? "library is" : "libraries are"} temporarily unavailable.`
+      : mediaChoices.length ? "" : "No playable titles were found in this selection.";
     refreshSmartMatches();
     updateMediaSelection();
   } catch (error) {
@@ -466,6 +646,18 @@ for(const control of ["#channel-background","#channel-logo","#channel-corner-bug
   $(control).addEventListener("input",renderChannelBrandingPreview);
 }
 let restorePresetOnSave = false;
+let lineupReordered = false;
+const presetDescriptions = {
+  ordered: "Plays the selected titles in the order shown in your lineup.",
+  shuffle: "Mixes every individual episode and movie.",
+  shuffle_in_order: "Rotates between shows while advancing each show’s episodes in order.",
+  marathon: "Plays each show’s selected episodes together, then advances to the next title in your lineup.",
+  franchise: "Keeps each show together and uses known franchise timelines or release years to order the titles.",
+};
+function updatePresetDescription() {
+  $("#preset-description").textContent = presetDescriptions[$("#playback-mode").value] || "";
+}
+$("#playback-mode").addEventListener("change", updatePresetDescription);
 $("#restore-preset").onclick = () => {
   restorePresetOnSave = true;
   toast("Save the channel to start its selected preset from the beginning.");
@@ -482,11 +674,14 @@ async function openChannel(channel = null) {
   setBuilderPanel("builder-filter-toggle", "builder-filters", false);
   setBuilderPanel("selection-count", "selected-media-panel", false);
   restorePresetOnSave = false;
+  lineupReordered = false;
   $("#restore-preset").hidden = !channel;
   $("#channel-id").value = channel?.id || "";
   $("#channel-name").value = channel?.name || "";
   $("#channel-number").value = channel?.number || nextChannelNumber();
+  $("#channel-rating").value = channel?.channel_rating || "";
   $("#playback-mode").value = channel?.playback_mode || "ordered";
+  updatePresetDescription();
   for (const [control, kind, fallback, selected] of [
     ["#channel-logo", "logo", "No logo", channel?.logo_asset_id],
     ["#channel-background", "guide-background", "Default background", channel?.background_asset_id],
@@ -515,8 +710,8 @@ async function openChannel(channel = null) {
   $("#publish-on-save").disabled = Boolean(state.config.creator_published);
   renderChannelBrandingPreview();
   showView("channel-builder");
-  setBuilderStep(1);
-  await loadBuilderLibraries(channel?.section || (builderReturnView === "library" ? $("#workspace-library").value : ""));
+  setBuilderStep(0);
+  await loadBuilderLibraries(builderReturnView === "library" ? $("#workspace-library").value : "");
 }
 
 function setBuilderPanel(buttonId, panelId, expanded) {
@@ -542,6 +737,7 @@ async function publishStudio(event){
     logo_asset_id:$("#creator-logo-asset").value,logo_url:$("#creator-logo-url").value,
     public_url:$("#creator-pairing-url").value,directory_url:$("#directory-url").value
   };
+  if (state.config.managed_relay && payload.public_url && payload.public_url !== state.config.public_url) payload.managed_relay=false;
   try{
     await api("/api/directory/publish",{method:"POST",body:JSON.stringify(payload)});
     await refresh();
@@ -572,10 +768,12 @@ $("#channel-form").addEventListener("submit", async event => {
   const id = $("#channel-id").value;
   const payload = {
     name: $("#channel-name").value.trim(), number: $("#channel-number").value.trim(), section: items[0].section,
+    channel_rating: $("#channel-rating").value,
     playback_mode: $("#playback-mode").value, logo_asset_id: $("#channel-logo").value,
     background_asset_id: $("#channel-background").value, corner_bug_asset_id: $("#channel-corner-bug").value, items
   };
   if (id && restorePresetOnSave) payload.restore_preset = true;
+  if (id && lineupReordered) payload.lineup_reordered = true;
   if (!id) payload.publish_worldwide = $("#publish-on-save").checked;
   const buttons = [$("#cancel-dialog"), $("#builder-back"), $("#builder-save")];
   builderSaving = true;
@@ -665,7 +863,7 @@ $("#selection-count").onclick = () => {
   const expanded = $("#selected-media-panel").hidden;
   setBuilderPanel("selection-count", "selected-media-panel", expanded);
   updateMediaSelection();
-  if (expanded) $("#selected-media-list button")?.focus({preventScroll:true});
+  if (expanded) $("#selected-media-list button:not(:disabled)")?.focus({preventScroll:true});
 };
 $("#select-all-media").onclick = () => {
   for (const choice of filteredMediaChoices()) selectedLineup.set(choice.key, choice);
@@ -687,17 +885,61 @@ $("#media-list").addEventListener("change", event => {
 $("#media-list").addEventListener("error", event => {
   if (event.target.matches("img")) event.target.hidden = true;
 }, true);
-$("#selected-media-list").addEventListener("click", event => {
-  const button = event.target.closest("[data-remove-media]");
-  if (!button) return;
-  const key = [...selectedLineup.keys()][Number(button.dataset.removeMedia)];
-  selectedLineup.delete(key);
+const lineupList = $("#selected-media-list");
+function moveSelectedTitle(from, to, direction = "") {
+  if (from === to || from < 0 || to < 0 || from >= selectedLineup.size || to >= selectedLineup.size) return;
+  const entries = [...selectedLineup];
+  const [entry] = entries.splice(from, 1);
+  entries.splice(to, 0, entry);
+  selectedLineup.clear();
+  for (const [key, choice] of entries) selectedLineup.set(key, choice);
+  lineupReordered = true;
   updateMediaSelection();
-  const next = $("#selected-media-list").children[Number(button.dataset.removeMedia)];
-  (next?.matches("button") ? next : $("#selection-count")).focus();
+  const row = lineupList.children[to];
+  const control = direction && row?.querySelector(`[data-lineup-move="${direction}"]:not(:disabled)`);
+  (control || row?.querySelector("button:not(:disabled)"))?.focus({preventScroll:true});
+  row?.scrollIntoView({block:"nearest"});
+  $("#lineup-edit-status").textContent = `${entry[1].title} moved to position ${to + 1}.`;
+}
+lineupList.addEventListener("click", event => {
+  const row = event.target.closest("[data-lineup-index]");
+  const button = event.target.closest("[data-lineup-move], [data-remove-media]");
+  if (!row || !button) return;
+  const from = Number(row.dataset.lineupIndex);
+  const direction = button.dataset.lineupMove;
+  if (direction) return moveSelectedTitle(from, from + Number(direction), direction);
+  selectedLineup.delete([...selectedLineup.keys()][from]);
+  updateMediaSelection();
+  (lineupList.children[Math.min(from, selectedLineup.size - 1)]?.querySelector("[data-remove-media]") || $("#selection-count")).focus();
 });
+let draggingLineupRow = null;
+lineupList.addEventListener("dragstart", event => {
+  draggingLineupRow = event.target.closest("[data-lineup-index]");
+  if (!draggingLineupRow) return;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", draggingLineupRow.dataset.lineupIndex);
+});
+lineupList.addEventListener("dragover", event => {
+  if (draggingLineupRow && event.target.closest("[data-lineup-index]")) event.preventDefault();
+});
+lineupList.addEventListener("drop", event => {
+  const row = event.target.closest("[data-lineup-index]");
+  if (!draggingLineupRow || !row) return;
+  event.preventDefault();
+  moveSelectedTitle(Number(draggingLineupRow.dataset.lineupIndex), Number(row.dataset.lineupIndex));
+  draggingLineupRow = null;
+});
+lineupList.addEventListener("dragend", () => { draggingLineupRow = null; });
 $("#overview-create").onclick=$("#library-create-channel").onclick=()=>openChannel();
 $("#builder-next").onclick = () => {
+  if (builderStep === 0) {
+    const ceiling = CHANNEL_RATING_LEVELS.get($("#channel-rating").value);
+    for (const [key, choice] of selectedLineup) {
+      if (aboveRatingLimit(choice, ceiling)) selectedLineup.delete(key);
+    }
+    updateMediaSelection();
+    refreshSmartMatches();
+  }
   if (builderStep === 1 && !selectedLineup.size) {
     toast("Select at least one playable title.", true);
     return;
@@ -739,7 +981,7 @@ $("#tv-player").addEventListener("playing",()=>{$("#playback-status").className=
 $("#tv-player").addEventListener("error",()=>showPlaybackError(activeChannel,"Playback failed. Check that the media source is online, then select the channel again."));
 $("#manual-plex-setup").onclick=()=>{clearInterval(plexSigninTimer);plexSigninTimer=0;$("#plex-onboarding").close();showView("setup")};
 $("#add-local-onboarding").onclick=()=>{$("#plex-onboarding").close();showView("setup");selectSettingsPanel("sources");$("#local-library-path").focus()};
-refresh().then(()=>{$("#installed-version").textContent=`v${state.version}`;checkForUpdate(true)}).catch(e=>toast(e.message,true));
+refresh().then(()=>{$("#installed-version").textContent=$("#version").textContent;if(!document.documentElement.hasAttribute("data-tester"))checkForUpdate(true)}).catch(e=>toast(e.message,true));
 document.addEventListener("click",event=>{const target=event.target.closest("[data-watch]");if(target?.dataset.watch===activeChannel)diagnosePlayback(activeChannel);});
 $("#channel-list").addEventListener("click", async event => {
   const button = event.target.closest("button[data-channel-action]");
@@ -759,6 +1001,12 @@ $("#channel-list").addEventListener("dragend",event=>{event.target.closest("[dat
 $("#channel-list").addEventListener("dragover",event=>{if(event.target.closest("[data-channel-card]"))event.preventDefault()});
 $("#channel-list").addEventListener("drop",async event=>{event.preventDefault();const target=event.target.closest("[data-channel-card]");if(!target||!draggedChannel||target.dataset.channelCard===draggedChannel)return;const ids=state.channels.map(channel=>channel.id),from=ids.indexOf(draggedChannel),to=ids.indexOf(target.dataset.channelCard);ids.splice(to,0,ids.splice(from,1)[0]);try{const data=await api("/api/channels/order",{method:"POST",body:JSON.stringify({ids})});state.channels=data.channels;await refresh();toast("Channel order saved.")}catch(error){toast(error.message,true)}});
 let checkingStatus = false;
+window.addEventListener("pywebviewready", () => {
+  const hide = $("#hide-studio");
+  if (!window.pywebview?.api?.hide_studio || !hide) return;
+  hide.hidden = false;
+  hide.onclick = () => window.pywebview.api.hide_studio();
+});
 setInterval(async()=>{
   if (document.hidden || checkingStatus) return;
   checkingStatus = true;
@@ -766,6 +1014,7 @@ setInterval(async()=>{
     const current=await api("/api/status?brief=1");
     if(state.version&&current.version!==state.version)location.reload();
     else if(current.config)renderSharingStatus(current.config);
+    if($("#start.active, #channel-analytics.active"))renderBroadcasts(current.broadcasts);
     if (state.channels?.some(c => Date.parse(c.air_until) <= Date.now() && state.now_playing?.[c.id])) {
       await refresh();
     }

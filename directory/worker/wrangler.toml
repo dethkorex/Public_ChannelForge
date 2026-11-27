@@ -20,3 +20,4 @@ crons = ["*/2 * * * *"]
 
 [vars]
 OFFLINE_AFTER_SECONDS = "360"
+RELAY_ENROLL_URL = "https://channelforge-vps.tailb58ce4.ts.net/internal/enroll"

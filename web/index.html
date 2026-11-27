@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Public ChannelForge</title>
+  <title>ChannelForge Studio</title>
   <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css"><link rel="stylesheet" href="/plex.css"><link rel="stylesheet" href="/overlays.css"><link rel="stylesheet" href="/onboarding.css"><link rel="stylesheet" href="/ux.css"><link rel="stylesheet" href="/update.css"><link rel="stylesheet" href="/tasks.css"><link rel="stylesheet" href="/desk.css"><link rel="stylesheet" href="/guide.css"><link rel="stylesheet" href="/tv-theme.css"><link rel="stylesheet" href="/studio.css"><link rel="stylesheet" href="/wizard.css">
 </head>
 <body>
   <header class="studio-sidebar">
-    <div class="studio-brand"><img src="/creator-sidebar.png" alt="" width="136" height="136"><div><h1>ChannelForge</h1><p>Your personal TV studio</p></div></div>
+    <div class="studio-brand"><img src="/creator-sidebar.png" alt="" width="136" height="136"><div><h1>ChannelForge Studio</h1><p>Your personal TV studio</p></div></div>
     <nav aria-label="Studio navigation">
       <div class="nav-group"><span>Workspace</span>
         <button data-view="start" class="active" aria-current="page"><i aria-hidden="true">◫</i>Overview</button>
@@ -25,7 +25,7 @@
         <button data-view="system"><i aria-hidden="true">⚙</i>System</button>
       </div>
     </nav>
-    <div class="sidebar-note"><i aria-hidden="true"></i><b>Creator is running</b><small id="sidebar-source-status">Checking media sources</small></div>
+    <div class="sidebar-note"><i aria-hidden="true"></i><b>Studio is running</b><small id="sidebar-source-status">Checking media sources</small></div>
   </header>
   <div class="workspace-topbar"><div class="topbar-actions"><span id="topbar-status" class="status-dot">Connecting</span><button id="topbar-scan">Scan libraries</button><button data-view="system" id="version" aria-label="Open system information"></button></div></div>
   <main>
@@ -44,6 +44,10 @@
           <b id="overview-channel-count">0 channels</b>
           <button data-view="setup">Sources &amp; sharing</button>
         </div>
+      </section>
+      <section class="panel broadcast-monitor studio-spaced" aria-labelledby="broadcast-monitor-title">
+        <h3 id="broadcast-monitor-title">Broadcast activity</h3>
+        <div id="studio-broadcast-list"></div>
       </section>
       <section class="creator-workbench">
         <article class="creator-workbench-card">
@@ -151,7 +155,7 @@
         </article>
         <form id="creator-publish-form" class="panel form-grid">
           <h3 class="wide">Public studio profile</h3>
-          <p class="muted wide">ChannelForge TV lists your studio while Creator is running. Share media you have permission to publish.</p>
+          <p class="muted wide">ChannelForge TV lists your studio while it is running. Share media you have permission to publish.</p>
           <label>Studio name<input id="creator-name" maxlength="80" required placeholder="Retro Wave TV"></label>
           <label>Public name / slug<input id="creator-slug" maxlength="60" placeholder="retro-wave-tv"></label>
           <label class="wide">Description<input id="creator-description" maxlength="400" placeholder="Hand-built movie and animation channels"></label>
@@ -159,7 +163,7 @@
           <label>Public logo URL<input id="creator-logo-url" type="url" placeholder="https://example.com/logo.png"></label>
           <details class="settings-details wide"><summary>Custom delivery and directory</summary>
             <label>Custom HTTPS media origin<input id="creator-pairing-url" type="url" placeholder="Automatic"></label>
-            <p class="muted">For Tailscale Funnel, point its root at the read-only media server on port 8790. Leave the origin blank to detect it when Creator starts.</p>
+              <p id="relay-setup" class="muted">Studio uses the ChannelForge relay when available. Enter a compatible HTTPS media origin only if you manage your own delivery.</p>
             <label>Hosted directory URL<input id="directory-url" type="url" required></label>
           </details>
           <div class="wide setup-actions"><button id="publish-creator" class="primary">Save &amp; publish studio</button></div>
@@ -201,15 +205,35 @@
       <div id="system-checks" class="system-check-grid"></div>
       <div class="system-settings-grid studio-spaced">
         <article class="panel backup-card"><h3>Automatic backups</h3><p>Creator saves channel and branding settings before lineup changes. Backups exclude Plex credentials.</p><strong id="backup-count">0 backups available</strong></article>
-        <article class="panel"><h3>Manage Creator</h3><div class="system-links"><button data-view="setup">Media sources &amp; network</button><button data-view="updates">Application updates</button><button data-view="tools">Community tools</button></div></article>
+        <article class="panel"><h3>Manage Studio</h3><div class="system-links"><button data-view="studio-activity">Activity</button><button data-view="setup">Media sources &amp; network</button><button data-view="updates">Application updates</button><button data-view="tools">Community tools</button><button type="button" data-open-diagnostics>Diagnostics</button><button id="hide-studio" type="button" hidden>Hide Studio</button></div></article>
       </div>
     </section>
+    <section id="studio-activity" class="view" aria-labelledby="studio-activity-title">
+      <div class="page-heading"><div><h2 id="studio-activity-title">Studio activity</h2><p>Current server activity and resource usage.</p></div><button data-view="system">Back to System</button></div>
+      <p id="studio-activity-status">Loading Studio activity…</p>
+      <dl id="studio-activity-metrics" class="studio-activity-metrics"></dl>
+      <p class="muted studio-activity-notes">CPU and RAM show Studio, its encoders, and its managed relay as a share of machine capacity. Video traffic includes live and movie segments served over the last 10 seconds.</p>
+    </section>
   <section id="channel-builder" class="view" aria-labelledby="dialog-title"><form id="channel-form" novalidate>
-    <div class="builder-heading"><span class="channel-number">Channel builder</span><h2 id="dialog-title" tabindex="-1">Create channel</h2><p id="builder-description">Build a custom channel from your Plex or local libraries.</p></div>
+    <div class="builder-heading"><span class="channel-number">Channel builder</span><h2 id="dialog-title" tabindex="-1">Create channel</h2><p id="builder-description">Build a custom channel from your Plex, Jellyfin, or local libraries.</p></div>
     <input id="channel-id" type="hidden">
+    <section class="builder-step builder-settings" data-builder-step="0" aria-label="Channel rating">
+      <div class="form-grid">
+        <label>Maximum content rating<select id="channel-rating" aria-describedby="channel-rating-help">
+          <option value="">Unrated (no limit)</option>
+          <option value="TV-Y">TV-Y</option><option value="TV-Y7">TV-Y7</option><option value="TV-Y7-FV">TV-Y7-FV</option>
+          <option value="G">G</option><option value="TV-G">TV-G</option>
+          <option value="PG">PG</option><option value="TV-PG">TV-PG</option>
+          <option value="PG-13">PG-13</option><option value="TV-14">TV-14</option>
+          <option value="R">R</option><option value="TV-MA">TV-MA</option><option value="NC-17">NC-17</option>
+        </select></label>
+        <p id="channel-rating-help" class="muted wide">Studio shows titles rated at or below this limit. A TV series is eligible when every available episode meets the limit. Titles without a known rating appear only with no limit.</p>
+        <p id="channel-rating-impact" class="muted wide" role="status" hidden></p>
+      </div>
+    </section>
     <section class="builder-step active" data-builder-step="1" aria-label="Choose titles">
       <div class="builder-toolbar">
-        <label class="builder-search"><i aria-hidden="true"></i><input id="media-filter" type="search" aria-label="Search library titles" placeholder="Search titles, genres, actors, or directors…"></label>
+        <label class="builder-search"><i aria-hidden="true"></i><input id="media-filter" type="search" aria-label="Search library titles and tags" placeholder="Search titles, tags, actors, or directors…"></label>
         <button id="builder-filter-toggle" class="builder-filter-toggle" type="button" aria-expanded="false" aria-controls="builder-filters" title="Library and filters" aria-label="Library and filters">•••</button>
         <output id="smart-match-count" class="builder-title-count" aria-live="polite">0 titles</output>
       </div>
@@ -222,17 +246,19 @@
         </div>
         <label>Media library<select id="channel-library"><option value="">Choose a library</option></select></label>
       </div>
-      <div class="smart-filter-grid"><label>Genre<select id="smart-genre"><option value="all">All genres</option></select></label><label>From year<input id="smart-year-min" type="number" min="1900" max="2100" placeholder="Any"></label><label>To year<input id="smart-year-max" type="number" min="1900" max="2100" placeholder="Any"></label><label>Rating<select id="smart-rating"><option value="all">All ratings</option></select></label><button type="button" id="select-all-media">Select all shown</button></div>
+      <div class="smart-filter-grid"><label>Genre or tag<select id="smart-genre"><option value="all">All genres and tags</option></select></label><label>From year<input id="smart-year-min" type="number" min="1900" max="2100" placeholder="Any"></label><label>To year<input id="smart-year-max" type="number" min="1900" max="2100" placeholder="Any"></label><label>Rating<select id="smart-rating"><option value="all">All ratings</option></select></label><button type="button" id="select-all-media">Select all shown</button></div>
       </div>
       <div id="builder-library-status" class="builder-status" role="status"></div>
       <div id="media-status" class="builder-status" role="status"></div>
       <div id="media-list" class="media-list" aria-label="Library titles"></div>
       <aside id="selected-media-panel" class="selected-media-panel" aria-labelledby="selected-media-heading" hidden>
         <div><h3 id="selected-media-heading">Selected titles</h3><button type="button" id="clear-media">Clear selection</button></div>
+        <p class="muted lineup-instructions">Drag titles or use the arrows to change their order.</p>
         <div id="selected-media-list" class="selected-media-list"></div>
+        <span id="lineup-edit-status" class="lineup-announcement" role="status"></span>
       </aside>
     </section>
-    <section class="builder-step builder-settings" data-builder-step="2" aria-label="Name and playback"><div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100" placeholder="Movie Night"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label class="wide">Playback order<select id="playback-mode"><option value="ordered">Play selection in order</option><option value="shuffle">Shuffle every title</option><option value="shuffle_in_order">Shuffle shows, episodes in order</option><option value="marathon">Marathon shows in selection order</option><option value="franchise">Smart franchise timeline — movies + complete shows</option></select></label><button type="button" id="restore-preset" hidden>Restore selected preset order</button></div></section>
+    <section class="builder-step builder-settings" data-builder-step="2" aria-label="Name and playback"><div class="form-grid"><label>Channel name<input id="channel-name" required maxlength="100" placeholder="Movie Night"></label><label>Channel number<input id="channel-number" required maxlength="12" placeholder="101"></label><label class="wide">Playback order<select id="playback-mode" aria-describedby="preset-description"><option value="ordered">Play selection in order</option><option value="shuffle">Shuffle every title</option><option value="shuffle_in_order">Shuffle shows, episodes in order</option><option value="marathon">Marathon shows in selection order</option><option value="franchise">Smart franchise timeline — movies + complete shows</option></select></label><p class="muted wide" id="preset-description"></p><button type="button" id="restore-preset" hidden>Restore selected preset order</button></div></section>
     <section class="builder-step builder-settings" data-builder-step="3" aria-label="Branding"><div class="form-grid"><label>Channel logo<select id="channel-logo"><option value="">No logo</option></select></label><label>Guide/player background<select id="channel-background"><option value="">Default background</option></select></label><label>Corner bug<select id="channel-corner-bug"><option value="">No corner bug</option></select></label></div>
       <figure class="creator-brand-preview" aria-label="Channel branding preview">
         <img id="branding-preview-background" class="preview-background" alt="" hidden>
@@ -244,7 +270,7 @@
     <section class="builder-step builder-settings" data-builder-step="4" aria-label="Review channel"><div id="builder-summary" class="summary-card"></div>
     <div id="worldwide-on-save">
       <label><input id="publish-on-save" type="checkbox" checked> Publish worldwide when I save</label>
-      <small class="muted">Viewers can discover this studio’s channels and Rewind Cinema movies in ChannelForge TV.</small>
+      <small id="worldwide-publish-note" class="muted">Viewers can discover this studio’s channels and Rewind Cinema movies in ChannelForge TV.</small>
     </div></section>
     <footer class="builder-footer"><button type="button" id="cancel-dialog">Cancel</button><button type="button" id="builder-back" hidden>Back</button><button type="button" id="selection-count" aria-expanded="false" aria-controls="selected-media-panel">0 selected</button><span></span><button type="button" id="builder-next" class="primary">Continue <i aria-hidden="true">→</i></button><button type="submit" id="builder-save" class="primary" hidden>Save channel</button></footer>
   </form></section>

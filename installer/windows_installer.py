@@ -12,6 +12,7 @@ import tempfile
 import tkinter as tk
 import time
 from contextlib import contextmanager
+from ctypes import c_long, c_uint, c_void_p, c_wchar_p
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -30,9 +31,9 @@ PRODUCTS = {
     "suite": {
         "app": "ChannelForge",
         "name": "ChannelForge",
-        "edition": "CREATOR + TV  •  PUBLIC EDITION",
+        "edition": "STUDIO + TV  •  PUBLIC EDITION",
         "tagline": "Create channels and watch the community dial",
-        "description": "Install ChannelForge Creator and ChannelForge TV together.",
+        "description": "Install ChannelForge Studio and ChannelForge TV together.",
         "finish": "Both applications are ready from your Desktop and Start Menu.",
         "folder": "ChannelForge",
         "image": "channel-forge-creator-installer.png",
@@ -41,8 +42,8 @@ PRODUCTS = {
     },
     "creator": {
         "app": "ChannelForge_Creator",
-        "name": "ChannelForge Creator",
-        "edition": "CREATOR  •  PUBLIC EDITION",
+        "name": "ChannelForge Studio",
+        "edition": "STUDIO  •  PUBLIC EDITION",
         "tagline": "Build and host your own live TV channels",
         "description": "Create personal TV channels from local folders, Plex, or both.",
         "finish": "Leave the application open while viewers use your channels.",
@@ -81,7 +82,7 @@ PAYLOAD_ROOT = ROOT / "payload" if BUNDLED else ROOT / "installer" / "payload"
 BRAND_IMAGE = ROOT / "assets" / PRODUCT["image"]
 INSTALL_PRODUCT_KEYS = ("creator", "tv")
 LEGACY_PUBLIC_NAMES = ("Public_ChannelForge.exe", "Public ChannelForge.exe")
-LEGACY_SHORTCUTS = ("ChannelForge_Creator.lnk", "ChannelForge_TV.lnk", "Public ChannelForge.lnk", "Public_ChannelForge.lnk")
+LEGACY_SHORTCUTS = ("ChannelForge Creator.lnk", "ChannelForge_Creator.lnk", "ChannelForge_TV.lnk", "Public ChannelForge.lnk", "Public_ChannelForge.lnk")
 
 
 def payload_for(key: str) -> Path:
@@ -162,6 +163,13 @@ def start_menu() -> Path:
 
 def default_installation() -> Path:
     return windows_data() / "Programs" / "ChannelForge"
+
+
+def install_folder(selected: Path) -> Path:
+    folder = selected.expanduser().resolve()
+    if folder == desktop_folder().resolve():
+        return folder / PRODUCT["folder"]
+    return folder
 
 
 def registered_installation() -> Path | None:
@@ -282,6 +290,7 @@ def install_binaries(folder: Path, keys: tuple[str, ...]) -> bool:
         if not retain_backups:
             for path in originals.values():
                 path.unlink(missing_ok=True)
+    refresh_shell_items(*installed_paths)
     return any(path.suffix.lower() == ".exe" for path in installed_paths)
 
 
@@ -310,6 +319,25 @@ def replace_binaries(replacements: list[tuple[Path, Path]], installed_paths: lis
         raise ValueError(f"ChannelForge did not close in time to finish the update: {last_error}")
 
 
+def refresh_shell_items(*paths: Path) -> None:
+    if not paths or sys.platform != "win32":
+        return
+    from ctypes import WinDLL
+
+    try:
+        notify = WinDLL("shell32").SHChangeNotify
+        notify.argtypes = (c_long, c_uint, c_wchar_p, c_void_p)
+        notify.restype = None
+        shcne_updateitem = 0x00002000
+        shcnf_pathw = 0x0005
+        shcnf_flushnowait = 0x2000
+        for path in paths:
+            notify(shcne_updateitem, shcnf_pathw | shcnf_flushnowait, str(path), None)
+    except (AttributeError, OSError):
+        # A shell refresh is optional in sessions without Explorer.
+        pass
+
+
 def create_shortcut(location: Path, target: Path, icon: Path) -> None:
     location.parent.mkdir(parents=True, exist_ok=True)
     environment = {**os.environ, "CHANNELFORGE_SHORTCUT": str(location), "CHANNELFORGE_TARGET": str(target),
@@ -321,6 +349,32 @@ def create_shortcut(location: Path, target: Path, icon: Path) -> None:
         "$s.IconLocation=$env:CHANNELFORGE_ICON;$s.Save()"
     )
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True, env=environment, creationflags=0x08000000)
+    refresh_shell_items(location, icon, target)
+
+
+def repair_taskbar_shortcuts(folder: Path, keys: tuple[str, ...], previous: tuple[Path, ...]) -> None:
+    pins = start_menu().parents[2] / "Internet Explorer" / "Quick Launch" / "User Pinned" / "TaskBar"
+    if sys.platform != "win32" or not pins.is_dir():
+        return
+    targets = {str(app_target(source, key)): str(app_target(folder, key))
+               for source in {folder, *previous} for key in keys}
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "$w=New-Object -ComObject WScript.Shell;$routes=ConvertFrom-Json $env:CHANNELFORGE_PIN_TARGETS;"
+        "Get-ChildItem -LiteralPath $env:CHANNELFORGE_PIN_FOLDER -Filter '*.lnk' | ForEach-Object {"
+        "$s=$w.CreateShortcut($_.FullName);$r=$routes.PSObject.Properties[$s.TargetPath];"
+        "if($r -and (Test-Path -LiteralPath $r.Value -PathType Leaf)){"
+        "$s.TargetPath=$r.Value;$s.WorkingDirectory=Split-Path -Parent $r.Value;"
+        "$s.IconLocation=$r.Value+',0';$s.Save();}"
+        "}"
+    )
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True,
+                       env={**os.environ, "CHANNELFORGE_PIN_TARGETS": json.dumps(targets), "CHANNELFORGE_PIN_FOLDER": str(pins)},
+                       creationflags=0x08000000, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return
+    refresh_shell_items(pins, *(app_target(folder, key) for key in keys))
 
 
 def clean_legacy_shortcuts() -> None:
@@ -388,11 +442,12 @@ def configure_autostart(target: Path, enabled: bool | None) -> None:
 def register_installation(folder: Path, keys: tuple[str, ...], desktop_shortcuts: bool, autostart: bool | None) -> None:
     for key in keys:
         target = app_target(folder, key)
-        icon = folder / PRODUCTS[key]["icon"]
+        # The executable's embedded icon follows the app when it is replaced in
+        # place. Older pins can still reference their original icon file.
         shortcut = f"{PRODUCTS[key]['name']}.lnk"
-        create_shortcut(start_menu() / shortcut, target, icon)
+        create_shortcut(start_menu() / shortcut, target, target)
         if desktop_shortcuts:
-            create_shortcut(desktop_folder() / shortcut, target, icon)
+            create_shortcut(desktop_folder() / shortcut, target, target)
         else:
             (desktop_folder() / shortcut).unlink(missing_ok=True)
     if "creator" in keys:
@@ -417,7 +472,7 @@ def apply_silent_update(target: Path, wait_pid: int, product: str | None = None)
         # Desktop/Downloads copies belong in the installed suite folder.
         loose = source in (desktop, downloads)
         managed = bool(known or loose)
-        folder = known or (default_installation().resolve() if loose else source)
+        folder = install_folder(known) if known else (default_installation().resolve() if loose else source)
         keys = tuple(key for key in INSTALL_PRODUCT_KEYS if (
             key == product or any(has_app(root, key) for root in (folder, source, desktop))
         ))
@@ -427,6 +482,7 @@ def apply_silent_update(target: Path, wait_pid: int, product: str | None = None)
                 (desktop / f"{PRODUCTS[key]['name']}.lnk").is_file() for key in keys
             )
             register_installation(folder, keys, desktop_shortcuts, None)
+            repair_taskbar_shortcuts(folder, keys, (source,))
             clean_legacy_desktop_files(folder, (source,))
         else:
             clean_legacy_desktop_files(folder, include_desktop=False)
@@ -464,7 +520,7 @@ class Installer(tk.Tk):
         tk.Label(brand, text=PRODUCT["edition"], background="#08111f", foreground="#b7c7dc", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(2, 0))
         tk.Label(brand, text=PRODUCT["tagline"], background="#08111f", foreground="#ffffff", font=("Segoe UI", 10)).pack(anchor="w", pady=(10, 0))
         default = discovered_installation() or default_installation()
-        self.destination = tk.StringVar(value=str(default))
+        self.destination = tk.StringVar(value=str(install_folder(default)))
         self.shortcut = tk.BooleanVar(value=True)
         self.autostart = tk.BooleanVar(value=bool(PRODUCT["autostart"]))
         self.page = 0
@@ -487,14 +543,14 @@ class Installer(tk.Tk):
         self.back.configure(state="normal" if self.page else "disabled")
         if self.page == 0:
             ttk.Label(self.body, text=f"Welcome to {PRODUCT['name']}", font=("Segoe UI", 20, "bold"), foreground="#67e8f9").pack(anchor="w", pady=(8, 12))
-            ttk.Label(self.body, text="Install both ChannelForge Creator and ChannelForge TV in one folder.\n\nThis public build contains no private APIs, artwork, presets, or user data.", wraplength=530).pack(anchor="w")
+            ttk.Label(self.body, text="Install both ChannelForge Studio and ChannelForge TV in one folder.\n\nThis public build contains no private APIs, artwork, presets, or user data.", wraplength=530).pack(anchor="w")
         elif self.page == 1:
             ttk.Label(self.body, text="Choose an install folder", font=("Segoe UI", 16, "bold"), foreground="#67e8f9").pack(anchor="w", pady=(8, 18))
             row = ttk.Frame(self.body); row.pack(fill="x")
             ttk.Entry(row, textvariable=self.destination).pack(side="left", fill="x", expand=True)
             ttk.Button(row, text="Browse…", command=self.browse).pack(side="left", padx=(8, 0))
             ttk.Checkbutton(self.body, text="Create Desktop shortcuts for both applications", variable=self.shortcut).pack(anchor="w", pady=(24, 5))
-            ttk.Checkbutton(self.body, text="Start ChannelForge Creator automatically when I sign in", variable=self.autostart).pack(anchor="w")
+            ttk.Checkbutton(self.body, text="Start ChannelForge Studio automatically when I sign in", variable=self.autostart).pack(anchor="w")
         else:
             ttk.Label(self.body, text="Ready to install", font=("Segoe UI", 16, "bold"), foreground="#67e8f9").pack(anchor="w", pady=(8, 18))
             ttk.Label(self.body, text=f"Install to:\n{self.destination.get()}\n\n{PRODUCT['finish']}", wraplength=530).pack(anchor="w")
@@ -503,7 +559,7 @@ class Installer(tk.Tk):
     def browse(self):
         chosen = filedialog.askdirectory(initialdir=self.destination.get())
         if chosen:
-            self.destination.set(chosen)
+            self.destination.set(str(install_folder(Path(chosen))))
 
     def previous(self):
         self.page -= 1
@@ -512,6 +568,11 @@ class Installer(tk.Tk):
 
     def advance(self):
         if self.page < 2:
+            if self.page == 1:
+                if not self.destination.get().strip():
+                    messagebox.showerror("Install folder required", "Choose a folder for ChannelForge Studio and TV.")
+                    return
+                self.destination.set(str(install_folder(Path(self.destination.get()))))
             self.page += 1
             self.render()
             return
@@ -519,13 +580,14 @@ class Installer(tk.Tk):
 
     def install(self):
         try:
-            destination = Path(self.destination.get()).expanduser().resolve()
+            destination = install_folder(Path(self.destination.get()))
             with installation_lock():
                 previous = discovered_installation()
                 install_binaries(destination, INSTALL_PRODUCT_KEYS)
                 register_installation(destination, INSTALL_PRODUCT_KEYS, self.shortcut.get(), self.autostart.get())
+                repair_taskbar_shortcuts(destination, INSTALL_PRODUCT_KEYS, (previous or desktop_folder().resolve(),))
                 clean_legacy_desktop_files(destination, (previous,) if previous else ())
-            messagebox.showinfo("Installation complete", "ChannelForge Creator and ChannelForge TV are installed together.")
+            messagebox.showinfo("Installation complete", "ChannelForge Studio and ChannelForge TV are installed together.")
             subprocess.Popen([str(app_target(destination, "creator"))], cwd=str(destination))
             self.destroy()
         except Exception as exc:

@@ -16,6 +16,51 @@ sub main()
   verify(mergeStudioRows([legacy], [changed], false).Count() = 1, "legacy URL matches upgraded registration")
   verify(mergeStudioRows(cached, [invalid, {}, {id: "bad"}], false).Count() = 2, "malformed rows preserve cached guide")
 
+  movie = parseDeepLink({ContentID: "alpha:0123456789abcdef01234567", MediaType: "Movie"})
+  verify(movie.kind = "movie" and movie.studioId = "alpha" and movie.itemId = "0123456789abcdef01234567", "movie link uses case-insensitive Roku input")
+  live = parseDeepLink({contentId: "alpha:0123456789abcdef", mediaType: "livefeed"})
+  verify(live.kind = "livefeed" and live.itemId = "0123456789abcdef", "live link resolves stable channel ID")
+  verify(parseDeepLink({contentId: "https://example.test/live", mediaType: "livefeed"}) = invalid, "deep links cannot supply stream URLs")
+  verify(parseDeepLink({contentId: "alpha:0123456789abcdef", mediaType: "movie"}) = invalid, "movie link rejects channel ID")
+  verify(parseDeepLink({contentId: "alpha:0123456789abcdef", mediaType: "unknown"}) = invalid, "unsupported deep link returns home")
+  verify(parseDeepLink({}) = invalid, "regular launch takes the home route")
+
+  bookmarks = {
+    entries: {},
+    Read: function(key as string) as string
+      if m.entries.DoesExist(key) then return m.entries[key]
+      return ""
+    end function,
+    Write: function(key as string, value as string) as boolean
+      if not m.entries.DoesExist(key) and m.entries.Count() >= 16 then return false
+      m.entries[key] = value
+      return true
+    end function,
+    Delete: function(key as string) as boolean
+      return m.entries.Delete(key)
+    end function,
+    GetKeyList: function() as object
+      return m.entries.Keys()
+    end function,
+    Flush: function() as boolean
+      return true
+    end function
+  }
+  bookmarkKey = movieBookmarkKey("alpha", "film|2000")
+  verify(movieResumePosition(bookmarks, bookmarkKey, [{key: bookmarkKey, position: 35.5}]) = 35.5, "old shelf bookmarks still resume")
+  writeMovieBookmark(bookmarks, bookmarkKey, 81.5, false, 1000)
+  for index = 1 to 15
+    writeMovieBookmark(bookmarks, movieBookmarkKey("alpha", "next" + index.ToStr()), 12.0, false, 2000)
+  end for
+  verify(movieResumePosition(bookmarks, bookmarkKey, []) = 81.5, "shelf eviction does not erase the bookmark")
+  verify(movieResumePosition(bookmarks, movieBookmarkKey("beta", "film|2000"), []) = 0, "matching title at a different studio has its own bookmark")
+  writeMovieBookmark(bookmarks, "too soon", 13.0, false, 1000 + 30 * 24 * 60 * 60)
+  verify(movieResumePosition(bookmarks, bookmarkKey, []) = 81.5, "a full registry preserves 30 days of bookmarks")
+  writeMovieBookmark(bookmarks, "new film", 16.0, false, 1001 + 30 * 24 * 60 * 60)
+  verify(movieResumePosition(bookmarks, "new film", []) = 16, "a full registry can reclaim an expired bookmark")
+  writeMovieBookmark(bookmarks, "new film", 16.0, true, 1002 + 30 * 24 * 60 * 60)
+  verify(movieResumePosition(bookmarks, "new film", []) = 0, "a completed movie starts over")
+
   m.guide = {visible: false}
   m.video = {state: "buffering", content: {title: "QA"}, position: 15}
   m.bufferTitle = {} : m.bufferDetails = {} : m.bufferPanel = {}
@@ -116,8 +161,43 @@ sub main()
   guide.rows = []
   onAirGuideLoaded(eventB)
   verify(m.bufferTitle.text = "THIS CHANNEL IS OFFLINE", "confirmed unpublish stops reconnect")
+  pilot = "registered.example.org=relay.example.org"
+  stream = "https://registered.example.org/broadcast/alpha/master.m3u8?viewer=abc"
+  verify(preferredRelayUrl(stream, pilot) = "https://relay.example.org/broadcast/alpha/master.m3u8?viewer=abc", "relay preserves media path and viewer lease")
+  verify(preferredRelayUrl("https://registered.example.org/exports/guide.xml", pilot) = "https://registered.example.org/exports/guide.xml", "relay leaves guide on registered route")
+  verify(preferredRelayUrl(stream, "other.example.org=relay.example.org") = stream, "relay stays scoped to the configured studio")
+  m.home = {visible: false}
+  m.guide.visible = true
+  m.continuePage = {visible: false}
+  m.vault = focusTarget(true)
+  m.insertMovie = focusTarget(false)
+  m.moreMovies = focusTarget(false)
+  m.homeMenu = focusTarget(false)
+  m.guideSort = focusTarget(false)
+  m.channels = focusTarget(false)
+  m.channels.itemFocused = 0
+  m.creators = focusTarget(false)
+  m.updates = focusTarget(false)
+  m.homeUpdate = focusTarget(false)
+  m.selectedMovie = {title: "QA"}
+  verify(onKeyEvent("right", true) and m.insertMovie.focused, "Right from a selected tape reaches Insert Movie")
+  m.vault.focused = false
+  verify(onKeyEvent("left", true) and m.vault.focused, "Left from Insert Movie returns to the shelf")
+  m.insertMovie.focused = false
+  m.vault.focused = false
+  m.channels.focused = true
+  verify(onKeyEvent("up", true) and m.guideSort.focused, "Up from the first channel reaches guide sorting")
+  m.channels.focused = false
+  verify(onKeyEvent("right", true) and m.updates.focused, "Right from guide sorting reaches System")
+  m.home.visible = true
+  focusSystemButton()
+  verify(m.homeUpdate.focused, "Closing System on Home restores focus to its entry")
   print "PASS Roku discovery and recovery"
 end sub
+
+function focusTarget(focused as boolean) as object
+  return {focused: focused, HasFocus: function() : return m.focused : end function, SetFocus: sub(value as boolean) : m.focused = value : end sub}
+end function
 
 function fakeClock(elapsed as integer) as object
   return {elapsed: elapsed, TotalSeconds: function() : return m.elapsed : end function, Mark: sub() : m.elapsed = 0 : end sub}

@@ -146,7 +146,8 @@ jobs:
               ], check=True, env=signing_env)
           subprocess.run([apksigner, "verify", "--print-certs", apk], check=True)
           PY
-          sha256sum tv-release/ChannelForgeTV-FireTV.apk > tv-release/SHA256SUMS-TV.txt
+          cp tv-release/ChannelForgeTV-FireTV.apk tv-release/ChannelForgeTV-Android.apk
+          sha256sum tv-release/ChannelForgeTV-FireTV.apk tv-release/ChannelForgeTV-Android.apk > tv-release/SHA256SUMS-TV.txt
       - uses: actions/upload-artifact@v4
         with:
           name: ChannelForge-TV-FireTV
@@ -161,7 +162,7 @@ jobs:
         run: npx --yes brighterscript@0.70.3 --root-dir tv/roku --create-package=false --copy-to-staging=false
       - name: Test Roku discovery and playback recovery
         run: |
-          result=$(npx --yes brs@0.45.0 tv/roku/components/CatalogState.brs tv/roku/components/MainScene.brs tests/roku/recovery.brs)
+          result=$(npx --yes brs@0.45.0 tv/roku/components/CatalogState.brs tv/roku/components/MovieBookmarks.brs tv/roku/components/MainScene.brs tv/roku/components/DeepLink.brs tests/roku/recovery.brs)
           printf '%s\n' "$result"
           grep -Fxq 'PASS Roku discovery and recovery' <<< "$result"
       - name: Package Roku channel
@@ -189,6 +190,7 @@ jobs:
           test -f release-assets/ChannelForge_Setup.exe
           test -f release-assets/SHA256SUMS.txt
           test -f release-assets/ChannelForgeTV-FireTV.apk
+          test -f release-assets/ChannelForgeTV-Android.apk
           test -f release-assets/SHA256SUMS-TV.txt
           test -f release-assets/ChannelForgeTV-Roku.zip
           test -f release-assets/SHA256SUMS-Roku.txt
@@ -210,7 +212,7 @@ jobs:
                   continue
               record = {"name": file.name, "size": file.stat().st_size,
                         "browser_download_url": f"{releases}/download/{tag}/{file.name}"}
-              if file.name == "ChannelForgeTV-FireTV.apk":
+              if file.name in {"ChannelForgeTV-FireTV.apk", "ChannelForgeTV-Android.apk"}:
                   with file.open("rb") as binary:
                       record["digest"] = "sha256:" + hashlib.file_digest(binary, "sha256").hexdigest()
               assets.append(record)

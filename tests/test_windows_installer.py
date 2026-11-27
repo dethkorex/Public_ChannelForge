@@ -65,6 +65,35 @@ class WindowsInstallerTests(unittest.TestCase):
     def test_regular_setup_does_not_enter_silent_update(self):
         self.assertIsNone(windows_installer.silent_update_target([]))
 
+    def test_selecting_desktop_uses_a_dedicated_application_folder(self):
+        desktop = self.root / "Desktop"
+        custom = desktop / "My ChannelForge"
+        self.assertEqual(windows_installer.install_folder(desktop), desktop / "ChannelForge")
+        self.assertEqual(windows_installer.install_folder(custom), custom)
+
+    def test_registered_desktop_install_moves_into_subfolder_on_update(self):
+        desktop = self.root / "Desktop"
+        desktop.mkdir()
+        folder = desktop / "ChannelForge"
+        old = desktop / "ChannelForge_Creator.exe"
+        old.write_bytes(b"4.0")
+        note = desktop / "Keep.txt"
+        note.write_text("user file")
+        payload = self.root / "payload.exe"
+        payload.write_bytes(b"4.1")
+        with (mock.patch.object(windows_installer, "discovered_installation", return_value=desktop),
+              mock.patch.object(windows_installer, "payload_for", return_value=payload),
+              mock.patch.object(windows_installer, "icon_for", return_value=payload),
+              mock.patch.object(windows_installer, "create_shortcut"),
+              mock.patch.object(windows_installer, "stop_locked_channel_forge_apps"),
+              mock.patch.object(windows_installer.subprocess, "Popen") as launch):
+            windows_installer.apply_silent_update(old, 42)
+        self.assertFalse(old.exists())
+        self.assertEqual(note.read_text(), "user file")
+        self.assertEqual((folder / old.name).read_bytes(), b"4.1")
+        self.assertEqual(windows_installer.registered_installation(), folder)
+        launch.assert_called_once_with([str(folder / old.name)], cwd=str(folder))
+
     def test_silent_update_replaces_existing_executable_without_wizard(self):
         folder = Path(tempfile.mkdtemp(prefix="channel-forge-update-test-")).resolve()
         target = folder / "ChannelForge_Creator.exe"
@@ -137,26 +166,37 @@ class WindowsInstallerTests(unittest.TestCase):
         payload.write_bytes(b"new")
         icon = self.root / "new.ico"
         icon.write_bytes(b"icon")
+        desktop_icons = []
 
-        def shortcut(path, target, _icon):
+        def shortcut(path, target, shortcut_icon):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(str(target))
+            if path.parent == desktop:
+                desktop_icons.append(shortcut_icon)
 
         with mock.patch.object(windows_installer, "payload_for", return_value=payload), \
              mock.patch.object(windows_installer, "icon_for", return_value=icon), \
              mock.patch.object(windows_installer, "create_shortcut", side_effect=shortcut), \
+             mock.patch.object(windows_installer, "refresh_shell_items") as shell_refresh, \
              mock.patch.object(windows_installer, "stop_locked_channel_forge_apps"), \
              mock.patch.object(windows_installer.subprocess, "Popen") as launch:
             windows_installer.apply_silent_update(creator, 44)
             folder = windows_installer.default_installation()
+            icon.write_bytes(b"new-icon")
             windows_installer.apply_silent_update(folder / creator.name, 45)
 
         self.assertEqual(windows_installer.registered_installation(), folder.resolve())
         self.assertEqual((folder / creator.name).read_bytes(), b"new")
         self.assertEqual((folder / tv.name).read_bytes(), b"new")
+        updated_icons = [folder / windows_installer.PRODUCTS[key]["icon"] for key in ("creator", "tv")]
+        self.assertEqual([path.read_bytes() for path in updated_icons], [b"new-icon", b"new-icon"])
+        self.assertEqual(set(shell_refresh.call_args.args), set(updated_icons))
+        self.assertEqual(set(desktop_icons), {folder / creator.name, folder / tv.name})
+        self.assertTrue(all(path.is_file() for path in desktop_icons))
+        self.assertFalse(any(folder.glob("channel-forge-*-????????????.ico")))
         self.assertEqual((desktop / "ChannelForge TV.lnk").read_text(), str(folder / tv.name))
         self.assertEqual(sorted(path.name for path in desktop.iterdir()), [
-            "ChannelForge Creator.lnk", "ChannelForge TV.lnk", "ChannelForge.exe",
+            "ChannelForge Studio.lnk", "ChannelForge TV.lnk", "ChannelForge.exe",
         ])
         launch.assert_called_once_with([str(folder / creator.name)], cwd=str(folder))
 

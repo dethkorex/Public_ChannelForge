@@ -9,7 +9,7 @@ ARCH_VERSION="${VERSION/-/}"
 OUT="$ROOT/release"
 WORK="${RUNNER_TEMP:-/tmp}/public-channelforge-packaging"
 APP_ROOT="$WORK/app"
-PYTHON_FILES=("$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/linux_runtime.py" "$ROOT/release_metadata.py" "$ROOT/native_vlc.py")
+PYTHON_FILES=("$ROOT/Public_ChannelForge.py" "$ROOT/ChannelForge_TV.py" "$ROOT/windows_distribution.py" "$ROOT/linux_runtime.py" "$ROOT/release_metadata.py")
 
 rm -rf "$WORK" "$OUT"
 mkdir -p "$OUT" "$APP_ROOT/ChannelForge"
@@ -34,7 +34,6 @@ Priority: optional
 Architecture: all
 Depends: python3 (>= 3.10), python3-webview, python3-pil, python3-urllib3, gir1.2-webkit2-4.1, ffmpeg, openssh-client, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav, mpv
 Maintainer: Public ChannelForge contributors
-Recommends: python3-vlc, vlc-plugin-base, vlc-plugin-video-output, python3-tk
 Description: Local-first personal channel guide builder
  Build personal channel rotations and watch the public TV guide in two desktop apps.
 EOF
@@ -50,10 +49,11 @@ EOF
 chmod 755 "$DEB/usr/bin/channelforge-tv"
 cat > "$DEB/usr/share/applications/public-channelforge.desktop" <<'EOF'
 [Desktop Entry]
-Name=ChannelForge Creator
+Name=ChannelForge Studio
 Comment=Build personal channels from local folders or Plex
 Exec=public-channelforge
-Icon=/opt/public-channelforge/assets/channel-forge-creator.png
+Icon=/opt/public-channelforge/assets/channel-forge-creator-icon.png
+StartupWMClass=public-channelforge
 Terminal=false
 Type=Application
 Categories=AudioVideo;Utility;
@@ -63,7 +63,8 @@ cat > "$DEB/usr/share/applications/channelforge-tv.desktop" <<'EOF'
 Name=ChannelForge TV
 Comment=Watch public creator channels and Rewind Cinema
 Exec=channelforge-tv
-Icon=/opt/public-channelforge/assets/channel-forge-tv.png
+Icon=/opt/public-channelforge/assets/channel-forge-tv-icon.png
+StartupWMClass=channelforge-tv
 Terminal=false
 Type=Application
 Categories=AudioVideo;Video;
@@ -114,9 +115,6 @@ depend = gst-plugins-good
 depend = gst-plugins-bad
 depend = gst-libav
 depend = mpv
-optdepend = python-vlc: optional VLC playback
-optdepend = vlc: optional native video decoder
-optdepend = tk: optional VLC playback controls
 EOF
 tar --zstd --owner=0 --group=0 --numeric-owner -C "$ARCH" -cf "$OUT/public-channelforge-${ARCH_VERSION}-1-any.pkg.tar.zst" .PKGINFO opt usr
 

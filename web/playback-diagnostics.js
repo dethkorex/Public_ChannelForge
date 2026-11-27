@@ -1,13 +1,14 @@
 // Collect a snapshot only when requested. Keep URLs, paths and credentials out of copied reports.
 (() => {
     const creator = Boolean(document.getElementById('tv-player'));
-    const container = document.querySelector(creator ? '#system .system-links' : '[data-section-block="updates"] .section-placeholder');
+    const container = document.querySelector(creator ? '#system .system-links' : '#playback-troubleshooting-controls');
     if (!container) return;
-    const trigger = document.createElement('button');
+    const existing = container.querySelector('[data-open-diagnostics]');
+    const trigger = existing || document.createElement('button');
     trigger.type = 'button';
-    trigger.textContent = 'Playback diagnostics';
+    if (!existing) trigger.textContent = 'Playback diagnostics';
     trigger.title = 'Open playback diagnostics (Ctrl+Shift+D)';
-    container.append(trigger);
+    if (!existing) container.append(trigger);
 
     const panel = document.createElement('dialog');
     panel.setAttribute('aria-label', 'Playback diagnostics');
@@ -19,8 +20,6 @@
     const [refresh, copy, close] = panel.querySelectorAll('button');
 
     function currentPlayback() {
-        const native = !creator && window.ChannelForgeNative?.diagnostics();
-        if (native) return native;
         const video = document.querySelector(creator ? '#tv-player' : '#player');
         const engine = creator ? hlsPlayer : hls;
         const level = engine?.levels?.[engine.currentLevel];
@@ -45,6 +44,7 @@
             decoded_frames: quality?.totalVideoFrames ?? null, dropped_frames: quality?.droppedVideoFrames ?? null,
             media_error_code: video.error?.code ?? null,
             ...(creator ? {} : {stream_selected: Boolean(activeStreamUrl), kind: activeMedia?.kind || null,
+                trace_id: activeMedia?.traceId || null,
                 recoveries_this_attempt: liveMode ? liveRetries : movieRetries})
         };
     }
@@ -77,7 +77,16 @@
         if (!panel.open) panel.showModal();
         return sample();
     }
+    if (!creator && document.documentElement.hasAttribute('data-tester')) {
+        window.ChannelForgeTesterSnapshot = () => ({
+            ...currentPlayback(), studios: allCreators.length, channels: liveChannels.length,
+            reconnecting: liveChannels.filter(channel => channel.state === 'reconnecting').length
+        });
+    }
     trigger.addEventListener('click', open);
+    document.querySelectorAll('[data-open-diagnostics]').forEach(button => {
+        if (button !== trigger) button.addEventListener('click', open);
+    });
     refresh.addEventListener('click', sample);
     close.addEventListener('click', () => panel.close());
     copy.addEventListener('click', async () => {

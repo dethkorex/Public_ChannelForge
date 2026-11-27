@@ -1,0 +1,21 @@
+[Unit]
+Description=ChannelForge Studio relay enrollment
+After=network.target
+
+[Service]
+User=channelforge-relay
+Group=channelforge-relay
+StateDirectory=channelforge-enrollment
+StateDirectoryMode=0700
+EnvironmentFile=/etc/channelforge-relay/enrollment.env
+ExecStart=/usr/bin/python3 /opt/channelforge-relay/enrollment.py /etc/channelforge-relay/slots.json /var/lib/channelforge-enrollment/slots.sqlite /var/lib/channelforge-enrollment/authorized_keys
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

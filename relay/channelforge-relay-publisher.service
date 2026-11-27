@@ -1,0 +1,12 @@
+[Unit]
+Description=ChannelForge Studio publisher transport
+After=network.target ssh.service
+
+[Service]
+ExecStartPre=/usr/sbin/sshd -t -f /etc/channelforge-relay/publisher-sshd.conf
+ExecStart=/usr/sbin/sshd -D -e -f /etc/channelforge-relay/publisher-sshd.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+[Unit]
+Description=ChannelForge media relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+StateDirectory=channelforge-relay
+StateDirectoryMode=0755
+ExecStartPre=/usr/bin/install -d -m 0755 /var/lib/channelforge-relay/logs
+ExecStartPre=/usr/sbin/nginx -t -p /var/lib/channelforge-relay/ -c /etc/channelforge-relay/nginx.conf
+ExecStart=/usr/sbin/nginx -p /var/lib/channelforge-relay/ -c /etc/channelforge-relay/nginx.conf -g "daemon off;"
+ExecReload=/usr/sbin/nginx -t -p /var/lib/channelforge-relay/ -c /etc/channelforge-relay/nginx.conf
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGQUIT
+KillMode=mixed
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=3
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

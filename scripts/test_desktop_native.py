@@ -1,4 +1,4 @@
-"""Exercise the desktop viewer, its VLC bridge and real HLS decoding in a native GUI."""
+"""Exercise built-in desktop HLS playback in a native GUI."""
 
 import argparse
 import json
@@ -33,7 +33,7 @@ def main():
     )
     parser.add_argument(
         "--measure",
-        choices=("web", "vlc"),
+        choices=("web",),
         help="Measure the entire desktop process tree",
     )
     args = parser.parse_args()
@@ -71,17 +71,10 @@ def main():
 
     with tempfile.TemporaryDirectory() as workspace:
         tv.GUIDE_CACHE = Path(workspace) / "guide.db"
+        tv.UPDATE_DIR = Path(workspace) / "updates"
         server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         controls = tv.DesktopControls(server.server_port)
-        controls._preference_file = Path(workspace) / "viewer-player.json"
-        assert controls.playback_settings() == {"engine": "web", "available": True}
-        for bad in (
-            "file:///etc/passwd",
-            "https://fixture.example/plugins/evil.m3u8",
-            "http://192.0.2.1/live/a.m3u8",
-        ):
-            assert not controls.start_native_playback(1, bad, "", True, 0, False, False)
         window = webview.create_window(
             "ChannelForge desktop playback QA",
             f"http://127.0.0.1:{server.server_port}/",
@@ -105,25 +98,11 @@ def main():
         def run():
             try:
                 assert window.events.loaded.wait(15)
-                wait_for(
-                    lambda: sample(
-                        "Boolean(document.querySelector('#desktop-playback-engine'))"
-                    )
-                )
+                wait_for(lambda: sample("typeof play === 'function'"))
                 if args.measure:
                     import psutil
 
                     engine = args.measure
-                    run_js(
-                        f"var pref=document.getElementById('desktop-playback-engine');pref.value='{engine}';"
-                        "pref.dispatchEvent(new Event('change'));"
-                    )
-                    wait_for(
-                        lambda: sample(
-                            "ChannelForgeNative.preferred() === "
-                            + str(engine == "vlc").lower()
-                        )
-                    )
                     proc = psutil.Process()
 
                     def resources():
@@ -144,17 +123,11 @@ def main():
                     )
                     first = None
                     while time.monotonic() - before < 30:
-                        if engine == "vlc":
-                            stats = controls._native.state(controls._native.session)
-                            pos, frames, dropped = (
-                                stats.get(k, 0) for k in ("time", "frames", "dropped")
-                            )
-                        else:
-                            pos, frames, dropped = sample(
-                                "[$('#player').currentTime,"
-                                "$('#player').getVideoPlaybackQuality().totalVideoFrames,"
-                                "$('#player').getVideoPlaybackQuality().droppedVideoFrames]"
-                            )
+                        pos, frames, dropped = sample(
+                            "[$('#player').currentTime,"
+                            "$('#player').getVideoPlaybackQuality().totalVideoFrames,"
+                            "$('#player').getVideoPlaybackQuality().droppedVideoFrames]"
+                        )
                         cpu, rss = resources()
                         peak = max(peak, rss)
                         if frames > 0 and first is None:
@@ -176,49 +149,26 @@ def main():
                                 flush=True,
                             )
                             run_js("stopPlayer()")
-                            wait_for(lambda: controls._native.process is None)
                             passed.append(True)
                             return
                         time.sleep(0.07)
                     raise AssertionError(f"{engine} did not advance")
-                run_js(
-                    "var pref=document.getElementById('desktop-playback-engine');"
-                    "pref.value='vlc';pref.dispatchEvent(new Event('change'));"
-                )
-                wait_for(lambda: controls.playback_settings()["engine"] == "vlc")
-                wait_for(lambda: sample("ChannelForgeNative.preferred()"))
                 movie = "https://fixture.example/vault/fixture.m3u8"
-                run_js(
-                    f"showScreen('cinema');playCinemaMovie({{title:'QA movie',stream_url:'{movie}'}});"
-                )
+                run_js(f"showScreen('cinema');playCinemaMovie({{title:'QA movie',stream_url:'{movie}'}});")
 
                 def frames():
-                    state = controls._native.state(controls._native.session)
-                    return (
-                        state
-                        if state.get("time", 0) > 1.3 and state.get("frames", 0) > 14
-                        else None
-                    )
+                    data = sample("({time:$('#player').currentTime,frames:$('#player').getVideoPlaybackQuality().totalVideoFrames})")
+                    return data if data["time"] > 1.3 and data["frames"] > 14 else None
 
                 movie_result = wait_for(frames)
-                wait_for(
-                    lambda: sample("!cinemaTapeStage && !activeMedia.transportPending")
-                )
-                generation = controls._native.session
-                controls.native_playback_command(generation, "pause")
-                wait_for(
-                    lambda: controls._native.state(generation).get("state") == "Paused"
-                )
-                controls.native_playback_command(generation, "resume")
-                wait_for(
-                    lambda: (
-                        controls._native.state(generation).get("time", 0)
-                        > movie_result["time"] + 0.4
-                    )
-                )
+                run_js("$('#player').pause()")
+                wait_for(lambda: sample("$('#player').paused"))
+                run_js("$('#player').play()")
+                wait_for(lambda: sample("$('#player').currentTime") > movie_result["time"] + .4)
                 run_js("closeVideoView()")
                 wait_for(lambda: sample("!activeMedia && !cinemaTapeStage"))
-                wait_for(lambda: controls._native.process is None)
+                wait_for(lambda: tv.movie_progress() and tv.movie_progress()[0]["resumeAt"] > .5)
+
                 live = "https://fixture.example/live/channel.m3u8"
                 broadcast = "https://fixture.example/broadcast/channel/master.m3u8"
                 run_js(
@@ -226,31 +176,11 @@ def main():
                     "programs:[],online:true};liveChannels=[qaChannel];tuneGuideChannel(qaChannel)"
                 )
                 live_result = wait_for(frames)
-                assert controls._native.session != generation
-                assert any(
-                    str(Path("/broadcast/channel/master.m3u8")) == p for p in requests
-                )
-                assert sample("ChannelForgeNative.diagnostics().engine") == "libVLC"
-                run_js("stopPlayer()")
-                wait_for(lambda: controls._native.process is None)
-                run_js(
-                    "play('https://fixture.example/vault/invalid.m3u8',{kind:'movie',title:'Offline'})"
-                )
-                wait_for(lambda: sample("Boolean(activeMedia?.webOnly)"), 30)
-                wait_for(lambda: controls._native.process is None)
-                print(
-                    json.dumps(
-                        {
-                            "platform": sys.platform,
-                            "movie": movie_result,
-                            "live": live_result,
-                            "pause_resume": True,
-                            "eject": True,
-                            "fallback": True,
-                        }
-                    ),
-                    flush=True,
-                )
+                assert str(Path("/broadcast/channel/master.m3u8")) in requests
+                run_js("showScreen('home')")
+                wait_for(lambda: sample("!activeMedia && $('#player').paused"))
+                print(json.dumps({"platform": sys.platform, "movie": movie_result, "live": live_result,
+                                  "pause_resume": True, "eject": True, "saved": True}), flush=True)
                 passed.append(True)
             except Exception as exc:  # noqa: BLE001 - forward GUI callback failures to the test process
                 import traceback
@@ -258,7 +188,6 @@ def main():
                 traceback.print_exc()
                 errors.append(exc)
             finally:
-                controls._native.close()
                 window.destroy()
 
         try:
