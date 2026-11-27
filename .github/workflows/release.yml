@@ -40,6 +40,13 @@ jobs:
           roku = dict(line.split("=", 1) for line in Path("tv/roku/manifest").read_text(encoding="utf-8").splitlines() if "=" in line)
           assert roku["channelforge_version"] == tag[1:], "Roku version does not match the release tag"
       - run: python -m unittest discover -s tests -v
+      - name: Test Roku discovery and playback recovery
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $result = npx --yes brs@0.45.0 --root tests/roku tv/roku/components/CatalogState.brs tv/roku/components/MovieBookmarks.brs tv/roku/components/MainScene.brs tv/roku/components/DeepLink.brs tests/roku/recovery.brs
+          $result
+          if ($LASTEXITCODE -ne 0 -or $result -cnotcontains 'PASS Roku discovery and recovery') { exit 1 }
 
   windows-installer:
     needs: test
@@ -160,11 +167,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate Roku components
         run: npx --yes brighterscript@0.70.3 --root-dir tv/roku --create-package=false --copy-to-staging=false
-      - name: Test Roku discovery and playback recovery
-        run: |
-          result=$(npx --yes brs@0.45.0 tv/roku/components/CatalogState.brs tv/roku/components/MovieBookmarks.brs tv/roku/components/MainScene.brs tv/roku/components/DeepLink.brs tests/roku/recovery.brs)
-          printf '%s\n' "$result"
-          grep -Fxq 'PASS Roku discovery and recovery' <<< "$result"
       - name: Package Roku channel
         run: |
           python3 scripts/package_roku.py tv-release/ChannelForgeTV-Roku.zip
