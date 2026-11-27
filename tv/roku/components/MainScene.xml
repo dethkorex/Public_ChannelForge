@@ -39,11 +39,15 @@
           <Rectangle id="programProgress" width="0" height="5" translation="[25,194]" color="0x31ecffff"/>
         </Group>
         <Rectangle translation="[680,354]" width="1180" height="32" color="0x192d43ff"/>
-        <Label text="Channel" translation="[694,356]" width="270" height="27" color="0xc6d6eeff"/>
-        <Label text="On Now" translation="[975,356]" width="169" height="27" color="0xc6d6eeff"/>
-        <Label text="Up Next" translation="[1151,356]" width="171" height="27" color="0xc6d6eeff"/>
-        <Label text="Later" translation="[1331,356]" width="171" height="27" color="0xc6d6eeff"/>
-        <Label text="Later 2" translation="[1511,356]" width="171" height="27" color="0xc6d6eeff"/>
+        <Label text="Channel" translation="[694,356]" width="184" height="27" color="0xc6d6eeff" font="font:SmallBoldSystemFont"/>
+        <Label text="On Now" translation="[895,356]" width="101" height="27" color="0xc6d6eeff" font="font:SmallSystemFont"/>
+        <Label text="Up Next" translation="[1000,356]" width="101" height="27" color="0xc6d6eeff" font="font:SmallSystemFont"/>
+        <Label text="Later" translation="[1105,356]" width="101" height="27" color="0xc6d6eeff" font="font:SmallSystemFont"/>
+        <Label text="Later 2" translation="[1210,356]" width="101" height="27" color="0xc6d6eeff" font="font:SmallSystemFont"/>
+        <Label text="Later 3" translation="[1315,356]" width="101" height="27" color="0xc6d6eeff" font="font:SmallSystemFont"/>
+        <Label text="Later 4" translation="[1420,356]" width="101" height="27" color="0xc6d6eeff" font="font:SmallSystemFont"/>
+        <Label text="Later 5" translation="[1525,356]" width="101" height="27" color="0xc6d6eeff" font="font:SmallSystemFont"/>
+        <Label text="Later 6" translation="[1630,356]" width="101" height="27" color="0xc6d6eeff" font="font:SmallSystemFont"/>
         <MarkupList id="channels" translation="[680,391]" width="1180" numRows="8" itemComponentName="ChannelCard" itemSize="[1180,73]" itemSpacing="[0,5]"/>
       </Group>
       <Group id="libraryPresentation" visible="false">

@@ -50,7 +50,7 @@ APP_NAME = "Public_ChannelForge"
 TESTER_CONFIG = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets/tester-config.json"
 TESTER_BUILD = TESTER_CONFIG.is_file()
 APP_TITLE = "ChannelForge Studio Tester" if TESTER_BUILD else "ChannelForge Studio"
-VERSION = "4.5.0"
+VERSION = "4.5.1"
 if TESTER_BUILD:
     VERSION = json.loads(TESTER_CONFIG.read_text(encoding="utf-8")).get("version", VERSION)
 DISCOVERY_VERSION = VERSION.partition("-")[0]
@@ -3221,7 +3221,21 @@ def limit_hls_master(manifest: bytes, max_bandwidth: int) -> bytes:
     choices = list(re.finditer(pattern, manifest))
     if not choices:
         return manifest
-    eligible = [choice for choice in choices if int(choice[1]) <= max_bandwidth]
+    max_size = {400_000: (480, 270), 1_000_000: (854, 480)}.get(max_bandwidth)
+    rendition_sizes = {b"economy": (480, 270), b"balanced": (854, 480), b"hd": (1280, 720)}
+    eligible = []
+    for choice in choices:
+        if int(choice[1]) > max_bandwidth:
+            continue
+        attributes, uri = choice[0].splitlines()
+        resolution = re.search(rb"\bRESOLUTION=(\d+)x(\d+)", attributes)
+        if resolution:
+            size = int(resolution[1]), int(resolution[2])
+        else:
+            name = re.search(rb"(?:^|[/_])(economy|balanced|hd)\.m3u8(?:\?|$)", uri)
+            size = rendition_sizes.get(name[1]) if name else None
+        if not max_size or not size or size[0] <= max_size[0] and size[1] <= max_size[1]:
+            eligible.append(choice)
     keep = {choice.start() for choice in (eligible or [min(choices, key=lambda choice: int(choice[1]))])}
     return re.sub(pattern, lambda choice: choice[0] if choice.start() in keep else b"", manifest)
 

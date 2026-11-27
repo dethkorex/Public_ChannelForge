@@ -89,6 +89,12 @@ class BroadcastTests(unittest.TestCase):
         master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=270000\neconomy.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2500000\nhd.m3u8\n"
         self.assertEqual(app.limit_hls_master(master, 400000), master.split(b"#EXT-X-STREAM-INF:BANDWIDTH=2500000")[0])
         self.assertEqual(app.limit_hls_master(master, 0), master)
+        economy = b"#EXT-X-STREAM-INF:BANDWIDTH=270000\n/broadcast/test/feed/economy.m3u8?viewer=example\n"
+        balanced = b"#EXT-X-STREAM-INF:BANDWIDTH=370000,RESOLUTION=854x356\nindex_balanced.m3u8\n"
+        widescreen_hd = b"#EXT-X-STREAM-INF:BANDWIDTH=950000,RESOLUTION=1280x532\nindex_hd.m3u8\n"
+        master = b"#EXTM3U\n" + economy + balanced + widescreen_hd
+        self.assertEqual(app.limit_hls_master(master, 400000), b"#EXTM3U\n" + economy)
+        self.assertEqual(app.limit_hls_master(master, 1000000), b"#EXTM3U\n" + economy + balanced)
 
     def test_active_playlist_leases_segments_until_last_viewer_leaves(self):
         feed = app.LivePlayout(lambda _: None)

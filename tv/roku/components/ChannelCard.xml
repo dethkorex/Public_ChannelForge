@@ -4,19 +4,28 @@
   <script type="text/brightscript" uri="ChannelCard.brs" />
   <children>
     <Rectangle id="background" width="1180" height="73" color="0x0d1724ff"/>
-    <Poster id="logo" translation="[8,7]" width="116" height="59" loadDisplayMode="scaleToZoom"/>
-    <Rectangle translation="[132,11]" width="4" height="51" color="0xeb59e5ff"/>
-    <Label id="number" translation="[145,8]" width="142" height="26" color="0x67e7faff" font="font:SmallBoldSystemFont"/>
-    <Label id="title" translation="[145,36]" width="142" height="25" color="0xf3fbffff" font="font:SmallSystemFont"/>
-    <Label id="now" translation="[295,11]" width="166" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
-    <Rectangle translation="[295,51]" width="153" height="5" color="0x385475ff"/>
-    <Rectangle id="progress" translation="[295,51]" width="0" height="5" color="0x2af1ffff"/>
-    <Label id="next" translation="[471,11]" width="171" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
-    <Label id="nextTime" translation="[471,42]" width="171" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
-    <Label id="later" translation="[651,11]" width="171" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
-    <Label id="laterTime" translation="[651,42]" width="171" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
-    <Label id="laterTwo" translation="[831,11]" width="171" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
-    <Label id="laterTwoTime" translation="[831,42]" width="171" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
-    <Label text="▶ WATCH LIVE" translation="[1010,12]" width="166" height="49" horizAlign="center" color="0x72efffff" font="font:SmallBoldSystemFont"/>
+    <Poster id="logo" translation="[8,7]" width="70" height="59" loadDisplayMode="scaleToZoom"/>
+    <Rectangle translation="[85,11]" width="3" height="51" color="0xeb59e5ff"/>
+    <Label id="number" translation="[94,8]" width="116" height="26" color="0x67e7faff" font="font:SmallBoldSystemFont"/>
+    <Label id="title" translation="[94,36]" width="116" height="25" color="0xf3fbffff" font="font:SmallSystemFont"/>
+    <Label id="now" translation="[215,11]" width="101" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
+    <Label id="nowTime" translation="[215,42]" width="57" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
+    <Label id="next" translation="[320,11]" width="101" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
+    <Label id="nextTime" translation="[320,42]" width="101" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
+    <Label id="later" translation="[425,11]" width="101" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
+    <Label id="laterTime" translation="[425,42]" width="101" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
+    <Label id="laterTwo" translation="[530,11]" width="101" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
+    <Label id="laterTwoTime" translation="[530,42]" width="101" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
+    <Label id="laterThree" translation="[635,11]" width="101" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
+    <Label id="laterThreeTime" translation="[635,42]" width="101" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
+    <Label id="laterFour" translation="[740,11]" width="101" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
+    <Label id="laterFourTime" translation="[740,42]" width="101" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
+    <Label id="laterFive" translation="[845,11]" width="101" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
+    <Label id="laterFiveTime" translation="[845,42]" width="101" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
+    <Label id="laterSix" translation="[950,11]" width="101" height="29" color="0xf3fbffff" font="font:SmallBoldSystemFont"/>
+    <Label id="laterSixTime" translation="[950,42]" width="101" height="23" color="0xa5c3ddff" font="font:SmallSystemFont"/>
+    <Rectangle translation="[274,53]" width="39" height="5" color="0x385475ff"/>
+    <Rectangle id="progress" translation="[274,53]" width="0" height="5" color="0x2af1ffff"/>
+    <Label text="▶ WATCH" translation="[1055,12]" width="115" height="49" horizAlign="center" color="0x72efffff" font="font:SmallBoldSystemFont"/>
   </children>
 </component>

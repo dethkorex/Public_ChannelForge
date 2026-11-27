@@ -64,8 +64,11 @@ import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
 
 @UnstableApi
 public class MainActivity extends Activity {
@@ -102,6 +105,16 @@ public class MainActivity extends Activity {
 
     private TextView status, banner, updateButton;
     private LinearLayout bufferPanel, bannerPanel;
+    private LinearLayout liveControls;
+    private TextView liveControlChannel, liveControlProgram, liveControlNext, liveControlQuality;
+    private ProgressBar liveControlProgress;
+    private final Runnable liveControlClock = new Runnable() {
+        @Override public void run() {
+            if (!liveControlsVisible() || tunedChannel == null) return;
+            refreshLiveControls();
+            liveControls.postDelayed(this, 2000);
+        }
+    };
     private ProgressBar bufferSpinner;
     private TextView bufferLabel;
     private TextView touchRetry, touchDebugger;
@@ -128,7 +141,29 @@ public class MainActivity extends Activity {
     };
     private boolean playbackWaiting, playbackFailed, consumingRetryKey;
     private int temporaryBitrateCap = Integer.MAX_VALUE, rebufferCount;
-    private int viewerBitrateCap = Integer.MAX_VALUE;
+    private enum PlaybackQuality {
+        // Older Studios advertise their 720p track at 4 Mbps. Studio caps its own output.
+        HQ("HQ", "up to 720p", 1280, 720, 4_000_000),
+        BALANCED("Balanced", "up to 480p / 1 Mbps", 854, 480, 1_000_000),
+        DATA_SAVER("Data Saver", "up to 270p / 0.4 Mbps", 480, 270, 400_000);
+
+        final String label, description;
+        final int width, height, bitrate;
+
+        PlaybackQuality(String label, String description, int width, int height, int bitrate) {
+            this.label = label;
+            this.description = description;
+            this.width = width;
+            this.height = height;
+            this.bitrate = bitrate;
+        }
+
+        static PlaybackQuality fromSavedBitrate(int bitrate) {
+            for (PlaybackQuality quality : values()) if (quality.bitrate == bitrate) return quality;
+            return HQ;
+        }
+    }
+    private PlaybackQuality viewerQuality = PlaybackQuality.HQ;
     private long rebufferStarted, totalRebufferMs;
     private final ArrayDeque<Long> recentLiveStalls = new ArrayDeque<>();
     private boolean recovering;
@@ -208,6 +243,7 @@ public class MainActivity extends Activity {
     private final Set<String> unreachableStudios = new HashSet<>();
     private GuideCache guideCache;
     private final ExecutorService posterLoader = Executors.newFixedThreadPool(3);
+    private final ConcurrentHashMap<String, FutureTask<Bitmap>> artworkPending = new ConcurrentHashMap<>();
     private final ExecutorService movieCatalogLoader = Executors.newSingleThreadExecutor();
     private final ExecutorService movieCoverLoader = Executors.newFixedThreadPool(2);
     private final ExecutorService studioLoader = Executors.newFixedThreadPool(4);
@@ -373,9 +409,11 @@ public class MainActivity extends Activity {
                 .setBandwidthMeter(bandwidth)
                 .setAudioAttributes(AudioAttributes.DEFAULT, true)
                 .build();
-        viewerBitrateCap = getSharedPreferences(PREFS, MODE_PRIVATE).getInt("playback_quality_cap", Integer.MAX_VALUE);
+        viewerQuality = PlaybackQuality.fromSavedBitrate(
+                getSharedPreferences(PREFS, MODE_PRIVATE).getInt("playback_quality_cap", Integer.MAX_VALUE));
         player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
-                .setPreferredAudioLanguage("en").setMaxVideoBitrate(viewerBitrateCap).build());
+                .setPreferredAudioLanguage("en").build());
+        refreshVideoQuality();
         player.addAnalyticsListener(new androidx.media3.exoplayer.analytics.AnalyticsListener() {
             private final androidx.media3.common.Timeline.Window eventWindow = new androidx.media3.common.Timeline.Window();
 
@@ -465,6 +503,7 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
         bp.setMargins(dp(35), 0, dp(35), dp(35));
         root.addView(bannerPanel, bp);
+        if (tvTheme) buildLiveControls(root);
         TextView eject = focusButton("⏏  EJECT MOVIE");
         FrameLayout.LayoutParams ejectLayout = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
         ejectLayout.setMargins(0, dp(12), dp(16), 0);
@@ -2363,7 +2402,7 @@ public class MainActivity extends Activity {
     private List<JSONObject> upcomingPrograms(Channel channel, long now) {
         List<JSONObject> next = new ArrayList<>();
         if (channel.programs == null) return next;
-        for (int i = 0; i < channel.programs.length() && next.size() < 3; i++) {
+        for (int i = 0; i < channel.programs.length() && next.size() < 7; i++) {
             JSONObject entry = channel.programs.optJSONObject(i);
             if (entry != null && guideTimeMillis(entry, "start") > now) next.add(entry);
         }
@@ -2377,9 +2416,15 @@ public class MainActivity extends Activity {
             liveRail.addView(text("No channels match this search.", 13, false));
             return;
         }
-        int width = getResources().getConfiguration().screenWidthDp;
-        int upcomingSlots = width >= 910 ? 3 : width >= 730 ? 2 : 1;
-        if (tvTheme) addTvGuideHeadings(upcomingSlots);
+        final int upcomingSlots = 7;
+        LinearLayout schedule = new LinearLayout(this);
+        schedule.setOrientation(LinearLayout.VERTICAL);
+        schedule.setMinimumWidth(dp(1120));
+        HorizontalScrollView viewport = new HorizontalScrollView(this);
+        viewport.setFillViewport(true);
+        viewport.addView(schedule, new FrameLayout.LayoutParams(-2, -2));
+        liveRail.addView(viewport);
+        if (tvTheme) addTvGuideHeadings(schedule);
         showProgram(channels.get(displayed.get(0)));
         for (int index : displayed) {
             Channel channel = channels.get(index);
@@ -2400,10 +2445,6 @@ public class MainActivity extends Activity {
                 if (!art.isEmpty()) posterLoader.execute(() -> loadPoster(art, artwork));
             }
             addCompactCell(row, "CH " + displayNumber(channel, index) + guideRatingLabel(channel), channel.name, 1.2f);
-            addGuideProgram(row, channel, current, guideOffset == 0, moment);
-            for (int slot = 0; slot < upcomingSlots; slot++) {
-                addGuideProgram(row, channel, slot < next.size() ? next.get(slot) : null, false, moment);
-            }
             boolean saved = isFavorite(channel);
             TextView star = navigationButton(saved ? "★" : "☆");
             star.setContentDescription("Favorite " + channel.name);
@@ -2425,28 +2466,32 @@ public class MainActivity extends Activity {
                 }
                 if (focused) { playMenuSound(); showProgram(channel); }
             });
-            liveRail.addView(row);
-            addGap(liveRail, tvTheme ? 2 : 3);
+            addGuideProgram(row, channel, current, guideOffset == 0, moment);
+            for (int slot = 0; slot < upcomingSlots; slot++) {
+                addGuideProgram(row, channel, slot < next.size() ? next.get(slot) : null, false, moment);
+            }
+            schedule.addView(row);
+            addGap(schedule, tvTheme ? 2 : 3);
         }
     }
 
-    private void addTvGuideHeadings(int upcomingSlots) {
+    private void addTvGuideHeadings(LinearLayout schedule) {
         LinearLayout labels = new LinearLayout(this);
         labels.setGravity(Gravity.CENTER_VERTICAL);
         labels.setPadding(dp(5), 0, dp(5), 0);
         labels.setBackground(surface(new int[]{color("#1B3046"), color("#132439")}, 0, 0, 6));
-        String[] titles = {"Channel", "On Now", "Up Next", "Later", "Later 2"};
+        String[] titles = {"Channel", "On Now", "Up Next", "Later", "Later 2", "Later 3", "Later 4", "Later 5", "Later 6"};
         labels.addView(new Space(this), new LinearLayout.LayoutParams(dp(76), 1));
-        for (int i = 0; i < upcomingSlots + 2; i++) {
+        for (int i = 0; i < titles.length; i++) {
             TextView title = text(i == 1 && guideOffset != 0 ? guideTime(phoneGuideTime()) : titles[i], 13, true);
             title.setTextColor(color("#C3DBF1"));
             title.setPadding(dp(5), 0, 0, 0);
             title.setSingleLine(true);
             labels.addView(title, new LinearLayout.LayoutParams(0, -2, i == 0 ? 1.2f : 1f));
+            if (i == 0) labels.addView(new Space(this), new LinearLayout.LayoutParams(dp(125), 1));
         }
-        labels.addView(new Space(this), new LinearLayout.LayoutParams(dp(125), 1));
-        liveRail.addView(labels, new LinearLayout.LayoutParams(-1, dp(25)));
-        addGap(liveRail, 4);
+        schedule.addView(labels, new LinearLayout.LayoutParams(-1, dp(25)));
+        addGap(schedule, 4);
     }
 
     private void addCompactCell(LinearLayout row, String label, String value, float weight) {
@@ -2479,19 +2524,26 @@ public class MainActivity extends Activity {
         label.setEllipsize(TextUtils.TruncateAt.END);
         cell.addView(label);
         if (program != null) {
-            if (airing) addHomeProgress(cell, program, moment);
-            else {
-                String detail = title.substring(displayTitle.length()).replaceFirst("^ · ", "");
-                if (detail.isEmpty()) detail = guideTime(guideTimeMillis(program, "start"));
-                TextView info = text(detail, 11, false);
-                info.setTextColor(color("#B3C9DE"));
-                info.setPadding(0, 0, 0, 0);
-                info.setSingleLine(true);
-                info.setEllipsize(TextUtils.TruncateAt.END);
-                cell.addView(info);
+            long start = guideTimeMillis(program, "start");
+            String time = start > 0 ? guideTime(start) : "";
+            String detail = airing ? "" : title.substring(displayTitle.length()).replaceFirst("^ · ", "");
+            LinearLayout timing = new LinearLayout(this);
+            timing.setGravity(Gravity.CENTER_VERTICAL);
+            TextView info = text(time.isEmpty() ? detail : detail.isEmpty() ? time : time + " · " + detail, 11, false);
+            info.setTextColor(color("#B3C9DE"));
+            info.setPadding(0, 0, 0, 0);
+            info.setSingleLine(true);
+            info.setEllipsize(TextUtils.TruncateAt.END);
+            timing.addView(info, new LinearLayout.LayoutParams(airing ? -2 : 0, -2, airing ? 0 : 1));
+            if (airing) {
+                LinearLayout meter = new LinearLayout(this);
+                meter.setOrientation(LinearLayout.VERTICAL);
+                addHomeProgress(meter, program, moment);
+                timing.addView(meter, new LinearLayout.LayoutParams(0, -2, 1));
             }
+            cell.addView(timing);
             cell.setFocusable(true);
-            cell.setContentDescription(title);
+            cell.setContentDescription(time.isEmpty() ? title : time + " · " + title);
             cell.setOnFocusChangeListener((view, focused) -> cell.setBackground(focused
                     ? tvTheme ? tvSurface(true) : phonePanel(false, 5) : null));
             cell.setOnClickListener(view -> new AlertDialog.Builder(this).setTitle(title)
@@ -2607,7 +2659,8 @@ public class MainActivity extends Activity {
             name.setEllipsize(TextUtils.TruncateAt.END);
             identity.addView(name);
             String program = scheduled == null ? "No program listed" : scheduled.optString("title", "No program listed");
-            TextView summary = text(shortProgramTitle(program), 12, false);
+            long start = scheduled == null ? 0 : guideTimeMillis(scheduled, "start");
+            TextView summary = text(start > 0 ? guideTime(start) + " · " + shortProgramTitle(program) : shortProgramTitle(program), 12, false);
             summary.setTextColor(color("#BED3E8"));
             summary.setPadding(0, dp(2), 0, dp(2));
             summary.setMaxLines(1);
@@ -2615,11 +2668,15 @@ public class MainActivity extends Activity {
             identity.addView(summary);
             List<JSONObject> upcoming = upcomingPrograms(channel, guideTime);
             if (!upcoming.isEmpty()) {
-                TextView next = text("Next: " + shortProgramTitle(upcoming.get(0).optString("title")), 11, false);
-                next.setMaxLines(1);
-                next.setEllipsize(TextUtils.TruncateAt.END);
-                next.setPadding(0, dp(2), 0, 0);
-                identity.addView(next);
+                LinearLayout upcomingRow = new LinearLayout(this);
+                for (JSONObject entry : upcoming) {
+                    TextView next = text(guideTime(guideTimeMillis(entry, "start")) + " · "
+                            + shortProgramTitle(entry.optString("title")), 11, false);
+                    next.setSingleLine(true);
+                    next.setPadding(0, dp(2), dp(14), 0);
+                    upcomingRow.addView(next);
+                }
+                addHorizontalStrip(identity, upcomingRow);
             }
             if (guideOffset == 0 && scheduled != null) {
                 long scheduledStart = guideTimeMillis(scheduled, "start");
@@ -3349,6 +3406,25 @@ public class MainActivity extends Activity {
         String cacheKey = fullArtwork ? "full\n" + address : address;
         Bitmap cached = posters.get(cacheKey);
         if (cached != null) return cached;
+        FutureTask<Bitmap> download = new FutureTask<>(() -> downloadArtwork(address, cacheKey, fullArtwork));
+        FutureTask<Bitmap> existing = artworkPending.putIfAbsent(cacheKey, download);
+        try {
+            if (existing != null) return existing.get();
+            download.run();
+            return download.get();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (ExecutionException failed) {
+            return null;
+        } finally {
+            if (existing == null) artworkPending.remove(cacheKey, download);
+        }
+    }
+
+    private Bitmap downloadArtwork(String address, String cacheKey, boolean fullArtwork) {
+        Bitmap cached = posters.get(cacheKey);
+        if (cached != null) return cached;
         HttpURLConnection connection = null;
         try {
             URL url = new URL(address);
@@ -3697,26 +3773,139 @@ public class MainActivity extends Activity {
 
     private void refreshVideoQuality() {
         player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
-                .setMaxVideoBitrate(Math.min(viewerBitrateCap, temporaryBitrateCap)).build());
+                .setMaxVideoSize(viewerQuality.width, viewerQuality.height)
+                .setMaxVideoBitrate(Math.min(viewerQuality.bitrate, temporaryBitrateCap)).build());
+    }
+
+    private void buildLiveControls(FrameLayout root) {
+        liveControls = new LinearLayout(this);
+        liveControls.setGravity(Gravity.CENTER_VERTICAL);
+        liveControls.setPadding(dp(14), dp(9), dp(12), dp(9));
+        liveControls.setBackground(surface(new int[]{color("#F2111B30"), color("#F223183D")}, color("#27DFF5"), 1, 12));
+
+        LinearLayout info = new LinearLayout(this);
+        info.setOrientation(LinearLayout.VERTICAL);
+        info.setPadding(0, 0, dp(14), 0);
+        liveControlChannel = text("", 12, true);
+        liveControlChannel.setTextColor(color("#59F3FF"));
+        liveControlProgram = text("", 19, true);
+        liveControlProgram.setTextColor(color("#FFF25D"));
+        liveControlNext = text("", 11, false);
+        for (TextView label : new TextView[]{liveControlChannel, liveControlProgram, liveControlNext}) {
+            label.setSingleLine(true);
+            label.setEllipsize(TextUtils.TruncateAt.END);
+            label.setPadding(0, dp(2), 0, dp(2));
+        }
+        info.addView(liveControlChannel);
+        info.addView(liveControlProgram);
+        liveControlProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        liveControlProgress.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        liveControlProgress.setMax(1000);
+        liveControlProgress.setProgressTintList(android.content.res.ColorStateList.valueOf(color("#30E9EF")));
+        info.addView(liveControlProgress, new LinearLayout.LayoutParams(-1, dp(5)));
+        info.addView(liveControlNext);
+        liveControls.addView(info, new LinearLayout.LayoutParams(0, -2, 1));
+
+        liveControlQuality = liveControl("Quality", this::choosePlaybackQuality);
+        TextView up = liveControl("▲  CH", () -> play(channelIndex + 1));
+        up.setContentDescription("Channel up");
+        TextView down = liveControl("▼  CH", () -> play(channelIndex - 1));
+        down.setContentDescription("Channel down");
+        TextView guideButton = liveControl("☰  Guide", this::openGuideFromLive);
+        guideButton.setContentDescription("Open Live TV Guide");
+        TextView[] buttons = {liveControlQuality, up, down, guideButton};
+        for (int index = 0; index < buttons.length; index++) {
+            buttons[index].setNextFocusLeftId(buttons[Math.max(0, index - 1)].getId());
+            buttons[index].setNextFocusRightId(buttons[Math.min(buttons.length - 1, index + 1)].getId());
+        }
+        liveControls.setVisibility(View.GONE);
+        FrameLayout.LayoutParams placement = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        placement.setMargins(dp(32), 0, dp(32), dp(28));
+        root.addView(liveControls, placement);
+    }
+
+    private TextView liveControl(String label, Runnable action) {
+        TextView button = focusButton(label);
+        button.setId(View.generateViewId());
+        button.setFocusableInTouchMode(true);
+        button.setGravity(Gravity.CENTER);
+        button.setSingleLine(true);
+        button.setMinHeight(dp(42));
+        button.setOnClickListener(view -> action.run());
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-2, -2);
+        size.setMarginStart(dp(6));
+        liveControls.addView(button, size);
+        return button;
+    }
+
+    private boolean liveControlsVisible() {
+        return liveControls != null && liveControls.getVisibility() == View.VISIBLE;
+    }
+
+    private void refreshLiveControls() {
+        Channel channel = tunedChannel;
+        long now = System.currentTimeMillis();
+        JSONObject program = programAt(channel, now);
+        List<JSONObject> next = upcomingPrograms(channel, now);
+        liveControlChannel.setText("LIVE NOW  ·  CH " + displayNumber(channel, channelIndex) + "  ·  " + channel.name);
+        liveControlProgram.setText(program == null ? channel.name : program.optString("title", channel.name));
+        liveControlNext.setText(next.isEmpty() ? "Back closes controls" : "UP NEXT  ·  " + next.get(0).optString("title"));
+        liveControlProgress.setVisibility(program == null ? View.GONE : View.VISIBLE);
+        if (program != null) {
+            long start = guideTimeMillis(program, "start"), end = guideTimeMillis(program, "stop");
+            liveControlProgress.setProgress((int) (1000 * (now - start) / Math.max(1, end - start)));
+        }
+        liveControlQuality.setText("Quality  ·  " + viewerQuality.label);
+    }
+
+    private void showLiveControls() {
+        bannerPanel.removeCallbacks(hideBanner);
+        bannerPanel.setVisibility(View.GONE);
+        liveControls.setVisibility(View.VISIBLE);
+        liveControlQuality.requestFocus();
+        liveControlClock.run();
+    }
+
+    private void hideLiveControls() {
+        if (!liveControlsVisible()) return;
+        liveControls.removeCallbacks(liveControlClock);
+        liveControls.setVisibility(View.GONE);
+        if (!guideVisible) video.requestFocus();
+    }
+
+    private void openGuideFromLive() {
+        Channel previous = tunedChannel;
+        returnToGuide();
+        if (activePage != Page.LIVE) openPage(Page.LIVE);
+        View watch = previous == null || liveRail == null ? null : liveRail.findViewWithTag("compact-watch:" + previous.url);
+        if (watch != null) watch.requestFocus();
+        else navButtons.get(Page.LIVE).requestFocus();
     }
 
     private void choosePlaybackQuality() {
-        int[] caps = {Integer.MAX_VALUE, 1_000_000, 400_000};
-        int selected = viewerBitrateCap == caps[2] ? 2 : viewerBitrateCap == caps[1] ? 1 : 0;
-        new AlertDialog.Builder(this).setTitle("Playback quality")
-                .setSingleChoiceItems(new String[]{"Auto", "Balanced · up to 1 Mbps", "Data saver · up to 0.4 Mbps"},
-                        selected, (dialog, which) -> {
-                            viewerBitrateCap = caps[which];
-                            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("playback_quality_cap", viewerBitrateCap).apply();
+        PlaybackQuality[] qualities = PlaybackQuality.values();
+        String[] labels = new String[qualities.length];
+        for (int i = 0; i < qualities.length; i++) labels[i] = qualities[i].label + " · " + qualities[i].description;
+        AlertDialog qualityDialog = new AlertDialog.Builder(this).setTitle("Playback quality")
+                .setSingleChoiceItems(labels, viewerQuality.ordinal(), (dialog, which) -> {
+                            viewerQuality = qualities[which];
+                            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("playback_quality_cap", viewerQuality.bitrate).apply();
                             refreshVideoQuality();
+                            if (liveControlsVisible() && tunedChannel != null) refreshLiveControls();
                             dialog.dismiss();
-                        }).setNegativeButton("Cancel", null).show();
+                        }).setNegativeButton("Cancel", null).create();
+        qualityDialog.setOnDismissListener(dialog -> {
+            if (liveControlsVisible()) liveControlQuality.post(() -> {
+                if (liveControlsVisible()) liveControlQuality.requestFocus();
+            });
+        });
+        qualityDialog.show();
     }
 
     private void lowerQualityDuringStall() {
         Format playing = player.getVideoFormat();
         if (playing == null || rebufferStarted == 0 || guideVisible || recovering || !player.getPlayWhenReady()) return;
-        int limit = Math.min(playing.bitrate, Math.min(viewerBitrateCap, temporaryBitrateCap));
+        int limit = Math.min(playing.bitrate, Math.min(viewerQuality.bitrate, temporaryBitrateCap));
         int lower = 0;
         for (Tracks.Group group : player.getCurrentTracks().getGroups()) {
             if (group.getType() != C.TRACK_TYPE_VIDEO) continue;
@@ -4035,7 +4224,8 @@ public class MainActivity extends Activity {
         video.hideController();
         video.setUseController(false);
         video.setFocusable(true);
-        video.requestFocus();
+        if (liveControlsVisible()) refreshLiveControls();
+        else video.requestFocus();
         video.removeCallbacks(continueLive);
         continueLive.run();
         showChannelBanner(tunedChannel);
@@ -4046,6 +4236,7 @@ public class MainActivity extends Activity {
     }
 
     private void playMovie(VaultItem movie, long position) {
+        hideLiveControls();
         beginTune();
         tunedChannel = null;
         video.removeCallbacks(upcomingProgram);
@@ -4088,6 +4279,7 @@ public class MainActivity extends Activity {
         String[] titles = currentAndNext(channel);
         if (!titles[0].isEmpty()) message += "\nNOW  " + titles[0];
         if (!titles[1].isEmpty()) message += "\nCOMING UP NEXT  " + titles[1];
+        if (tvTheme) message += "\nOK  Live controls  ·  Back  Guide";
         showBanner(message, channel.logo);
     }
 
@@ -4119,6 +4311,7 @@ public class MainActivity extends Activity {
     private void showBanner(String message) { showBanner(message, ""); }
 
     private void showBanner(String message, String logo) {
+        if (liveControlsVisible()) return;
         bannerPanel.removeAllViews();
         if (!logo.isEmpty()) {
             ImageView mark = new ImageView(this);
@@ -4355,8 +4548,14 @@ public class MainActivity extends Activity {
         }
         if (!guideVisible) {
             boolean select = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER;
+            if (tvTheme && tunedChannel != null && !playbackFailed) {
+                if (select) return !liveControlsVisible() || super.onKeyDown(key, event);
+                if (liveControlsVisible() && (key == KeyEvent.KEYCODE_BACK || key == KeyEvent.KEYCODE_BUTTON_B
+                        || key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN)) return true;
+            }
             if (key == KeyEvent.KEYCODE_BACK || key == KeyEvent.KEYCODE_BUTTON_B || (select && tunedChannel != null)) {
                 if (activeMovie != null) ejectMovie();
+                else if (tvTheme && tunedChannel != null) openGuideFromLive();
                 else {
                     returnToGuide();
                     channelRail.requestFocus();
@@ -4377,6 +4576,21 @@ public class MainActivity extends Activity {
             }
         }
         return super.onKeyDown(key, event);
+    }
+
+    @Override public boolean onKeyUp(int key, KeyEvent event) {
+        if (tvTheme && !guideVisible && tunedChannel != null && !event.isCanceled()) {
+            if (liveControlsVisible() && (key == KeyEvent.KEYCODE_BACK || key == KeyEvent.KEYCODE_BUTTON_B)) {
+                hideLiveControls();
+                return true;
+            }
+            if (!liveControlsVisible() && !playbackFailed
+                    && (key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER)) {
+                showLiveControls();
+                return true;
+            }
+        }
+        return super.onKeyUp(key, event);
     }
 
     private void updatePlaybackScreenAwake() {
@@ -4416,6 +4630,8 @@ public class MainActivity extends Activity {
 
     @Override public void onBackPressed() {
         if (!guideVisible && activeMovie != null) ejectMovie();
+        else if (liveControlsVisible()) hideLiveControls();
+        else if (!guideVisible && tvTheme && tunedChannel != null) openGuideFromLive();
         else if (!guideVisible) returnToGuide();
         else if (phonePortrait && !menuCollapsed) setMenuCollapsed(true);
         else if (activePage != Page.HOME) {
@@ -4543,6 +4759,7 @@ public class MainActivity extends Activity {
         video.setFocusable(false);
         video.setVisibility(View.GONE);
         guideVisible = true;
+        hideLiveControls();
         guide.setVisibility(View.VISIBLE);
         if (touchGuideButton != null) touchGuideButton.setVisibility(View.GONE);
         bannerPanel.setVisibility(View.GONE);

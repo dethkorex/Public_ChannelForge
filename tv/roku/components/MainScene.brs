@@ -242,9 +242,45 @@ sub showPlaybackQuality()
   panel = CreateObject("roSGNode", "Dialog")
   panel.title = "Playback quality"
   panel.message = "Lower the quality when a channel or movie buffers."
-  panel.buttons = ["Auto", "Balanced · 1 Mbps", "Data saver · 0.4 Mbps", "Close"]
+  panel.buttons = ["HQ · up to 720p", "Balanced · 480p / 1 Mbps", "Data Saver · 270p / 0.4 Mbps", "Close"]
   panel.observeField("buttonSelected", "playbackQualitySelected")
   m.top.dialog = panel
+end sub
+sub showLivePlaybackControls()
+  panel = CreateObject("roSGNode", "Dialog")
+  panel.title = m.liveItem.title
+  panel.message = "Live TV controls"
+  panel.buttons = ["Quality", "Channel up", "Channel down", "Live TV Guide"]
+  panel.observeField("buttonSelected", "livePlaybackControlSelected")
+  m.top.dialog = panel
+end sub
+sub livePlaybackControlSelected()
+  if m.top.dialog = invalid then return
+  choice = m.top.dialog.buttonSelected
+  m.top.dialog = invalid
+  if m.liveItem = invalid then return
+  if choice = 0 then showPlaybackQuality()
+  if choice = 1 then playChannel(m.channels.itemFocused + 1)
+  if choice = 2 then playChannel(m.channels.itemFocused - 1)
+  if choice = 3 then returnFromLivePlayback()
+end sub
+sub returnFromLivePlayback()
+  finishDiagnosticStall()
+  m.liveItem = invalid
+  m.retryPending = false
+  m.resolvingLive = false
+  cancelContentTask(m.onAirGuideTask)
+  m.onAirGuideTask = invalid
+  clearPlaybackDeadline()
+  m.liveRetryTimer.control = "stop"
+  m.upcomingTimer.control = "stop"
+  m.programBoundaryTimer.control = "stop"
+  m.video.control = "stop"
+  m.video.visible = false
+  m.guide.visible = true
+  m.bufferPanel.visible = false
+  hideChannelBanner()
+  m.channels.SetFocus(true)
 end sub
 sub playbackQualitySelected()
   if m.top.dialog = invalid then return
@@ -1506,27 +1542,17 @@ function onKeyEvent(key as string, press as boolean) as boolean
       resumePlayback()
       return true
     end if
-    if key = "back" or (key = "OK" and m.liveItem <> invalid)
-      finishDiagnosticStall()
+    if key = "OK" and m.liveItem <> invalid
+      showLivePlaybackControls()
+      return true
+    end if
+    if key = "back"
       if m.activeMovie <> invalid
+        finishDiagnosticStall()
         if not m.ejectingMovie then animateTape(false)
         return true
       end if
-      m.liveItem = invalid
-      m.retryPending = false
-      m.resolvingLive = false
-      cancelContentTask(m.onAirGuideTask)
-      m.onAirGuideTask = invalid
-      clearPlaybackDeadline()
-      m.liveRetryTimer.control = "stop"
-      m.upcomingTimer.control = "stop"
-      m.programBoundaryTimer.control = "stop"
-      m.video.control = "stop"
-      m.video.visible = false
-      m.guide.visible = true
-      m.bufferPanel.visible = false
-      hideChannelBanner()
-      m.channels.SetFocus(true)
+      returnFromLivePlayback()
       return true
     end if
     if m.liveItem <> invalid

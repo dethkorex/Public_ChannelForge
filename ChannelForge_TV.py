@@ -25,7 +25,7 @@ from linux_runtime import apply_linux_update, can_apply_linux_update, restart_li
 from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "4.5.0"
+VERSION = "4.5.1"
 VERSION_LABEL = f"Alpha Version {VERSION.removesuffix('.0')}"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
@@ -522,7 +522,11 @@ function programDetails(program){
     const title=String(program.title||'');
     const episode=title.match(/\bS\d+E\d+\b.*$/i)?.[0];
     if(episode)return episode;
-    return [program.year,program.content_rating].filter(Boolean).join(' · ')||guideTime.format(Date.parse(program.start));
+    return [program.year,program.content_rating].filter(Boolean).join(' · ');
+}
+function programStartTime(program){
+    const start=Date.parse(program.start);
+    return Number.isFinite(start)?guideTime.format(start):'';
 }
 function renderCompactGuide(channels,now,moment,tuned){
     const guide=$('#tv-guide');
@@ -532,8 +536,8 @@ function renderCompactGuide(channels,now,moment,tuned){
     for(const [index,channel] of channels.entries()){
         const current=programAt(channel,moment);
         const upcoming=(channel.programs||[]).filter(program=>Date.parse(program.start)>moment);
-        const programs=[current,...upcoming.slice(0,3)];
-        const columnLabels=[guideWindowOffset?'At selected time':'On Now','Up Next','Later','Later 2'];
+        const programs=[current,...upcoming.slice(0,7)];
+        const columnLabels=[guideWindowOffset?'At selected time':'On Now','Up Next','Later','Later 2','Later 3','Later 4','Later 5','Later 6'];
         const art=channelArt(channel,current), row=document.createElement('section');
         row.className='compact-guide-row'+(tuned?.stream_url===channel.stream_url?' tuned':'');
         row.dataset.channel=channel.stream_url;
@@ -541,11 +545,11 @@ function renderCompactGuide(channels,now,moment,tuned){
         row.innerHTML='<div class="compact-station"><span class="compact-channel-image">'+(art?'<img src="'+esc(art)+'" alt="" loading="lazy">':'')
             +'</span><span class="compact-station-copy"><b>CH '+esc(channel.number||'—')+'</b><small>'+esc(channel.name)+'</small></span>'
             +'<button type="button" class="compact-favorite" aria-label="Favorite '+esc(channel.name)+'" aria-pressed="'+favorite+'">'+(favorite?'★':'☆')+'</button></div>'
-            +Array.from({length:4},(_,index)=>{const program=programs[index];return program?'<button type="button" class="compact-program" data-program="'+index+'" title="'+esc(program.title)+'"><small>'
-                +columnLabels[index]+'</small><b>'+esc(programSeries(program))+'</b>'
-                +(index===0&&!guideWindowOffset?'<progress max="100" value="'+programProgress(program,now)+'" aria-label="Program progress"></progress>'
-                    :'<time>'+esc(programDetails(program))+'</time>')+'</button>':'<span class="compact-program"><small>'
-                +columnLabels[index]+'</small><time>Schedule unavailable</time></span>'}).join('')
+            +columnLabels.map((label,index)=>{const program=programs[index];return program?'<button type="button" class="compact-program" data-program="'+index+'" title="'+esc(program.title)+'"><small>'
+                +label+'</small><b>'+esc(programSeries(program))+'</b>'
+                +(index===0&&!guideWindowOffset?'<span class="compact-air-time"><time>'+esc(programStartTime(program))+'</time><progress max="100" value="'+programProgress(program,now)+'" aria-label="Program progress"></progress></span>'
+                    :'<time>'+esc([programStartTime(program),programDetails(program)].filter(Boolean).join(' · '))+'</time>')+'</button>':'<span class="compact-program"><small>'
+                +label+'</small><time>—</time></span>'}).join('')
             +'<div class="compact-actions"><button type="button" aria-label="Watch '+esc(channel.name)+'">▶ Watch Live</button></div>';
         watchArtwork(row.querySelector('img'),channel.logo_url);
         const favoriteButton=row.querySelector('.compact-favorite'),watch=row.querySelector('.compact-actions button');
@@ -1976,22 +1980,30 @@ GUIDE_LAYOUT_CSS = r'''
 '''
 PLAYER_DOCK_JS = r'''
 let playerShell=null,playerControlsTimer=0;
+const viewerQualities=[
+    {key:0,label:'HQ',width:1280,height:720,bitrate:4000000},
+    {key:1000000,label:'Balanced',width:854,height:480,bitrate:1000000},
+    {key:400000,label:'Data Saver',width:480,height:270,bitrate:400000}
+];
 let viewerQuality=0;
-try{viewerQuality=Number(localStorage.getItem('channelforge-quality-cap'))||0}catch(_error){}
+try{
+    const saved=Number(localStorage.getItem('channelforge-quality-cap'));
+    if(viewerQualities.some(quality=>quality.key===saved))viewerQuality=saved;
+}catch(_error){}
 function applyViewerQuality(player,starting=false){
     if(!player?.levels?.length)return;
-    if(!viewerQuality){player.autoLevelCapping=-1;return}
-    const eligible=player.levels.map((level,index)=>({bitrate:level.bitrate,index}))
-        .filter(level=>level.bitrate<=viewerQuality);
-    const cap=eligible.at(-1)?.index??0;
+    const quality=viewerQualities.find(option=>option.key===viewerQuality);
+    const limit=player.levels.reduce((last,level,index)=>
+        level.bitrate<=quality.bitrate&&(!level.height||level.height<=quality.height)&&(!level.width||level.width<=quality.width)?index:last,-1);
+    const cap=Math.max(0,limit);
     player.autoLevelCapping=cap;
-    if(starting)player.startLevel=player.startLevel<0?cap:Math.min(player.startLevel,cap);
+    if(starting&&player.startLevel>=0)player.startLevel=Math.min(player.startLevel,cap);
     else if(player.currentLevel>cap)player.nextAutoLevel=cap;
 }
 function qualityControl(){
     return '<label class="player-quality">Quality<select data-quality-cap aria-label="Playback quality">'
-        +[[0,'Auto'],[1000000,'Balanced'],[400000,'Data saver']].map(([cap,label])=>
-            '<option value="'+cap+'"'+(cap===viewerQuality?' selected':'')+'>'+label+'</option>').join('')
+        +viewerQualities.map(({key,label,height})=>
+            '<option value="'+key+'"'+(key===viewerQuality?' selected':'')+'>'+label+' · '+height+'p</option>').join('')
         +'</select></label>';
 }
 document.addEventListener('change',event=>{
@@ -2282,7 +2294,7 @@ HTML = HTML.replace('<div id="creators" class="creators">', '<div id="creators" 
 HTML = HTML.replace('<div class="section-heading"><h2 class="cyan">LIVE CHANNELS', '<div class="section-heading" data-section-block="live" hidden><h2 class="cyan">LIVE CHANNELS', 1)
 HTML = HTML.replace('<div id="live" class="live"></div>', '<section id="live-stage" class="live-stage" data-section-block="live" hidden><div id="mini-player-slot" class="mini-player-slot"><div id="mini-player-poster" class="mini-player-poster"><span>SELECT A CHANNEL FROM THE GUIDE</span></div></div><div id="live" class="live"></div></section><div class="guide-toolbar" data-section-block="live" hidden><button id="scan-channels">↻ SCAN CHANNELS</button><span id="scan-status">Channels scan automatically.</span><div class="guide-window-controls"><button id="guide-earlier">‹ EARLIER</button><button id="guide-now">NOW</button><button id="guide-later">LATER ›</button><b id="guide-window-label">ON NOW</b></div><label>⌕ <input id="guide-search" type="search" placeholder="Search guide"></label></div><div id="studio-filters" class="studio-filters" data-section-block="live" hidden></div><div id="guide-board" data-section-block="live" hidden><div id="tv-guide" class="tv-guide"></div></div>', 1)
 HTML = HTML.replace('placeholder="Search guide"></label></div>', 'placeholder="Search guide"></label><select id="guide-sort" aria-label="Sort live channels"><option value="channel">Channel order</option><option value="rating">Rating · lowest first</option></select></div>', 1)
-HTML = HTML.replace('<div id="tv-guide"', '<div id="compact-guide-head" class="compact-guide-head"><span>Channel</span><span>On Now</span><span>Up Next</span><span>Later</span><span>Later 2</span><span></span></div><div id="tv-guide"', 1)
+HTML = HTML.replace('<div id="tv-guide"', '<div id="compact-guide-head" class="compact-guide-head"><span>Channel</span><span>On Now</span><span>Up Next</span><span>Later</span><span>Later 2</span><span>Later 3</span><span>Later 4</span><span>Later 5</span><span>Later 6</span><span></span></div><div id="tv-guide"', 1)
 HTML = HTML.replace('</head>', '<style>#guide-sort{max-width:100%;padding:8px 10px;color:#eaf7ff;background:#0a1024;border:1px solid #22e7ff;border-radius:8px;font:inherit}.guide-toolbar{flex-wrap:wrap}</style></head>', 1)
 HTML = HTML.replace('<div class="section-heading"><h2 class="pink">REWIND CINEMA', '<div class="section-heading" data-section-block="cinema" hidden><h2 class="pink">REWIND CINEMA', 1)
 HTML = HTML.replace('<div class="section-heading" data-section-block="cinema" hidden><h2>CREATOR STUDIOS</h2><small>Choose a studio to tune its channels and movies</small></div><div id="creators" class="creators" data-section-block="cinema" hidden><span class="empty">Connecting to the public directory…</span></div>', '', 1)
@@ -2427,7 +2439,9 @@ body.viewer-shell main.wrap{margin-left:var(--viewer-sidebar);min-width:0;max-wi
 #guide-window-label{font-size:12px;color:#92d3e9;white-space:nowrap}
 .guide-mode .studio-filters{margin-bottom:5px;border-bottom:0}.guide-mode .studio-filters button{font-size:clamp(12px,1vw,16px)}
 #guide-board{border:0;background:transparent;box-shadow:none}
-.compact-guide-head,.compact-guide-row{display:grid;grid-template-columns:minmax(182px,1.65fr) repeat(4,minmax(0,1.23fr)) auto;gap:5px}
+#guide-board{overflow-x:auto;scrollbar-color:#397991 #101b2b}
+#guide-board>.compact-guide-head,#guide-board>.tv-guide{min-width:1250px}
+.compact-guide-head,.compact-guide-row{display:grid;grid-template-columns:minmax(185px,1.45fr) repeat(8,minmax(0,1fr)) auto;gap:5px}
 .compact-guide-head{align-items:center;margin:0 0 7px;padding:8px 9px;border-radius:12px;background:#1b2a40;color:#c6d6ee;font-size:clamp(13px,1.1vw,17px);font-weight:750}
 .compact-guide-head span:first-child{padding-left:22px}
 #guide-board #tv-guide{display:grid;gap:3px;border-radius:0;background:transparent;padding:2px;max-height:max(220px,calc(100dvh - var(--viewer-header) - 244px));overflow-y:auto;scroll-snap-type:none;scrollbar-width:thin;scrollbar-color:#20d7ee #0b1524}
@@ -2445,15 +2459,16 @@ body.viewer-shell main.wrap{margin-left:var(--viewer-sidebar);min-width:0;max-wi
 .compact-favorite[aria-pressed=true]{color:#ffe66d}
 .compact-program{display:grid;align-content:center;gap:3px;min-width:0;padding:3px 7px;text-align:left;border:0;border-left:1px solid #314968;background:transparent;color:#e9f2ff}
 .compact-program time{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#b7cce1;font-size:clamp(10px,.85vw,14px)}
+.compact-air-time{display:flex;align-items:center;gap:7px;min-width:0}
+.compact-air-time time{flex:none}
+.compact-air-time progress{flex:1;min-width:0}
 .compact-program small{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
 .compact-program progress{margin:3px 0;width:95%;height:clamp(4px,.5vw,7px);border:0;border-radius:8px;overflow:hidden;background:#4f6078}
 .compact-program progress::-webkit-progress-bar{background:#4f6078}.compact-program progress::-webkit-progress-value{background:#0cecf9;border-radius:8px}
 .compact-actions{justify-content:flex-end}.compact-guide-head span:last-child,.compact-actions{min-width:clamp(88px,9vw,143px)}.compact-actions button:last-child{padding:7px 9px;white-space:nowrap;border:1px solid #7ad4ee;background:#111a28;color:#f4f8ff;font-size:clamp(12px,1vw,16px)}
 .compact-actions button:is(:hover,:focus-visible){border-color:#08e9f5;background:#08e9f5;color:#061525}
 .home-shelf button:focus-visible,.home-feature button:focus-visible,.compact-guide-row button:focus-visible{outline:2px solid #66f7ff;outline-offset:1px}
-@media(max-width:1250px){.compact-guide-head,.compact-guide-row{grid-template-columns:minmax(155px,1.55fr) repeat(3,minmax(0,1fr)) auto}.compact-program:nth-child(5),.compact-guide-head span:nth-child(5){display:none}}
-@media(max-width:780px){.compact-guide-head,.compact-guide-row{grid-template-columns:minmax(140px,1.6fr) repeat(2,minmax(0,1fr)) auto}.compact-program:nth-child(4),.compact-guide-head span:nth-child(4){display:none}}
-@media(max-width:590px){.viewer-shell.guide-mode .live-stage{grid-template-columns:1fr}.compact-guide-head{display:none}.compact-guide-row{grid-template-columns:minmax(0,1fr) auto}.compact-station{grid-column:1;border:0}.compact-actions{grid-column:2;grid-row:1}.compact-program:nth-child(2),.compact-program:nth-child(3){grid-column:1/-1}.compact-program small{position:static;width:auto;height:auto;clip-path:none;color:#7eeafa}.home-feature-copy h2{font-size:26px}}
+@media(max-width:590px){.viewer-shell.guide-mode .live-stage{grid-template-columns:1fr}.home-feature-copy h2{font-size:26px}}
 @media(max-width:900px){.home-shelf-items{grid-auto-columns:calc((100% - 12px)/2)}.home-feature-copy{max-width:85%}}
 @media(max-width:520px){.home-shelf-items{grid-auto-columns:76%}.home-feature-art{width:100%;opacity:.72}.home-feature-copy{max-width:100%}.home-feature::before{background:linear-gradient(90deg,#090f1ff2,#090f1f44),linear-gradient(0deg,#090f1fdb,transparent)}}
 </style></head>''', 1)
