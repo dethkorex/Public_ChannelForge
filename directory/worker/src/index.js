@@ -359,7 +359,7 @@ function catalogEntry(row, profile, now, grace) {
   let state = "standby";
   if (heartbeat && row.reported === "offline") state = "offline";
   else if (failedAt) state = now - failedAt >= grace ? "offline" : "reconnecting";
-  else if (!reachable) state = "starting";
+  else if (!reachable) state = fresh ? "starting" : "offline";
   else if (fresh) state = row.reported;
   else if (heartbeat && now - (row.seen || 0) > grace) state = "offline";
   const online = Boolean(reachable && state !== "offline");
