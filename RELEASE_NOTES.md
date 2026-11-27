@@ -1,18 +1,11 @@
-# ChannelForge Alpha 4.1
+# ChannelForge Alpha 4.2.0
 
-Alpha 4.1 addresses a major cause of buffering on channels that used the old publishing route. Update both ChannelForge TV and ChannelForge Studio if you host channels on Windows or Linux.
+- **A new TV Home.** See what’s on now, tune in from the featured program, or pick a title from the Rewind Cinema shelf. Use the hamburger menu on the left to switch sections.
+- **Shortcuts to what you watch.** Home can show an unfinished movie and an available favorite channel when you have saved viewing activity.
+- **A compact live guide.** Browse current and upcoming programs with artwork beside each channel. Updated Studios provide up to 12 hours of upcoming listings. Windows, Linux and widescreen Android viewers can switch back to the full timeline.
+- **Cleaner phone and TV navigation.** Portrait phones use full-width cards with readable titles. Check for Update and Diagnostics are together in System on Android and Fire TV.
+- **Fewer stalled movie starts.** Studio publishes complete video segments and waits for a small startup buffer. An interrupted encoder returns a retryable error so players can reconnect without treating a partial movie as finished.
+- **A cleaner channel list.** Viewers hide channels the Studio reports as offline. Playback diagnostics record more detail about startup, transfers and relay recovery.
+- **Large Studio lineups.** Studio accepts channel saves up to 32 MiB, so a single lineup can include thousands of movies and episodes.
 
-## For viewers
-
-- **A shared relay for live TV.** Studio uploads one copy of each video segment. The VPS serves that copy to everyone watching, so extra viewers use relay bandwidth.
-- **Sort the live guide by rating.** Choose **Rating** to put lower-rated channels first. Unrated channels appear at the end.
-
-## For channel creators
-
-- **Automatic relay setup.** Use **Publish worldwide** as usual. Studio configures its VPS connection and can connect through Tailscale on IPv4-only networks. Studio checks a replacement route before updating the public guide.
-- **Set a maximum content rating.** Choose the rating before picking titles. Studio filters the library and checks the lineup again on save.
-- **Reserve a public channel number.** Studio checks for conflicts across the public guide. Deleting a channel or stopping sharing frees its number. A temporary outage keeps it reserved.
-- **An easier channel builder.** Reorder selections with drag and drop or keyboard controls, and restore the selected playback preset when you want to restart a lineup.
-- **Studio fixes.** Find resource usage under **System → Activity**. Release notes wrap to fit the window, and desktop installers use a dedicated app folder and branded taskbar icons.
-
-Available for Windows, Linux, Fire TV, Android phones, Android TV and onn. The Roku Store release is still on hold. For setup or playback help, visit the [ChannelForge Discord](https://discord.gg/Kug9rZQP2D).
+Available for Windows, Linux, Fire TV, Android phones, Android TV and onn. A Roku sideload build is included. Roku Store availability is on hold for device testing and signing.

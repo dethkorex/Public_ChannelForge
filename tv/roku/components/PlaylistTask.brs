@@ -27,40 +27,28 @@ sub load()
   if m.top.onlineCatalog
     catalog = invalid
     if payload <> "" then catalog = ParseJson(payload)
-    identity = m.top.studioId
-    if identity = "" then identity = m.top.url
-    digest = CreateObject("roEVPDigest")
-    digest.Setup("sha256")
-    bytes = CreateObject("roByteArray")
-    bytes.FromAsciiString(identity)
-    cache = "cachefs:/channelforge-guide-" + digest.Process(bytes) + ".json"
     if type(catalog) = "roAssociativeArray" and type(catalog.channels) = "roArray"
       m.top.catalogAvailable = true
-      if Len(payload) < 524288
-        WriteAsciiFile(cache, FormatJson({source: m.top.url, channels: catalog.channels}))
-      else
-        DeleteFile(cache)
-      end if
     else
       if m.top.fallbackUrl <> ""
         playlist = readPlaylist(m.top.fallbackUrl)
         if Left(playlist.Trim(), 7) = "#EXTM3U"
           appendPlaylist(root, playlist)
-          if root.GetChildCount() > 0
-            m.top.content = root
-            return
-          end if
+          m.top.catalogAvailable = true
+          m.top.content = root
+          return
         end if
       end if
-      cached = ReadAsciiFile(cache)
-      if cached <> "" then catalog = ParseJson(cached)
-      if type(catalog) <> "roAssociativeArray" or (m.top.studioId = "" and catalog.source <> m.top.url) then catalog = invalid
       m.top.stale = true
+      m.top.content = root
+      return
     end if
     if type(catalog) = "roAssociativeArray" and type(catalog.channels) = "roArray"
       seen = {}
+      clock = CreateObject("roDateTime")
+      now = clock.AsSeconds()
       for each channel in catalog.channels
-        if type(channel) = "roAssociativeArray" and channel.stream_url <> invalid and channel.stream_url <> "" and channel.state <> "offline" and (channel.online <> false or channel.state <> invalid)
+        if guideChannelAvailable(channel, now)
           identity = "url:" + channel.stream_url
           if type(channel.id) = "roString" or type(channel.id) = "String"
             if channel.id <> "" then identity = "id:" + channel.id
@@ -74,10 +62,6 @@ sub load()
             if channel.id <> invalid then node.channelId = channel.id
             if channel.state <> invalid then node.availability = channel.state
             if channel.name <> invalid then node.title = channel.name
-            if m.top.stale
-              node.title = node.title + " (reconnecting)"
-              node.availability = "reconnecting"
-            end if
             if channel.number <> invalid then node.shortDescriptionLine1 = channel.number.ToStr()
             if channel.channel_rating <> invalid then node.channelRating = channel.channel_rating
             if channel.channel_rating_rank <> invalid and channel.channel_rating_rank >= 1 and channel.channel_rating_rank <= 9 then node.ratingRank = channel.channel_rating_rank
@@ -101,6 +85,15 @@ sub load()
   if m.top.catalogAvailable then appendPlaylist(root, payload)
   m.top.content = root
 end sub
+
+function guideChannelAvailable(channel as dynamic, now as integer) as boolean
+  if type(channel) <> "roAssociativeArray" then return false
+  if channel.stream_url = invalid or channel.stream_url = "" then return false
+  if channel.online = false or channel.state = "offline" or channel.state = "reconnecting" then return false
+  ending = channel.air_until_epoch_ms
+  if ending = invalid then return true
+  return ending <= 0 or ending / 1000# > now
+end function
 sub appendPlaylist(root as object, payload as string)
   lines = payload.Tokenize(chr(10))
   pending = ""

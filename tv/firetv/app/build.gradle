@@ -51,8 +51,8 @@ android {
         ]
         minSdk 21
         targetSdk 35
-        versionCode tester ? testerRevision : 389
-        versionName '4.1.0'
+        versionCode tester ? testerRevision : 390
+        versionName '4.2.0'
         if (tester) versionName testerVersion
         buildConfigField 'String', 'GITHUB_RELEASES_API', '"https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"'
         buildConfigField 'String', 'DIRECTORY_URL', '"' + directoryUrl + '"'

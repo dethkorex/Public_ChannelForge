@@ -50,7 +50,7 @@ APP_NAME = "Public_ChannelForge"
 TESTER_CONFIG = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets/tester-config.json"
 TESTER_BUILD = TESTER_CONFIG.is_file()
 APP_TITLE = "ChannelForge Studio Tester" if TESTER_BUILD else "ChannelForge Studio"
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 if TESTER_BUILD:
     VERSION = json.loads(TESTER_CONFIG.read_text(encoding="utf-8")).get("version", VERSION)
 DISCOVERY_VERSION = VERSION.partition("-")[0]
@@ -70,6 +70,7 @@ CHANNEL_RATING_LEVELS = {
 LIVE_VIEWER_TTL = 25
 LIVE_VIEWER_GRACE = 15
 LIVE_LEGACY_IDLE = 45
+CHANNEL_SAVE_BODY_BYTES = 32 * 1024 * 1024
 STUDIO_START = time.monotonic()
 STUDIO_TRAFFIC = {}
 STUDIO_TRAFFIC_LOCK = threading.Lock()
@@ -139,6 +140,10 @@ STREAM_DIRECTORY_NAME = re.compile(r"[a-f0-9]{20}(?:-[a-f0-9]{12})?")
 
 class EncoderCapacityError(ValueError):
     """A Creator cannot accept another encoder until local capacity recovers."""
+
+
+class MovieEncodingError(OSError):
+    """A movie encoder failed before finishing the source."""
 
 LOCAL_LIBRARY_CACHE: dict[str, tuple[float, list[dict]]] = {}
 AUDIO_SELECTION_CACHE: dict[str, tuple[int, bool]] = {}
@@ -1405,6 +1410,7 @@ def plex_items(section: str) -> list[dict]:
             "year": parent_metadata.get("year") or node.get("year", ""),
             "type": node.get("type", "video"),
             "duration_ms": int(node.get("duration", "1800000") or 1800000),
+            "added_at": node.get("addedAt", ""),
             "key": node.get("key", f"/library/metadata/{rating_key}"),
             "thumb": node.get("thumb", ""),
             "series_thumb": node.get("grandparentThumb", "") or parent_metadata.get("thumb", ""),
@@ -1656,6 +1662,7 @@ def jellyfin_items(section):
                 title = f"{series} · S{season:02d}E{episode:02d} · {title}"
             result.append({"id": identity, "title": title, "section": section, "source": "jellyfin",
                            "type": kind, "duration_ms": duration, "year": row.get("ProductionYear") or "", "summary": row.get("Overview") or "",
+                           "added_at": row.get("DateCreated", ""),
                            "thumb": identity if art.get("Primary") else "", "series_thumb": series_id if row.get("SeriesPrimaryImageTag") else "",
                            "art": identity if row.get("BackdropImageTags") else "",
                            "series_art": jellyfin_id(row.get("ParentBackdropItemId")) if row.get("ParentBackdropImageTags") else "",
@@ -3322,7 +3329,7 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
         input_timing += ["-readrate_initial_burst", "6"]
     output_timing = [] if on_demand else ["-t", f"{remaining:.3f}"]
     # Remote players need several extra segments to absorb relay jitter.
-    hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments"] if on_demand else
+    hls_options = (["-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file"] if on_demand else
                    ["-hls_list_size", "12" if relay else "5", "-hls_delete_threshold", "45" if constrained_live else "90",
                     "-hls_flags", "independent_segments+temp_file+delete_segments"])
     audio_index, has_audio = (playback_audio_track(item, media_input, source_options) if source_options
@@ -3438,7 +3445,9 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
         while time.monotonic() < deadline:
             if live_feed and not live_feed.active():
                 raise InterruptedError("The live viewer lease expired.")
-            if playlist.exists() and playlist.stat().st_size:
+            result = process.poll()
+            if (playlist.exists() and playlist.stat().st_size and
+                    (not on_demand or movie_start_ready(playlist, result))):
                 with LOCK:
                     if SHUTTING_DOWN.is_set() or (generation is not None and generation != ENCODER_GENERATION):
                         raise InterruptedError("Studio playback was stopped during startup.")
@@ -3449,7 +3458,7 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
                 if previous:
                     dispose_encoder(previous)
                 return identity
-            if process.poll() is not None:
+            if result is not None:
                 reader.join()
                 error = b"".join(errors).decode("utf-8", "replace").strip()
                 error = re.sub(r"(?i)(X-Plex-Token=)[^&\s']+", r"\1[redacted]", error)
@@ -3555,8 +3564,33 @@ def read_encoder_playlist(path):
             time.sleep(.025 * (attempt + 1))
 
 
+def movie_start_ready(playlist: Path, result: int | None) -> bool:
+    if result not in (None, 0):
+        return False
+    try:
+        manifest = read_encoder_playlist(playlist)
+        variants = re.findall(rb"(?m)^index_(?:economy|balanced|hd)\.m3u8\r?$", manifest)
+        snapshots = [read_encoder_playlist(playlist.with_name(name.strip().decode("ascii"))) for name in variants]
+    except (FileNotFoundError, PermissionError):
+        return False
+    for content in snapshots or [manifest]:
+        if result == 0:
+            if b"#EXTINF:" not in content or b"#EXT-X-ENDLIST" not in content:
+                return False
+        elif content.count(b"#EXTINF:") < 2:
+            return False
+    return True
+
+
 def viewer_encoder_playlist(session, name):
     content = read_encoder_playlist(session["directory"] / name)
+    if session.get("on_demand"):
+        result = session["process"].poll()
+        if result not in (None, 0):
+            raise MovieEncodingError("Studio stopped encoding before the movie finished.")
+        if result is None and b"#EXT-X-ENDLIST" in content:
+            # FFmpeg writes the trailer before its process exit status is available.
+            content = re.sub(rb"(?m)^#EXT-X-ENDLIST\r?\n?", b"", content)
     peaks = session.get("variant_peaks", {})
     if name != "index.m3u8" or not peaks:
         return content
@@ -4137,6 +4171,16 @@ def unique_vault_movies():
         yield item_id, section, item
 
 
+def movie_added_at(item: dict) -> int:
+    value = str(item.get("added_at") or "")
+    if not value:
+        return 0
+    try:
+        return max(0, int(value) if value.isdecimal() else int(parse_timestamp(value).timestamp()))
+    except (ValueError, OverflowError, OSError):
+        return 0
+
+
 def public_movie(base: str, item_id: str, section: str, item: dict) -> dict:
     thumb = str(item.get("thumb", ""))
     if item.get("source") == "jellyfin":
@@ -4157,6 +4201,7 @@ def public_movie(base: str, item_id: str, section: str, item: dict) -> dict:
         "poster_url": poster_url, "stream_url": f"{base}/vault/{item_id}.m3u8",
         "thumbnail_url": poster_url.replace("&size=poster", "&size=mini"),
         "duration_ms": item.get("duration_ms", 1800000),
+        "added_at": movie_added_at(item),
     }
 
 
@@ -4193,7 +4238,7 @@ def search_public_vault(base: str, query: dict, offset: int, limit: int) -> dict
             text = " ".join([title, item_year, *item_genres, str(item.get("summary") or ""), str(item.get("library") or "")]).casefold()
             if not all(term in text for term in terms):
                 continue
-        priority = -year if order == "newest" else (year or 10000) if order == "oldest" else 0
+        priority = -movie_added_at(item) if order == "added" else -year if order == "newest" else (year or 10000) if order == "oldest" else 0
         matches.append(((priority, title, record[0]), record))
     matches.sort(key=lambda match: match[0])
     end = offset + limit
@@ -4223,7 +4268,7 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
     base = base or server_base()
     moment = datetime.now(timezone.utc)
     start = moment - timedelta(hours=1) if extended else moment
-    end = moment + timedelta(hours=6 if extended else 3)
+    end = moment + timedelta(hours=12 if extended else 3)
     assets = {item.get("id"): item for item in asset_manifest()}
     result = []
     settings = config()
@@ -4377,6 +4422,12 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def send_response(self, code, message=None):
+        super().send_response(code, message)
+        started = getattr(self, "media_request_started", None)
+        if started is not None:
+            response_ms = round((time.monotonic() - started) * 1000)
+            self.send_header("X-ChannelForge-Studio-Response-Ms", str(response_ms))
+            self.media_request_started = None
         trace = getattr(self, "stream_trace", None)
         if trace:
             trace_id, phase, started = trace
@@ -4386,7 +4437,6 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 STREAM_TRACES.append(report)
             self.stream_trace = None
-        super().send_response(code, message)
 
     def delivery_profile(self):
         settings = config()
@@ -4571,9 +4621,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(200, master, "application/vnd.apple.mpegurl")
         self.redirect(route)
 
-    def body(self) -> dict:
+    def body(self, max_bytes: int = 5_000_000) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 5_000_000:
+        if length < 0 or length > max_bytes:
             raise ValueError("Request is too large.")
         value = json.loads(self.rfile.read(length) or b"{}")
         if not isinstance(value, dict):
@@ -4585,6 +4635,9 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urllib.parse.urlparse(self.path)
             broadcast = BROADCAST_ROUTE.fullmatch(parsed.path)
             self.stream_trace = None
+            self.media_request_started = None
+            if broadcast or parsed.path.startswith(("/live/", "/vault/", "/ffmpeg-stream/")):
+                self.media_request_started = time.monotonic()
             if broadcast or parsed.path.startswith(("/live/", "/vault/")):
                 viewer = urllib.parse.parse_qs(parsed.query).get("viewer", [""])[0]
                 if LIVE_VIEWER_ID.fullmatch(viewer):
@@ -4856,7 +4909,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(404, {"error": "Not found"})
         except FileNotFoundError:
             self.send_json(404, {"error": "Not found"})
-        except EncoderCapacityError as exc:
+        except (EncoderCapacityError, MovieEncodingError) as exc:
             self.send_json(503, {"error": str(exc)})
         except Exception as exc:
             self.send_json(400, {"error": str(exc)})
@@ -4901,7 +4954,7 @@ class Handler(BaseHTTPRequestHandler):
                 query = urllib.parse.parse_qs(parsed.query)
                 result = upload_local_media(self, query.get("section", [""])[0], self.headers.get("X-File-Name", ""))
                 return self.send_json(201, {"upload": result})
-            payload = self.body()
+            payload = self.body(CHANNEL_SAVE_BODY_BYTES) if parsed.path == "/api/channels" else self.body()
             if parsed.path == "/api/setup":
                 old = config()
                 plex_url, pasted_token = normalize_plex_connection(str(payload.get("plex_url", old["plex_url"])), str(payload.get("plex_token", "")))
@@ -4998,7 +5051,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.path.startswith("/api/channels/"):
                 return self.send_json(404, {"error": "Not found"})
             channel_id = self.path.rsplit("/", 1)[-1]
-            self.send_json(200, {"channel": save_channel(self.body(), channel_id)})
+            self.send_json(200, {"channel": save_channel(self.body(CHANNEL_SAVE_BODY_BYTES), channel_id)})
         except Exception as exc:
             self.send_json(400, {"error": str(exc)})
 
@@ -5060,6 +5113,8 @@ class PublicMediaHandler(Handler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
+        self.media_request_started = None
+        self.stream_trace = None
         path = parsed.path
         slot = re.match(RELAY_SLOT_PATH + r"(?=/)", path)
         self.relay_prefix = slot[0] if slot else ""

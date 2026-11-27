@@ -1,6 +1,79 @@
-// Collect a snapshot only when requested. Keep URLs, paths and credentials out of copied reports.
+// Keep playback measurements in memory. Sharing requires an explicit user action.
 (() => {
     const creator = Boolean(document.getElementById('tv-player'));
+    const video = document.querySelector(creator ? '#tv-player' : '#player');
+    let transport, started, stallStarted, lastPlayback, segmentBytes, segmentDuration;
+    if (!creator && video) {
+        const endStall = () => {
+            if (stallStarted == null) return;
+            transport.stall_ms += Math.round(performance.now() - stallStarted);
+            stallStarted = null;
+        };
+        window.ChannelForgePlaybackStart = (url, traceId, continuing, route) => {
+            if (!continuing || !transport) {
+                started = performance.now();
+                stallStarted = null;
+                segmentBytes = segmentDuration = 0;
+                transport = {trace_id:traceId, first_frame_ms:-1, stalls:0, stall_ms:0,
+                    httpError:0, segment_loads:0, segment_errors:0, manifest_errors:0,
+                    slowest_segment_ms:0, slowest_manifest_ms:0, segment_rate_bps:-1, relay_cache_hits:0, relay_cache_misses:0,
+                    slowest_relay_upstream_ms:-1, slowest_studio_response_ms:-1};
+            }
+            transport.delivery_route = route;
+            const host = url.hostname.toLowerCase();
+            transport.delivery_path = host === 'channelforge-vps.tailb58ce4.ts.net' ? 'managed-vps' :
+                host.endsWith('.lhr.life') ? 'legacy-tunnel' : ['localhost','127.0.0.1','[::1]'].includes(host) ? 'local' : 'direct';
+        };
+        window.ChannelForgePlaybackTransfer = (kind, duration, bytes, response) => {
+            if (!transport) return;
+            if (kind === 'segment' && bytes > 0) {
+                transport.segment_loads++;
+                segmentBytes += bytes;
+                segmentDuration += duration;
+                if (segmentDuration > 0) transport.segment_rate_bps = Math.round(8000 * segmentBytes / segmentDuration);
+                transport.slowest_segment_ms = Math.max(transport.slowest_segment_ms, Math.round(duration));
+            } else if (kind === 'manifest') {
+                transport.slowest_manifest_ms = Math.max(transport.slowest_manifest_ms, Math.round(duration));
+            }
+            const header = name => response?.getResponseHeader?.(name) ?? response?.headers?.get(name) ?? '';
+            if (header('X-ChannelForge-Relay') === 'vps') transport.delivery_path = 'managed-vps';
+            const cache = header('X-ChannelForge-Cache');
+            if (['HIT','STALE','UPDATING','REVALIDATED'].includes(cache)) {
+                transport.relay_cache_hits++;
+                return;
+            }
+            if (['MISS','EXPIRED','BYPASS'].includes(cache)) transport.relay_cache_misses++;
+            const upstream = header('X-ChannelForge-Upstream-Header-Time');
+            const studio = header('X-ChannelForge-Studio-Response-Ms');
+            if (/^\d{1,3}\.\d{3}$/.test(upstream)) transport.slowest_relay_upstream_ms = Math.max(transport.slowest_relay_upstream_ms, Math.round(Number(upstream)*1000));
+            if (/^\d{1,6}$/.test(studio)) transport.slowest_studio_response_ms = Math.max(transport.slowest_studio_response_ms, Number(studio));
+        };
+        video.addEventListener('playing', () => {
+            if (transport?.first_frame_ms === -1) transport.first_frame_ms = Math.round(performance.now() - started);
+            endStall();
+        });
+        video.addEventListener('waiting', () => {
+            if (!transport || transport.first_frame_ms < 0 || video.paused || video.seeking || stallStarted != null) return;
+            stallStarted = performance.now();
+            transport.stalls++;
+        });
+        for (const event of ['pause','ended','seeking']) video.addEventListener(event, endStall);
+        addEventListener('cf-tester-stream-error', ({detail:{kind,status}}) => {
+            if (!transport) return;
+            if (kind === 'segment') transport.segment_errors++;
+            if (kind === 'manifest') transport.manifest_errors++;
+            if (status >= 400 && status <= 599) Object.assign(transport, {httpError:status, http_resource:kind});
+        });
+        addEventListener('cf-tester-stop', () => {
+            if (!activeMedia || !transport) return;
+            endStall();
+            lastPlayback = currentPlayback();
+        });
+        if (document.documentElement.hasAttribute('data-tester')) {
+            window.ChannelForgeTesterSnapshot = () => ({...currentPlayback(), studios:allCreators.length,
+                channels:liveChannels.length, reconnecting:liveChannels.filter(channel => channel.state === 'reconnecting').length});
+        }
+    }
     const container = document.querySelector(creator ? '#system .system-links' : '#playback-troubleshooting-controls');
     if (!container) return;
     const existing = container.querySelector('[data-open-diagnostics]');
@@ -20,7 +93,6 @@
     const [refresh, copy, close] = panel.querySelectorAll('button');
 
     function currentPlayback() {
-        const video = document.querySelector(creator ? '#tv-player' : '#player');
         const engine = creator ? hlsPlayer : hls;
         const level = engine?.levels?.[engine.currentLevel];
         const quality = video.getVideoPlaybackQuality?.();
@@ -45,7 +117,9 @@
             media_error_code: video.error?.code ?? null,
             ...(creator ? {} : {stream_selected: Boolean(activeStreamUrl), kind: activeMedia?.kind || null,
                 trace_id: activeMedia?.traceId || null,
-                recoveries_this_attempt: liveMode ? liveRetries : movieRetries})
+                recoveries_this_attempt: liveMode ? liveRetries : movieRetries,
+                ...(activeMedia && transport ? {...transport, stall_ms:transport.stall_ms +
+                    (stallStarted == null ? 0 : Math.round(performance.now() - stallStarted))} : {})})
         };
     }
 
@@ -54,7 +128,7 @@
         copy.disabled = true;
         try {
             const data = {captured_utc: new Date().toISOString(), app: creator ? 'Creator' : 'TV',
-                playback: currentPlayback()};
+                playback: !creator && !activeMedia && lastPlayback ? lastPlayback : currentPlayback()};
             if (creator) {
                 const response = await fetch('/api/diagnostics', {cache:'no-store'});
                 if (!response.ok) throw Error();
@@ -76,12 +150,6 @@
     function open() {
         if (!panel.open) panel.showModal();
         return sample();
-    }
-    if (!creator && document.documentElement.hasAttribute('data-tester')) {
-        window.ChannelForgeTesterSnapshot = () => ({
-            ...currentPlayback(), studios: allCreators.length, channels: liveChannels.length,
-            reconnecting: liveChannels.filter(channel => channel.state === 'reconnecting').length
-        });
     }
     trigger.addEventListener('click', open);
     document.querySelectorAll('[data-open-diagnostics]').forEach(button => {

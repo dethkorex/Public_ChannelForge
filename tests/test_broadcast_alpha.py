@@ -1,6 +1,7 @@
 """Regression checks for live source selection, EPG availability and real FFmpeg handoffs."""
 
 import concurrent.futures
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,35 @@ from tests.creator_fixture import app
 
 
 class BroadcastTests(unittest.TestCase):
+    def test_large_saved_lineup_reaches_the_twelve_hour_guide_without_encoding(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            moment = app.datetime.now(app.timezone.utc)
+            items = [{"id": str(index), "title": f"Title {index}", "type": "movie" if index % 2 else "episode",
+                      "duration_ms": 1_800_000, "summary": "x" * 600} for index in range(8_000)]
+            payload = {"name": "Long lineup", "number": "31", "items": items,
+                       "schedule_anchor": (moment - app.timedelta(minutes=30*7_000)).isoformat()}
+            body = json.dumps(payload).encode()
+            self.assertGreater(len(body), 5_000_000)
+            handler = object.__new__(app.Handler)
+            handler.headers = {"Content-Length": str(len(body))}
+            handler.rfile = io.BytesIO(body)
+            with (patch.object(app, "CONFIG_FILE", directory / "config.json"),
+                  patch.object(app, "CHANNELS_FILE", directory / "channels.json"),
+                  patch.object(app, "ASSETS_DIR", directory / "assets"),
+                  patch.object(app, "EXPORT_DIR", directory / "exports"),
+                  patch.object(app, "backup_state"), patch.object(app, "sync_public_channel_numbers"),
+                  patch.object(app, "start_ffmpeg_session") as encoder):
+                saved = app.save_channel(handler.body(app.CHANNEL_SAVE_BODY_BYTES))
+                self.assertEqual(len(saved["items"]), len(items))
+                catalog = app.public_channel_catalog("https://studio.example", extended=True)
+                scheduled = catalog["channels"][0]["programs"]
+                self.assertTrue(any(row["title"] == "Title 7023" for row in scheduled))
+                end = app.parse_timestamp(scheduled[-1]["stop"])
+                self.assertGreaterEqual(end, moment + app.timedelta(hours=12))
+                self.assertTrue((directory / "exports" / "guide.xml").is_file())
+                encoder.assert_not_called()
+
     def test_known_viewers_move_from_starting_through_live_and_cooldown(self):
         with patch.object(app.time, "monotonic", return_value=100) as clock:
             feed = app.LivePlayout(lambda _: None, channel_id="sample")
@@ -77,6 +107,39 @@ class BroadcastTests(unittest.TestCase):
             result = app.viewer_encoder_playlist({"directory": directory, "variant_peaks": {"balanced": 690000}},
                                                  "index.m3u8")
             self.assertEqual(result, master.read_bytes().replace(b":BANDWIDTH=570000", b":BANDWIDTH=690000"))
+
+    def test_movie_only_reports_end_after_successful_encoder_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            completed = b"#EXTM3U\n#EXTINF:2,\nsegment0.ts\n#EXT-X-ENDLIST\n"
+            (directory / "index.m3u8").write_bytes(completed)
+            process = Mock()
+            session = {"directory": directory, "on_demand": True, "process": process}
+            process.poll.return_value = None
+            self.assertNotIn(b"#EXT-X-ENDLIST", app.viewer_encoder_playlist(session, "index.m3u8"))
+            process.poll.return_value = 1
+            with self.assertRaises(app.MovieEncodingError):
+                app.viewer_encoder_playlist(session, "index.m3u8")
+            process.poll.return_value = 0
+            self.assertEqual(app.viewer_encoder_playlist(session, "index.m3u8"), completed)
+
+    def test_movie_waits_for_a_playable_startup_buffer_in_each_rendition(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            master = directory / "index.m3u8"
+            master.write_bytes(b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000\nindex_economy.m3u8\n"
+                               b"#EXT-X-STREAM-INF:BANDWIDTH=1500000\nindex_hd.m3u8\n")
+            one = b"#EXTM3U\n#EXTINF:2,\nsegment0.ts\n"
+            two = one + b"#EXTINF:2,\nsegment1.ts\n"
+            economy, hd = directory / "index_economy.m3u8", directory / "index_hd.m3u8"
+            economy.write_bytes(two)
+            hd.write_bytes(one)
+            self.assertFalse(app.movie_start_ready(master, None))
+            hd.write_bytes(two)
+            self.assertTrue(app.movie_start_ready(master, None))
+            self.assertFalse(app.movie_start_ready(master, 1))
+            master.write_bytes(one + b"#EXT-X-ENDLIST\n")
+            self.assertTrue(app.movie_start_ready(master, 0))
 
     def test_cleanup_retains_old_segments_still_advertised_by_live_playlist(self):
         with tempfile.TemporaryDirectory() as temp:

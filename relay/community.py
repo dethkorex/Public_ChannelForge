@@ -150,6 +150,8 @@ def studio_locations(index: int, prefix: str, origin: str | None) -> str:
             proxy_cache_valid 200 1m;
             proxy_no_cache $wrong_segment_type;
             proxy_ignore_headers Cache-Control Expires;
+            add_header X-ChannelForge-Relay vps always;
+            add_header X-ChannelForge-Upstream-Header-Time $upstream_header_time always;
             add_header X-ChannelForge-Cache $upstream_cache_status always;
         }}
 
@@ -159,6 +161,8 @@ def studio_locations(index: int, prefix: str, origin: str | None) -> str:
             proxy_set_header Connection "";
             {upstream_tls}
             proxy_pass {upstream};
+            add_header X-ChannelForge-Relay vps always;
+            add_header X-ChannelForge-Upstream-Header-Time $upstream_header_time always;
             {rewrite_origin}
         }}
 """

@@ -13,14 +13,20 @@
       <Rectangle width="1920" height="1080" color="0x061125ff"/>
       <Rectangle width="1920" height="108" color="0x060b1bff"/>
       <Rectangle width="1920" height="2" translation="[0,106]" color="0x21edf6ff"/>
-      <Poster uri="pkg:/images/channel-forge-tv.png" translation="[55,18]" width="67" height="67" loadDisplayMode="scaleToFit"/>
-      <Label text="CHANNELFORGE TV" translation="[142,20]" width="800" height="51" color="0xf6f8ffff" font="font:LargeBoldSystemFont"/>
-      <Label text="THE COMMUNITY DIAL" translation="[144,71]" width="600" height="26" color="0x59f5ffff" font="font:SmallSystemFont"/>
-      <Button id="homeMenu" text="HOME" translation="[920,28]" width="170" height="58"/>
+      <Button id="homeMenu" text="☰" translation="[55,25]" width="72" height="60"/>
+      <Poster uri="pkg:/images/channel-forge-tv.png" translation="[146,18]" width="67" height="67" loadDisplayMode="scaleToFit"/>
+      <Label text="CHANNELFORGE TV" translation="[230,20]" width="800" height="51" color="0xf6f8ffff" font="font:LargeBoldSystemFont"/>
+      <Label text="THE COMMUNITY DIAL" translation="[232,71]" width="600" height="26" color="0x59f5ffff" font="font:SmallSystemFont"/>
+      <Button id="guideSchedule" text="SCHEDULE" translation="[865,28]" width="220" height="58"/>
       <Button id="guideSort" text="SORT: CHANNEL" translation="[1108,28]" width="320" height="58"/>
       <Button id="updates" text="SYSTEM" translation="[1450,28]" width="410" height="58"/>
       <Label id="status" text="Finding creator studios…" translation="[58,111]" width="590" height="35" color="0xa9b7c8ff"/>
-      <MarkupList id="creators" translation="[55,163]" itemComponentName="CreatorCard" itemSize="[570,92]" itemSpacing="[0,10]"/>
+      <Group translation="[55,163]">
+        <Rectangle width="570" height="187" color="0x34e7f9ff"/>
+        <Rectangle width="566" height="183" translation="[2,2]" color="0x0b1325ff"/>
+        <Label text="Select a channel from the guide" translation="[24,68]" width="522" height="52" horizAlign="center" color="0xa9b7c8ff"/>
+      </Group>
+      <MarkupList id="creators" translation="[55,363]" numRows="6" itemComponentName="CreatorCard" itemSize="[570,92]" itemSpacing="[0,10]"/>
       <Group translation="[680,135]">
         <Rectangle width="1180" height="215" color="0x34e7f9ff"/>
         <Rectangle width="1176" height="211" translation="[2,2]" color="0x151735ff"/>
@@ -28,9 +34,11 @@
         <Rectangle width="237" height="211" translation="[602,2]" color="0x10163265"/>
         <Label text="● NOW PLAYING" translation="[23,20]" width="580" height="34" color="0x48f6ffff" font="font:MediumBoldSystemFont"/>
         <Label id="programTitle" text="Select a channel from the guide" translation="[23,64]" width="750" height="95" wrap="true" numLines="2" color="0xffee64ff" font="font:LargeBoldSystemFont"/>
-        <Label id="programChannel" translation="[24,171]" width="560" height="30" color="0xd8efffff" font="font:SmallSystemFont"/>
+        <Label id="programChannel" translation="[24,157]" width="560" height="30" color="0xd8efffff" font="font:SmallSystemFont"/>
+        <Rectangle width="510" height="5" translation="[25,194]" color="0x37526cff"/>
+        <Rectangle id="programProgress" width="0" height="5" translation="[25,194]" color="0x31ecffff"/>
       </Group>
-      <MarkupList id="channels" translation="[680,363]" width="760" numRows="2" itemComponentName="ChannelCard" itemSize="[760,88]" itemSpacing="[0,10]"/>
+      <MarkupList id="channels" translation="[680,363]" width="1180" numRows="2" itemComponentName="ChannelCard" itemSize="[1180,88]" itemSpacing="[0,10]"/>
       <Label text="REWIND CINEMA" translation="[680,565]" width="1120" height="38" color="0xff3eb8ff" font="font:MediumBoldSystemFont"/>
       <MarkupList id="vault" translation="[680,615]" itemComponentName="VaultCard" itemSize="[555,74]" itemSpacing="[0,8]" numRows="4"/>
       <Group id="movieDetails" translation="[1270,615]" visible="false">
@@ -48,20 +56,31 @@
         <Rectangle width="1808" height="330" translation="[55,153]" color="0x28e1f2ff"/>
         <Rectangle width="1804" height="326" translation="[57,155]" color="0x10152dff"/>
         <Rectangle width="135" height="4" translation="[100,224]" color="0xe54dfaff"/>
-        <Poster uri="pkg:/images/channel-forge-tv.png" translation="[1510,175]" width="240" height="242" loadDisplayMode="scaleToFit"/>
-        <Label text="WELCOME TO CHANNELFORGE TV" translation="[100,186]" width="900" height="36" color="0x55f5ffff" font="font:MediumBoldSystemFont"/>
-        <Label text="Live channels. One community dial." translation="[98,245]" width="1375" height="79" color="0xf6f8ffff" font="font:LargeBoldSystemFont"/>
-        <Label text="Watch community live channels and explore movies from connected studios." translation="[100,344]" width="1375" height="63" color="0xd9e9ffff"/>
-        <Button id="homeLive" text="LIVE TV GUIDE" translation="[55,520]" width="881" height="116"/>
-        <Button id="homeCinema" text="REWIND CINEMA" translation="[978,520]" width="881" height="116"/>
-        <Button id="homeContinue" text="CONTINUE WATCHING" translation="[55,680]" width="881" height="74"/>
-        <Button id="homeUpdate" text="SYSTEM" translation="[978,680]" width="881" height="74"/>
+        <Poster id="homeArt" uri="pkg:/images/channel-forge-tv.png" translation="[1125,155]" width="736" height="326" loadDisplayMode="scaleToFit"/>
+        <Label id="homeEyebrow" text="WELCOME TO CHANNELFORGE TV" translation="[100,186]" width="900" height="36" color="0x55f5ffff" font="font:MediumBoldSystemFont"/>
+        <Label id="homeTitle" text="Live channels. One community dial." translation="[98,242]" width="1000" height="68" color="0xf6f8ffff" font="font:LargeBoldSystemFont"/>
+        <Label id="homeCaption" text="Watch community live channels and explore shared movies." translation="[100,313]" width="980" height="48" color="0xd9e9ffff"/>
+        <Button id="homeWatch" text="▶ WATCH LIVE" translation="[97,390]" width="310" height="63" visible="false"/>
+        <Button id="homeLive" text="OPEN GUIDE" translation="[425,390]" width="310" height="63"/>
+        <Label text="ON NOW" translation="[55,506]" width="1000" height="34" color="0x59f5ffff" font="font:MediumBoldSystemFont"/>
+        <MarkupList id="homeChannels" translation="[55,553]" width="1180" numRows="2" itemComponentName="ChannelCard" itemSize="[1180,88]" itemSpacing="[0,8]"/>
+        <Button id="homeContinue" text="CONTINUE WATCHING" translation="[1270,553]" width="590" height="77"/>
+        <Button id="homeUpdate" text="SYSTEM" translation="[1270,645]" width="590" height="77"/>
+        <Label text="FROM REWIND CINEMA" translation="[55,756]" width="1100" height="36" color="0xf68cffff" font="font:MediumBoldSystemFont"/>
+        <MarkupList id="homeMovies" translation="[55,806]" width="555" numRows="2" itemComponentName="VaultCard" itemSize="[555,74]" itemSpacing="[0,8]"/>
+        <Button id="homeCinema" text="BROWSE REWIND CINEMA" translation="[680,806]" width="550" height="77"/>
       </Group>
       <Group id="continuePage" visible="false">
         <Rectangle width="1920" height="972" translation="[0,108]" color="0x071428ff"/>
         <Label text="CONTINUE WATCHING" translation="[74,155]" width="1650" height="66" color="0x55f5ffff" font="font:LargeBoldSystemFont"/>
         <Label id="continueStatus" translation="[78,235]" width="1660" height="42" color="0xd9e9ffff"/>
         <MarkupList id="continueMovies" translation="[77,300]" itemComponentName="VaultCard" itemSize="[555,74]" itemSpacing="[0,8]" numRows="8"/>
+      </Group>
+      <Group id="navigationDrawer" visible="false">
+        <Rectangle width="1920" height="972" translation="[0,108]" color="0x030713a6"/>
+        <Rectangle width="470" height="522" translation="[55,106]" color="0x28e1f2ff"/>
+        <Rectangle width="466" height="518" translation="[57,108]" color="0x10152dff"/>
+        <LabelList id="navigationItems" translation="[80,138]" itemSize="[414,67]" numRows="5" color="0xf4fbffff" focusedColor="0x63f0ffff"/>
       </Group>
     </Group>
     <Group id="buffering" visible="false">

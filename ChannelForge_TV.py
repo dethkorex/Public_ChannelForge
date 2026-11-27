@@ -25,7 +25,7 @@ from linux_runtime import apply_linux_update, can_apply_linux_update, restart_li
 from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
 LOCAL_CREATOR = "http://127.0.0.1:8787"
@@ -451,6 +451,7 @@ function parsePlaylist(text,creator){
 }
 function programAt(channel,moment=Date.now()){return(channel?.programs||[]).find(program=>Date.parse(program.start)<=moment&&moment<Date.parse(program.stop))}
 const GUIDE_STEP=30*60*1000;
+const GUIDE_AHEAD_STEPS=24;
 const guideTime=new Intl.DateTimeFormat(undefined,{hour:'numeric',minute:'2-digit'});
 function formatDuration(milliseconds){
     const seconds=Math.floor(Math.max(0,milliseconds)/1000);
@@ -533,6 +534,52 @@ function channelRatingOrder(channel){
     const rank=channel.channel_rating_rank;
     return Number.isInteger(rank)&&rank>=1&&rank<=9?rank:10;
 }
+let fullGuide=false;
+function channelArt(channel,program){
+    return program?.backdrop_url||program?.series_poster_url||program?.poster_url||channel.logo_url||'';
+}
+function programSeries(program){
+    return (program?.title||'').split(/\s+·\s+S\d+E\d+\b/i,1)[0];
+}
+function programProgress(program,now){
+    const start=Date.parse(program?.start), duration=Date.parse(program?.stop)-start;
+    return duration>0?Math.max(0,Math.min(100,100*(now-start)/duration)):0;
+}
+function renderCompactGuide(channels,now,tuned){
+    const guide=$('#tv-guide');
+    const rows=document.createDocumentFragment();
+    const focused=document.activeElement?.closest('.compact-guide-row');
+    const focusedIndex=focused?[...focused.querySelectorAll('button')].indexOf(document.activeElement):-1;
+    for(const [index,channel] of channels.entries()){
+        const current=programAt(channel,now);
+        const upcoming=(channel.programs||[]).filter(program=>Date.parse(program.start)>now).slice(0,2);
+        const programs=[current,upcoming[0],upcoming[1]];
+        const art=channelArt(channel,current), row=document.createElement('section');
+        row.className='compact-guide-row'+((tuned?tuned.stream_url===channel.stream_url:index===0)?' tuned':'');
+        row.dataset.channel=channel.stream_url;
+        const favorite=favoriteChannels.has(channel.stream_url);
+        row.innerHTML='<div class="compact-station"><span class="compact-channel-image">'+(art?'<img src="'+esc(art)+'" alt="" loading="lazy">':'')
+            +'</span><span class="compact-station-copy"><b>CH '+esc(channel.number||'—')+'</b><small>'+esc(channel.name)+'</small></span>'
+            +'<button type="button" class="compact-favorite" aria-label="Favorite '+esc(channel.name)+'" aria-pressed="'+favorite+'">'+(favorite?'★':'☆')+'</button></div>'
+            +programs.map((program,index)=>program?'<button type="button" class="compact-program" data-program="'+index+'" title="'+esc(program.title)+'"><small>'
+                +['On Now','Up Next','Later'][index]+'</small><b>'+esc(programSeries(program))+'</b>'
+                +(index===0?'<progress max="100" value="'+programProgress(program,now)+'" aria-label="Program progress"></progress>'
+                    :'')+'</button>':'<span class="compact-program"><small>'
+                +['On Now','Up Next','Later'][index]+'</small>Schedule unavailable</span>').join('')
+            +'<div class="compact-actions"><button type="button" aria-label="Watch '+esc(channel.name)+'">▶ Watch Live</button></div>';
+        watchArtwork(row.querySelector('img'),channel.logo_url);
+        const favoriteButton=row.querySelector('.compact-favorite'),watch=row.querySelector('.compact-actions button');
+        watch.onclick=()=>tuneGuideChannel(channel);
+        favoriteButton.onclick=()=>toggleFavorite('channel',channel.stream_url);
+        row.querySelectorAll('[data-program]').forEach(button=>button.onclick=()=>showProgramInfo(channel,programs[Number(button.dataset.program)]));
+        rows.append(row);
+    }
+    guide.replaceChildren(rows);
+    if(focusedIndex>=0){
+        [...guide.children].find(row=>row.dataset.channel===focused.dataset.channel)?.querySelectorAll('button')[focusedIndex]?.focus({preventScroll:true});
+    }
+    if(!channels.length)guide.innerHTML='<p class="guide-unavailable">No online channels match this view.</p>';
+}
 function renderLiveGuide(){
     const now=Date.now(), search=guideSearch.trim().toLowerCase(), filterBar=$('#studio-filters');
     const studios=[...new Set(liveChannels.map(channel=>channel.creator_name||'ChannelForge Creator'))];
@@ -551,12 +598,21 @@ function renderLiveGuide(){
     const featured=tuned||channels.find(channel=>programAt(channel,now))||channels[0];
     renderNowPlaying(featured,now,Boolean(tuned));
     const steps=innerWidth<1100?4:8;
+    const lastOffset=GUIDE_AHEAD_STEPS-steps+1;
+    guideWindowOffset=Math.min(guideWindowOffset,lastOffset);
     const start=(Math.floor(now/GUIDE_STEP)+guideWindowOffset)*GUIDE_STEP, stop=start+steps*GUIDE_STEP;
     const board=$('#guide-board'), guide=$('#tv-guide');
     board.style.setProperty('--guide-steps',steps);
     $('#guide-window-label').textContent=guideWindowOffset?'GUIDE TIME':'ON NOW';
     $('#guide-earlier').disabled=guideWindowOffset<=-1;
-    $('#guide-later').disabled=guideWindowOffset>=4;
+    $('#guide-later').disabled=guideWindowOffset>=lastOffset;
+    const layout=$('#guide-layout');
+    layout.textContent=fullGuide?'‹ Compact Guide':'Full Guide ›';
+    board.classList.toggle('compact-guide',!fullGuide);
+    document.body.classList.toggle('compact-guide-mode',!fullGuide);
+    $('#guide-times').hidden=!fullGuide;
+    $('#compact-guide-head').hidden=fullGuide;
+    if(!fullGuide){renderCompactGuide(channels,now,tuned);renderFavorites();return}
     $('#guide-times').innerHTML='<div class="guide-channel-head"><span>CH</span><span>CHANNEL</span></div><div class="guide-ticks">'
         +Array.from({length:steps},(_,i)=>'<time>'+guideTime.format(start+i*GUIDE_STEP)+'</time>').join('')+'</div>';
     const rows=document.createDocumentFragment();
@@ -623,16 +679,15 @@ function showProgramInfo(channel,program){
 let directoryScan=null, pendingGuideRender=0;
 const channelsByStudio=new Map();
 const unreachableStudioOrigins=new Set();
-let creatorsSignature='';
 function refreshGuideFromStudios(){
     const winners=new Map();
     for(const creator of allCreators){
         const updated=Number(creator.updated_at)||0;
         const name=String(creator.name||'').trim().toLowerCase();
         for(const channel of channelsByStudio.get(creator.playlist_url)||[]){
-            if(!channel.stream_url||channel.state==='offline')continue;
+            if(!channel.stream_url||channel.online===false||['offline','reconnecting'].includes(channel.state))continue;
             const key=name&&/^[a-f0-9]{16}$/i.test(channel.id||'')?`channel:${name}/${channel.id}`:channel.stream_url;
-            const score=(channel.state==='reconnecting'?0:2)+(creator.local?1:0);
+            const score=creator.local?1:0;
             const previous=winners.get(key);
             if(!previous||score>previous.score||(score===previous.score&&updated>previous.updated)){
                 winners.set(key,{channel,score,updated});
@@ -645,6 +700,7 @@ function refreshGuideFromStudios(){
         pendingGuideRender=0;
         if(document.body.classList.contains('guide-mode'))renderLiveGuide();
         else renderFavorites();
+        if(!$('#home-spotlight').hidden)renderHome();
     });
 }
 function sameStudio(local, remote){
@@ -686,7 +742,6 @@ function supportsCinema(creator){
 }
 function adoptCreators(creators){
     creators=creators.filter(creator=>creator.state!=='offline'&&(creator.state||creator.online!==false));
-    const previous=allCreators;
     allCreators=creators;
     const cinemaCreators=creators.filter(supportsCinema);
     const current=cinemaCreators.find(creator=>creator.playlist_url===selectedCreator?.playlist_url||creator.id===selectedCreator?.id);
@@ -703,34 +758,8 @@ function adoptCreators(creators){
     }
     selectedCreator=next;
     const urls=new Set(creators.map(creator=>creator.playlist_url));
-    for(const creator of creators){
-        if(!creator.id||channelsByStudio.has(creator.playlist_url))continue;
-        const old=previous.find(entry=>entry.id===creator.id&&entry.local===creator.local);
-        const rows=old&&channelsByStudio.get(old.playlist_url);
-        if(rows)channelsByStudio.set(creator.playlist_url,rows.map(row=>({...row,state:'reconnecting'})));
-        else {
-            const inventory=hubGuideRows(creator);
-            if(inventory)channelsByStudio.set(creator.playlist_url,inventory);
-        }
-    }
     for(const key of channelsByStudio.keys())if(!urls.has(key))channelsByStudio.delete(key);
     for(const key of unreachableStudioOrigins)if(!urls.has(key))unreachableStudioOrigins.delete(key);
-    const signature=JSON.stringify(cinemaCreators.map(c=>[c.id,c.playlist_url,c.vault_url,c.name,c.description,c.logo_url,c.local]));
-    if(signature!==creatorsSignature || !$('#creators').hasChildNodes()){
-        creatorsSignature=signature;
-        const list=$('#creators'),fragment=document.createDocumentFragment();
-        list.textContent='';
-        for(const c of cinemaCreators){
-            const b=document.createElement('button');
-            b.className='creator';
-            b.innerHTML=(c.logo_url?'<img loading="lazy" src="'+esc(c.logo_url)+'" style="width:46px;height:46px;object-fit:contain;float:left;margin-right:12px">':'')+'<b>'+esc(c.name)+'</b><br><small>'+esc(c.description)+(c.local?' • THIS PC':'')+'</small>';
-            b.dataset.playlist=c.playlist_url;
-            b.onclick=()=>selectCinemaStudio(c);
-            fragment.append(b);
-        }
-        if(!cinemaCreators.length)list.innerHTML='<span class="empty">No compatible movie studios are online.</span>';
-        else list.append(fragment);
-    }
     updateCinemaStudios();
     if(!selectedCreator?.vault_url){
         $('#vault').innerHTML='<span class="empty">No movie libraries are online right now.</span>';
@@ -746,11 +775,8 @@ function updateCinemaStudios(){
         if(JSON.stringify(options)!==JSON.stringify(rendered))
             select.replaceChildren(...options.map(([name,url])=>new Option(name,url)));
         select.disabled=!options.length;
+        select.hidden=options.length<2;
         select.value=selectedCreator?.playlist_url||'';
-    }
-    for(const button of $('#creators').querySelectorAll('[data-playlist]')){
-        if(button.dataset.playlist===selectedCreator?.playlist_url)button.setAttribute('aria-current','true');
-        else button.removeAttribute('aria-current');
     }
 }
 function selectCinemaStudio(creator){
@@ -801,11 +827,11 @@ async function readStudioGuide(url, asJson){
         clearTimeout(deadline);
     }
 }
-function studioGuideRows(creator,value,stale=false){
-    return value.channels.filter(channel=>channel.stream_url&&channel.state!=='offline'&&
-        !(channel.online===false&&!channel.state)&&!((channel.air_until_epoch_ms||Date.parse(channel.air_until))<=Date.now()))
+function studioGuideRows(creator,value){
+    return value.channels.filter(channel=>channel.stream_url&&channel.online!==false&&
+        !['offline','reconnecting'].includes(channel.state)&&!((channel.air_until_epoch_ms||Date.parse(channel.air_until))<=Date.now()))
         .map(channel=>({...channel,creator_name:creator.name,studio_id:creator.public_id||creator.id||creator.playlist_url,
-            state:stale?'reconnecting':channel.state||(channel.online?'broadcasting':'offline'),
+            state:channel.state||(channel.online?'broadcasting':'standby'),
             stream_url:creatorMedia(channel.stream_url,creator),
             continuous_url:creatorMedia(channel.continuous_url,creator),
             logo_url:creatorArtwork(channel.logo_url,creator),creator_logo_url:creatorArtwork(creator.logo_url,creator),
@@ -815,53 +841,35 @@ function studioGuideRows(creator,value,stale=false){
                 backdrop_url:creatorArtwork(program.backdrop_url,creator)}))
         })).filter(channel=>channel.stream_url);
 }
-function hubGuideRows(creator){
-    if(creator.local||!Array.isArray(creator.channel_inventory)||!(creator.inventory_expires*1000>Date.now()))return null;
-    return studioGuideRows(creator,{channels:creator.channel_inventory},true);
-}
 async function scanStudio(creator){
     let channels;
-    let reachable=true;
-    let previous=(channelsByStudio.get(creator.playlist_url)||[]).map(channel=>({...channel,state:'reconnecting'}));
     if(creator.status_url){
         try{
             const address=new URL(creator.status_url);
             address.searchParams.set('guide','extended');
-            try{
-                const value=await readStudioGuide(address.href,true);
-                if(Array.isArray(value?.channels))channels=studioGuideRows(creator,value);
-            }catch(_error){}
-            if(!channels&&!previous.length){
-                const cached=await localJson('/guide-cache?url='+encodeURIComponent(address.href));
-                if(Array.isArray(cached?.channels))previous=studioGuideRows(creator,cached,true);
-            }
+            const value=await readStudioGuide(address.href,true);
+            if(Array.isArray(value?.channels))channels=studioGuideRows(creator,value);
         }catch(_error){}
     }
     if(!channels){
         try{
             const playlist=await readStudioGuide(creator.playlist_url,false);
             if(!playlist.trimStart().startsWith('#EXTM3U'))throw Error('Invalid channel playlist');
-            const rows=studioGuideRows(creator,{channels:parsePlaylist(playlist,creator)});
-            if(!creator.status_url)channels=rows;
-            else{
-                // Only a successful guide response can remove known channels.
-                const merged=new Map(previous.map(row=>[row.id||row.stream_url,row]));
-                for(const row of rows){
-                    const key=row.id||row.stream_url, known=merged.get(key);
-                    merged.set(key,{...row,programs:known?.programs||[],air_until:known?.air_until||''});
-                }
-                channels=[...merged.values()];
-            }
-        }catch(_error){
-            const inventory=hubGuideRows(creator);
-            reachable=inventory!==null;
-            channels=inventory??(document.documentElement.hasAttribute('data-tester')&&!creator.local?[]:previous);
-        }
+            const previous=new Map((channelsByStudio.get(creator.playlist_url)||[]).map(row=>[row.id||row.stream_url,row]));
+            channels=studioGuideRows(creator,{channels:parsePlaylist(playlist,creator)}).flatMap(row=>{
+                const known=previous.get(row.id||row.stream_url);
+                if(!known)return [row];
+                if((known.air_until_epoch_ms||Date.parse(known.air_until))<=Date.now())return [];
+                return [{...row,programs:known.programs,air_until:known.air_until,air_until_epoch_ms:known.air_until_epoch_ms,
+                    continuous_url:known.stream_url===row.stream_url?known.continuous_url:row.continuous_url}];
+            });
+        }catch(_error){}
     }
-    if(document.documentElement.hasAttribute('data-tester')&&!creator.local){
-        if(reachable)unreachableStudioOrigins.delete(creator.playlist_url);
+    if(!creator.local){
+        if(channels)unreachableStudioOrigins.delete(creator.playlist_url);
         else unreachableStudioOrigins.add(creator.playlist_url);
     }
+    channels??=[];
     if(allCreators.some(c=>c.playlist_url===creator.playlist_url)){
         channelsByStudio.set(creator.playlist_url,channels);
         refreshGuideFromStudios();
@@ -899,12 +907,11 @@ async function refreshDirectory(){
         }));
         await localLookup;
         if(local)await check(local);
-        if(document.documentElement.hasAttribute('data-tester'))adoptCreators(allCreators);
+        adoptCreators(allCreators);
         refreshGuideFromStudios();
         if(selectedCreator&&!document.querySelector('.vault-layout').hidden&&Date.now()-vaultLoadedAt>60_000)studio(selectedCreator,true);
-        const count=liveChannels.filter(channel=>channel.online&&channel.state!=='reconnecting').length;
-        const reconnecting=liveChannels.filter(channel=>channel.state==='reconnecting').length;
-        status.textContent=(count+' online channel'+(count===1?'':'s'))+(reconnecting?' • '+reconnecting+' reconnecting':'')+(unavailable?' • directory unavailable':' • scanned '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}));
+        const count=liveChannels.length;
+        status.textContent=(count+' online channel'+(count===1?'':'s'))+(unavailable?' • directory unavailable':' • scanned '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}));
         return liveChannels;
     }finally{
         button.disabled=false;
@@ -1596,6 +1603,8 @@ function play(url,media=null,continuing=false){
     const streamUrl=skipPreferredRelay?registeredUrl:preferredMediaAddress(registeredUrl,media);
     usingPreferredRelay=streamUrl.origin!==registeredUrl.origin;
     const traceId=continuing&&activeMedia?.traceId||newPlaybackTrace();
+    window.ChannelForgePlaybackStart?.(streamUrl,traceId,continuing,
+        usingPreferredRelay?'preferred-relay':skipPreferredRelay?'registered-fallback':'registered-route');
     if(/^(?:\/studio\/[a-f0-9]{16})?\/(broadcast|live|vault)\//.test(streamUrl.pathname))streamUrl.searchParams.set('viewer',traceId);
     const source='/stream?url='+encodeURIComponent(streamUrl.href);
     if(hls){hls.destroy();hls=null}
@@ -1644,21 +1653,22 @@ function play(url,media=null,continuing=false){
         const options=liveMode?{startPosition:-1,backBufferLength:2,startFragPrefetch:true,...liveBuffer}
             :{startPosition:activeMedia.resumeAt||0,backBufferLength:120,maxBufferLength:60};
         const player=new Hls({autoStartLoad:false,...options});hls=player;
-        if(document.documentElement.hasAttribute('data-tester')){
-            const reportTransfer=(kind,stats)=>{
+        {
+            const reportTransfer=(kind,stats,response)=>{
                 if(generation!==playbackGeneration||!stats?.loading)return;
                 const duration=stats.loading.end-stats.loading.start;
                 if(Number.isFinite(duration)&&duration>=0){
-                    window.dispatchEvent(new CustomEvent('cf-tester-transfer',{detail:{kind,duration,bytes:stats.loaded||0}}));
+                    window.ChannelForgePlaybackTransfer?.(kind,duration,stats.loaded||0,response);
                 }
             };
-            player.on(Hls.Events.FRAG_LOADED,(_event,data)=>reportTransfer('segment',data.frag?.stats));
-            player.on(Hls.Events.MANIFEST_LOADED,(_event,data)=>reportTransfer('manifest',data.stats));
-            player.on(Hls.Events.LEVEL_LOADED,(_event,data)=>reportTransfer('manifest',data.stats));
+            player.on(Hls.Events.FRAG_LOADED,(_event,data)=>reportTransfer('segment',data.frag?.stats,data.networkDetails));
+            player.on(Hls.Events.MANIFEST_LOADED,(_event,data)=>reportTransfer('manifest',data.stats,data.networkDetails));
+            player.on(Hls.Events.LEVEL_LOADED,(_event,data)=>reportTransfer('manifest',data.stats,data.networkDetails));
         }
         let movieRecovery=false;
         const primeLive=liveMode&&!local;
-        if(primeLive){
+        const primeMovie=!liveMode&&Boolean(activeMedia.cinema);
+        if(primeLive||primeMovie){
             v.autoplay=false;
             let started=false, fallback;
             const begin=()=>{
@@ -1681,7 +1691,7 @@ function play(url,media=null,continuing=false){
                 if(generation!==playbackGeneration||activeMedia.ejecting)return;
                 if(activeMedia.deferDecode)player.attachMedia(v);
                 player.startLoad(liveMode?-1:activeMedia.resumeAt||0);
-                if(!primeLive)start();
+                if(!primeLive&&!primeMovie)start();
             };
             if(activeMedia.deferDecode&&activeMedia.transportPending){
                 // Let WebKitGTK paint the cleared deck before it creates the GStreamer video sink.
@@ -1694,7 +1704,7 @@ function play(url,media=null,continuing=false){
             }else loadMedia();
         });
         player.on(Hls.Events.ERROR,(_event,data)=>{
-            if(document.documentElement.hasAttribute('data-tester')){
+            if(generation===playbackGeneration){
                 const status=Number(data?.response?.code);
                 const kind=data.frag?'segment':/^(manifest|level|audioTrack|subtitleTrack)Load/i.test(data.details||'')?'manifest':'other';
                 window.dispatchEvent(new CustomEvent('cf-tester-stream-error',{detail:{status:Number.isInteger(status)?status:0,kind}}));
@@ -1713,8 +1723,8 @@ function play(url,media=null,continuing=false){
             }
             if(data.type===Hls.ErrorTypes.MEDIA_ERROR&&!movieRecovery){movieRecovery=true;player.recoverMediaError();return}
             const status=Number(data.response?.code||0);
-            if(data.type===Hls.ErrorTypes.NETWORK_ERROR&&(!status||[404,408,410,429].includes(status)||status>=500)
-                    &&recoverMovie(status===404||status===410))return;
+            const retryableNetwork=data.type===Hls.ErrorTypes.NETWORK_ERROR&&(!status||[404,408,410,429].includes(status)||status>=500);
+            if((retryableNetwork||data.type===Hls.ErrorTypes.MEDIA_ERROR)&&recoverMovie(status===404||status===410))return;
             setPlayerState('COULD NOT PLAY THIS MOVIE',true);
         });
         player.loadSource(source);if(!activeMedia.deferDecode)player.attachMedia(v);
@@ -1743,7 +1753,23 @@ function minimizePlayer(){
     document.body.classList.add('has-mini-player');
     showScreen('live');dockMiniPlayer();setPlayerState('MINI PLAYER · BROWSE THE GUIDE');
 }
-function stopPlayer(){liveMode=false;playerMini=false;setGuideAudio(false);activeStreamUrl='';activeMedia=null;let v=$('#player');v.classList.remove('playing','mini');v.pause();if(hls){hls.destroy();hls=null}v.removeAttribute('src');v.load();setBuffering(false);document.body.classList.remove('has-mini-player');$('#close').classList.remove('show');updateTunedIndicator(null);renderLiveGuide()}
+function stopPlayer(){
+    playbackGeneration++;
+    clearTimeout(liveRetryTimer);liveRetryTimer=null;
+    clearTimeout(liveBoundaryTimer);
+    clearTimeout(playbackTimer);playbackTimer=null;
+    clearCinemaTape();
+    restoreCinemaWindow();
+    const shell=ensurePlayerShell();
+    document.body.append(shell);shell.className='mini-player-shell';
+    document.body.classList.remove('player-controls-hidden');
+    liveMode=false;playerMini=false;setGuideAudio(false);activeStreamUrl='';activeMedia=null;
+    const v=$('#player');v.classList.remove('playing','mini');v.pause();
+    if(hls){hls.destroy();hls=null}
+    v.removeAttribute('src');v.load();setBuffering(false);
+    document.body.classList.remove('has-mini-player');$('#close').classList.remove('show');
+    updateTunedIndicator(null);renderLiveGuide();
+}
 {
     const video=$('#player');
     video.addEventListener('seeking',()=>liveEdge(video));
@@ -1833,9 +1859,10 @@ function stopPlayer(){liveMode=false;playerMini=false;setGuideAudio(false);activ
 $('#scan-channels').onclick=()=>scanChannels();
 $('#guide-search').oninput=event=>{guideSearch=event.target.value;renderLiveGuide()};
 $('#guide-sort').onchange=renderLiveGuide;
-$('#guide-earlier').onclick=()=>{guideWindowOffset=Math.max(-1,guideWindowOffset-1);renderLiveGuide()};
+$('#guide-layout').onclick=()=>{fullGuide=!fullGuide;guideWindowOffset=0;renderLiveGuide()};
+$('#guide-earlier').onclick=()=>{fullGuide=true;guideWindowOffset=Math.max(-1,guideWindowOffset-1);renderLiveGuide()};
 $('#guide-now').onclick=()=>{guideWindowOffset=0;renderLiveGuide()};
-$('#guide-later').onclick=()=>{guideWindowOffset=Math.min(4,guideWindowOffset+1);renderLiveGuide()};
+$('#guide-later').onclick=()=>{fullGuide=true;guideWindowOffset+=1;renderLiveGuide()};
 $('#movie-search').oninput=event=>{vaultSearch=event.target.value;clearTimeout(vaultSearchTimer);vaultSearchTimer=setTimeout(changeMovieFilters,250)};
 $('#movie-genre').onchange=event=>{vaultGenre=event.target.value;changeMovieFilters(true)};
 $('#movie-rating').onchange=event=>{vaultRating=event.target.value;changeMovieFilters(true)};
@@ -2081,24 +2108,135 @@ document.addEventListener('visibilitychange',startTvGamepads);
 startTvGamepads();
 '''
 HOME_DETAILS = r'''
-<section class="home-destinations" data-section-block="home" aria-label="Watch">
-  <a class="home-destination" href="?screen=live" data-screen="live"><i aria-hidden="true">▣</i><span><strong>Live TV Guide</strong><small>See what’s on now and browse upcoming programs.</small></span><b aria-hidden="true">›</b></a>
-  <a class="home-destination" href="?screen=cinema" data-screen="cinema"><i aria-hidden="true">▶</i><span><strong>Rewind Cinema</strong><small>Explore movies from connected studios and community libraries.</small></span><b aria-hidden="true">›</b></a>
-</section>
-<section class="home-panels" data-section-block="home">
-  <article class="home-card"><div class="release-heading"><div><span class="eyebrow">LATEST UPDATE</span><h3>Release notes</h3></div><strong id="home-release-version">v__VERSION__</strong></div><p id="home-update-state">Checking the official release…</p><div id="home-changelog" class="home-changelog">Loading changelog…</div></article>
-  <article class="home-card"><h3 class="eyebrow">QUICK ACTIONS</h3><div class="quick-actions">
-    <a href="?screen=favorites" data-screen="favorites"><i aria-hidden="true">☆</i><span><strong>Favorites</strong><small>Your saved channels</small></span></a>
-    <a href="?screen=continue" data-screen="continue"><i aria-hidden="true">▷</i><span><strong>Continue Watching</strong><small>Pick up where you left off</small></span></a>
-    <a href="?screen=updates" data-screen="updates"><i aria-hidden="true">↓</i><span><strong>Updates</strong><small>Check for the latest version</small></span></a>
-    <button type="button" id="home-display"><i aria-hidden="true">⛶</i><span><strong>Fullscreen</strong><small>Switch the display mode</small></span></button>
-  </div></article>
-</section>'''.replace("__VERSION__", VERSION)
+<section class="home-shelf" id="home-on-now" data-section-block="home"><h2>On Now</h2><div class="home-shelf-items"></div></section>
+<section class="home-shelf" id="home-rewind" data-section-block="home"><h2>From Rewind Cinema</h2><div class="home-shelf-items"></div></section>
+<section class="home-personal" id="home-personal" data-section-block="home" aria-label="Your viewing shortcuts"></section>
+<details class="home-release" data-section-block="home"><summary>Release notes <span id="home-release-version">v__VERSION__</span></summary>
+  <p id="home-update-state"></p><div id="home-changelog" class="home-changelog">Loading changelog…</div>
+  <button type="button" id="home-display">Fullscreen</button>
+</details>'''.replace("__VERSION__", VERSION)
 CINEMA_STAGE_HTML = r'''<section class="cinema-stage" data-section-block="cinema" hidden>
   <div class="cinema-hero"><h2><span>REWIND</span> <em>CINEMA</em></h2></div>
 </section>'''
-CINEMA_STUDIOS_HTML = r'''<section class="cinema-studios" data-section-block="cinema" hidden><h2>Creator studios</h2><div id="creators" class="creators"><span class="empty">Scanning studios…</span></div></section>'''
 SCREEN_NAV_JS = r'''
+let homeProgramKey='', homeMovieUrl='', homeMovieRequest=null, homePersonalKey='', homeHistoryLoaded=false;
+function renderHomePersonal(){
+    const recent=movieHistory().find(entry=>entry.movie?.stream_url&&Number(entry.resumeAt)>0);
+    const favorite=liveChannels.find(channel=>favoriteChannels.has(channel.stream_url));
+    const key=JSON.stringify([recent?.movie.stream_url,recent?.resumeAt,favorite?.stream_url,favorite?.name]);
+    if(key===homePersonalKey)return;
+    homePersonalKey=key;
+    const panel=$('#home-personal');
+    panel.replaceChildren();
+    if(recent){
+        const resume=document.createElement('button');
+        resume.type='button';
+        resume.innerHTML='<small>Continue Watching</small><b>'+esc(recent.movie.title)+'</b><span>Resume at '+formatDuration(recent.resumeAt*1000)+'</span>';
+        resume.onclick=()=>showWatchListOptions(recent.movie,recent.resumeAt,resume);
+        panel.append(resume);
+    }
+    if(favorite){
+        const watch=document.createElement('button');
+        watch.type='button';
+        watch.innerHTML='<small>Favorite Channel</small><b>'+esc(favorite.name)+'</b><span>Watch live</span>';
+        watch.onclick=()=>watchHomeChannel(favorite);
+        panel.append(watch);
+    }
+}
+function homeProgress(program,now){
+    const start=Date.parse(program?.start), stop=Date.parse(program?.stop);
+    return stop>start?'<progress aria-label="Program progress" max="100" data-start="'+start+'" data-stop="'+stop+'" value="'+programProgress(program,now)+'"></progress>':'';
+}
+setInterval(()=>{
+    if(document.hidden||!document.body.classList.contains('home-mode'))return;
+    const now=Date.now();
+    document.querySelectorAll('.home-feature progress,#home-on-now progress').forEach(progress=>{
+        const start=Number(progress.dataset.start),stop=Number(progress.dataset.stop);
+        progress.value=Math.max(0,Math.min(100,100*(now-start)/(stop-start)));
+    });
+},15000);
+function watchHomeChannel(channel){
+    showScreen('live');
+    tuneGuideChannel(channel);
+}
+function renderHome(){
+    renderHomePersonal();
+    if(!homeHistoryLoaded){
+        homeHistoryLoaded=true;
+        renderContinueWatching().then(renderHomePersonal);
+    }
+    const now=Date.now(), featured=liveChannels.slice(0,6).map(channel=>[channel,programAt(channel,now)]);
+    const key=JSON.stringify(featured.map(([channel,program])=>[channel.stream_url,channel.name,program?.title,program?.start,program?.stop,channelArt(channel,program)]));
+    const liveShelf=$('#home-on-now .home-shelf-items');
+    if(key!==homeProgramKey){
+        homeProgramKey=key;
+        const pick=featured.find(([,program])=>program)||featured[0];
+        const feature=$('#home-spotlight .home-feature');
+        feature.classList.toggle('home-feature-empty',!pick);
+        if(pick){
+            const [channel,program]=pick, art=channelArt(channel,program);
+            feature.innerHTML=(art?'<img class="home-feature-art" alt="" src="'+esc(art)+'">':'')
+                +'<div class="home-feature-copy"><span class="home-live-label">LIVE NOW</span><h2 title="'+esc(program?.title||channel.name)+'">'+esc(programSeries(program)||channel.name)+'</h2><p>'
+                +esc(channel.name)+' · CH '+esc(channel.number||'—')+'</p>'+homeProgress(program,now)
+                +'<div class="home-feature-actions"><button type="button" class="home-watch">▶ Watch Live</button><button type="button" class="home-open-guide">Open Guide</button></div></div>';
+            feature.querySelector('.home-watch').onclick=()=>watchHomeChannel(channel);
+            watchArtwork(feature.querySelector('img'),channel.logo_url);
+        }else{
+            feature.innerHTML='<div class="home-feature-copy"><h2>Live TV</h2><p>No channels are online right now.</p>'
+                +'<div class="home-feature-actions"><button type="button" class="home-open-guide">Open Guide</button><button type="button" class="home-open-cinema">Browse Rewind Cinema</button></div></div>';
+            feature.querySelector('.home-open-cinema').onclick=()=>showScreen('cinema');
+        }
+        feature.querySelector('.home-open-guide').onclick=()=>showScreen('live');
+        liveShelf.innerHTML=featured.map(([channel,program],index)=>{
+            const art=channelArt(channel,program);
+            return '<button type="button" data-home-channel="'+index+'"><span class="home-channel-image">'+(art?'<img src="'+esc(art)+'" alt="" loading="lazy">':'')+'</span>'
+                +'<span class="home-channel-copy"><b>'+esc(channel.name)+'</b><small>'+esc(programSeries(program)||'CH '+(channel.number||'—'))+'</small>'+homeProgress(program,now)+'</span></button>';
+        }).join('');
+        $('#home-on-now').classList.toggle('home-shelf-empty',!featured.length);
+        liveShelf.querySelectorAll('button').forEach(button=>{
+            const channel=featured[Number(button.dataset.homeChannel)][0];
+            watchArtwork(button.querySelector('img'),channel.logo_url);
+            button.onclick=()=>watchHomeChannel(channel);
+        });
+    }
+    const movies=$('#home-rewind .home-shelf-items'), creator=allCreators.find(supportsCinema);
+    const address=creator?.vault_url||'';
+    if(homeMovieUrl===address&&(address||movies.innerHTML))return;
+    homeMovieUrl=address;
+    homeMovieRequest?.abort();
+    $('#home-rewind h2').textContent='From Rewind Cinema';
+    movies.innerHTML='';
+    const browse=document.createElement('button');
+    browse.type='button';browse.className='home-movie-browse';browse.textContent='Browse Rewind Cinema ›';
+    browse.onclick=()=>showScreen('cinema');movies.append(browse);
+    if(!creator)return;
+    const controller=new AbortController();homeMovieRequest=controller;
+    const url=new URL(address);url.searchParams.set('limit','3');url.searchParams.set('sort','added');
+    const timer=setTimeout(()=>controller.abort(),8000);
+    json(url.href,false,controller.signal).then(value=>{
+        if(controller.signal.aborted||homeMovieUrl!==address)return;
+        const picks=movieRecords(creator,value).slice(0,3);
+        if(picks.length&&picks.every(movie=>Number(movie.added_at)>0))$('#home-rewind h2').textContent='Recently Added to Rewind';
+        for(const movie of picks){
+            const tape=document.createElement('button'), art=movie.thumbnail_url||movie.poster_url;
+            tape.type='button';tape.className='home-movie';
+            tape.innerHTML='<span class="home-tape-face">'+(art?'<img src="'+esc(art)+'" alt="" loading="lazy">':'')
+                +'<b>'+esc(movie.title)+'</b><small>VHS</small></span>';
+            watchArtwork(tape.querySelector('img'),movie.full_poster_url);
+            tape.onclick=async()=>{
+                selectedCreator=creator;
+                const loading=studio(creator);
+                showScreen('cinema');
+                await loading;
+                if(creator===selectedCreator&&document.body.classList.contains('cinema-mode')){
+                    selectTape(movie,null);
+                    $('#selected-play')?.focus();
+                }
+            };
+            movies.insertBefore(tape,browse);
+        }
+    }).catch(()=>{}).finally(()=>clearTimeout(timer));
+}
 function showScreen(name){
     if(!document.querySelector('[data-section-block="'+CSS.escape(name)+'"]'))name='home';
     const previousFocus=document.activeElement;
@@ -2110,11 +2248,16 @@ function showScreen(name){
         else link.removeAttribute('aria-current');
     });
     document.body.classList.toggle('guide-mode',name==='live');
+    document.body.classList.toggle('home-mode',name==='home');
     document.body.classList.toggle('cinema-mode',name==='cinema');
+    document.body.classList.remove('guide-menu-open');
+    if(name==='home')renderHome();
     if(name==='live')renderLiveGuide();
     if(name==='continue')renderContinueWatching();
     if(name==='cinema'&&selectedCreator)studio(selectedCreator);
     if(innerWidth<=900&&!document.documentElement.hasAttribute('data-tester'))document.body.classList.remove('menu-open');
+    $('#menu-toggle').setAttribute('aria-expanded',String(name!=='live'&&(innerWidth<=900
+        ? document.body.classList.contains('menu-open'):!document.body.classList.contains('menu-collapsed'))));
     window.scrollTo(0,0);
     document.querySelector('main.wrap').scrollTop=0;
     if(previousFocus?.closest('[data-section-block][hidden]')){
@@ -2143,45 +2286,149 @@ VIEWER_NAV_CSS = r'''
 HTML = HTML.replace("</style><header>", f"</style><style>{SIDEBAR_CSS}{GUIDE_CSS}{GUIDE_STAGE_CSS}{HOME_CSS}{VAULT_CSS}{TAPE_DETAIL_CSS}{TV_OVERHAUL_CSS}{LIVE_ARTWORK_CSS}{FILTER_CSS}{PLAYER_DOCK_CSS}{VIEWER_NAV_CSS}</style><header>")
 HTML = HTML.replace('<small id="update-bytes"></small>', '<small id="update-bytes"></small><textarea id="update-command" aria-label="Install command" rows="4" style="width:100%;margin-top:10px" readonly hidden></textarea>', 1)
 HTML = HTML.replace('<header><div class="brand-lockup">', '<header><button id="menu-toggle" class="hamburger" aria-label="Open navigation">☰</button><div class="brand-lockup">')
+HTML = HTML.replace('<h1>CHANNELFORGE TV</h1>', '<h1>ChannelForge TV</h1>', 1)
 HTML = HTML.replace('<span class="tag">REWIND CINEMA</span>', '<a class="tag" href="?screen=cinema" data-screen="cinema">▶ &nbsp; REWIND CINEMA</a>', 1)
 HTML = HTML.replace('</header><aside id="update-panel"', f'</header>{SIDEBAR_HTML.replace("__VERSION__", VERSION)}<aside id="update-panel"')
-HTML = HTML.replace('<section class="hero">', '<section class="hero" data-section-block="home">', 1)
-HTML = HTML.replace('COMMUNITY CHANNELS • ON DEMAND', 'WELCOME TO CHANNELFORGE TV', 1)
-HTML = HTML.replace('Turn the dial.<br>Find something unforgettable.', 'Live channels.<br>One community dial.', 1)
-HTML = HTML.replace('Jump into live creator channels or browse every connected movie shelf from one cinematic TV interface.', 'Watch community-created live channels and explore shared movie collections.', 1)
+HTML = re.sub(r'<section class="hero">.*?</section>',
+              '<section id="home-spotlight" data-section-block="home"><div class="home-feature"></div></section>', HTML, count=1)
 HTML = HTML.replace('</section><div class="section-heading"><h2>CREATOR STUDIOS', f'</section>{HOME_DETAILS}<div class="section-heading"><h2>CREATOR STUDIOS', 1)
 HTML = HTML.replace('<div class="section-heading"><h2>CREATOR STUDIOS', '<div class="section-heading" data-section-block="cinema" hidden><h2>CREATOR STUDIOS', 1)
 HTML = HTML.replace('<div id="creators" class="creators">', '<div id="creators" class="creators" data-section-block="cinema" hidden>', 1)
 HTML = HTML.replace('<div class="section-heading"><h2 class="cyan">LIVE CHANNELS', '<div class="section-heading" data-section-block="live" hidden><h2 class="cyan">LIVE CHANNELS', 1)
 HTML = HTML.replace('<div id="live" class="live"></div>', '<section id="live-stage" class="live-stage" data-section-block="live" hidden><div id="mini-player-slot" class="mini-player-slot"><div id="mini-player-poster" class="mini-player-poster"><span>SELECT A CHANNEL FROM THE GUIDE</span></div></div><div id="live" class="live"></div></section><div class="guide-toolbar" data-section-block="live" hidden><button id="scan-channels">↻ SCAN CHANNELS</button><span id="scan-status">Channels scan automatically.</span><div class="guide-window-controls"><button id="guide-earlier">‹ EARLIER</button><button id="guide-now">NOW</button><button id="guide-later">LATER ›</button><b id="guide-window-label">ON NOW</b></div><label>⌕ <input id="guide-search" type="search" placeholder="Search guide"></label></div><div id="studio-filters" class="studio-filters" data-section-block="live" hidden></div><div id="guide-board" data-section-block="live" hidden><div id="guide-times" class="guide-times"></div><div id="tv-guide" class="tv-guide"></div></div>', 1)
-HTML = HTML.replace('placeholder="Search guide"></label></div>', 'placeholder="Search guide"></label><select id="guide-sort" aria-label="Sort live channels"><option value="channel">Channel order</option><option value="rating">Rating · lowest first</option></select></div>', 1)
+HTML = HTML.replace('placeholder="Search guide"></label></div>', 'placeholder="Search guide"></label><select id="guide-sort" aria-label="Sort live channels"><option value="channel">Channel order</option><option value="rating">Rating · lowest first</option></select><button type="button" id="guide-layout">Full Guide</button></div>', 1)
+HTML = HTML.replace('<div id="guide-times"', '<div id="compact-guide-head" class="compact-guide-head"><span>Channel</span><span>On Now</span><span>Up Next</span><span>Later</span><span></span></div><div id="guide-times"', 1)
 HTML = HTML.replace('</head>', '<style>#guide-sort{max-width:100%;padding:8px 10px;color:#eaf7ff;background:#0a1024;border:1px solid #22e7ff;border-radius:8px;font:inherit}.guide-toolbar{flex-wrap:wrap}.guide-station .station-rating{color:#8deaff}</style></head>', 1)
 HTML = HTML.replace('<div class="section-heading"><h2 class="pink">REWIND CINEMA', '<div class="section-heading" data-section-block="cinema" hidden><h2 class="pink">REWIND CINEMA', 1)
 HTML = HTML.replace('<div class="section-heading" data-section-block="cinema" hidden><h2>CREATOR STUDIOS</h2><small>Choose a studio to tune its channels and movies</small></div><div id="creators" class="creators" data-section-block="cinema" hidden><span class="empty">Connecting to the public directory…</span></div>', '', 1)
-HTML = HTML.replace('<section id="tuned-channel"', f'{CINEMA_STUDIOS_HTML}<section id="tuned-channel"', 1)
 HTML = HTML.replace('<div class="section-heading" data-section-block="cinema" hidden><h2 class="pink">REWIND CINEMA</h2><small>BROWSE THE MOVIE SHELF</small></div>', CINEMA_STAGE_HTML, 1)
 HTML = HTML.replace('<nav class="categories">', '<nav class="categories" data-section-block="cinema" hidden>', 1)
 HTML = HTML.replace('<div class="vault-layout">', '<div class="vault-layout" data-section-block="cinema" hidden>', 1)
 HTML = HTML.replace('<nav class="categories" data-section-block="cinema" hidden><span>CONTINUE WATCHING</span><span>80S BLOCKBUSTERS</span><span>90S ESSENTIALS</span><span>CREATOR PICKS</span></nav>', '<nav class="movie-tools" data-section-block="cinema" hidden><div class="movie-decades"><button class="active" data-movie-filter="all">ALL</button><button data-movie-filter="60s">60S</button><button data-movie-filter="70s">70S</button><button data-movie-filter="80s">80S</button><button data-movie-filter="90s">90S</button><button data-movie-filter="2000s">2000S</button><button data-movie-filter="recent">2010+</button></div><label class="movie-search-wrap">⌕<input id="movie-search" class="movie-search" type="search" placeholder="Search title, genre, description…"></label><select id="movie-genre" aria-label="Filter by genre"><option value="all">ALL GENRES</option></select><select id="movie-rating" aria-label="Filter by rating"><option value="all">ALL RATINGS</option></select><select id="movie-sort" aria-label="Sort movies"><option value="title">A–Z</option><option value="newest">NEWEST</option><option value="oldest">OLDEST</option></select><span id="movie-count"></span></nav>', 1)
-HTML = HTML.replace('<div class="movie-decades">', '<select id="cinema-studio-select" aria-label="Creator studio" disabled></select><div class="movie-decades">', 1)
+HTML = HTML.replace('<div class="movie-decades">', '<select id="cinema-studio-select" aria-label="Movie studio" disabled hidden></select><div class="movie-decades">', 1)
 HTML = HTML.replace('<button id="update" class="update">', '<button id="desktop-fullscreen" type="button" aria-pressed="false" aria-label="Enter fullscreen (F11)" title="Enter fullscreen (F11)">⛶</button><button id="update" class="update">', 1)
 HTML = HTML.replace('</main><video id="player"', f'{EXTRA_SCREENS}</main><aside id="player-hud" class="player-hud" hidden></aside><aside id="player-bug" class="player-bug" hidden></aside><div id="player-buffer" class="player-buffer" role="status" aria-live="polite" hidden><span class="buffer-spinner" aria-hidden="true"></span><b></b><small></small></div><dialog id="program-dialog" class="program-dialog"><button class="program-close" onclick="this.closest(\'dialog\').close()">×</button><div id="program-dialog-body" class="program-dialog-body"></div></dialog><video id="player"', 1)
 HTML = HTML.replace("let playbackGeneration=0", PLAYER_DOCK_JS + "\nlet playbackGeneration=0", 1)
-HTML = HTML.replace("function stopPlayer(){liveMode=false;", "function stopPlayer(){++playbackGeneration;clearTimeout(liveRetryTimer);liveRetryTimer=null;clearTimeout(liveBoundaryTimer);clearTimeout(playbackTimer);playbackTimer=null;clearCinemaTape();restoreCinemaWindow();let shell=ensurePlayerShell();document.body.append(shell);shell.className='mini-player-shell';document.body.classList.remove('player-controls-hidden');liveMode=false;", 1)
 HTML = HTML.replace("async function checkUpdate(onLaunch=false)", SCREEN_NAV_JS + "\nasync function checkUpdate(onLaunch=false)", 1)
 HTML = HTML.replace("b.onclick=()=>studio(c)", "b.onclick=()=>{studio(c);showScreen('cinema')}", 1)
-HTML = HTML.replace("$('#close').onclick", "ensurePlayerShell();$('#menu-toggle').onclick=()=>{if(innerWidth<=900)document.body.classList.toggle('menu-open');else document.body.classList.toggle('menu-collapsed')};document.querySelectorAll('[data-screen]').forEach(button=>button.onclick=event=>{event.preventDefault();const screen=button.dataset.screen;showScreen(screen);if(screen==='updates')checkUpdate(false)});$('#screen-check-update').onclick=()=>checkUpdate(false);$('#close').onclick", 1)
+HTML = HTML.replace("$('#close').onclick", "ensurePlayerShell();$('#menu-toggle').onclick=()=>{if(document.body.classList.contains('guide-mode')){$('#menu-toggle').setAttribute('aria-expanded',String(document.body.classList.toggle('guide-menu-open')));return}if(innerWidth<=900)document.body.classList.toggle('menu-open');else document.body.classList.toggle('menu-collapsed');$('#menu-toggle').setAttribute('aria-expanded',String(innerWidth<=900?document.body.classList.contains('menu-open'):!document.body.classList.contains('menu-collapsed')))};document.addEventListener('click',event=>{const button=event.target.closest('[data-screen]');if(!button)return;event.preventDefault();const screen=button.dataset.screen;showScreen(screen);if(screen==='updates')checkUpdate(false)});$('#screen-check-update').onclick=()=>checkUpdate(false);$('#close').onclick", 1)
 HTML = HTML.replace("$('#update').onclick=()=>checkUpdate(false)", "$('#update').onclick=()=>{showScreen('updates');checkUpdate(false)}", 1)
 HTML = HTML.replace("load();checkUpdate(true);", CONTROLLER_JS + "\nload();showScreen(new URLSearchParams(location.search).get('screen')||'home');checkUpdate(true);", 1)
 HTML = HTML.replace('</head>', '<style>.retry-stream{margin-left:7px;padding:4px 9px;color:#fff;background:#131838;border:1px solid #26dffa;border-radius:5px;cursor:pointer}</style></head>', 1)
 HTML = HTML.replace("OPEN VERIFIED UPDATE", "RESTART & INSTALL UPDATE").replace("Opening the verified update…", "Restarting to install the verified update in place…")
 HTML = HTML.replace("</head>", f"<style>{GUIDE_LAYOUT_CSS}</style></head>", 1)
+HTML = HTML.replace("</head>", r'''<style>
+.home-mode{--home-sidebar:clamp(210px,17.15vw,286px);background:#090f1c}
+.home-mode.menu-collapsed{--home-sidebar:68px}
+.home-mode>header{height:82px;gap:23px;border-bottom:1px solid #2f3b50;background:#0a111e;box-shadow:none}
+.home-mode .hamburger{min-width:59px;min-height:54px;padding:8px 10px;color:#02e9f7;border:2px solid #03dbea;background:#091622;box-shadow:0 0 16px #00e8f629}
+.home-mode .brand-lockup{gap:17px;padding-left:20px;border-left:1px solid #8794a4}
+.home-mode .brand-lockup img{width:48px;height:48px;filter:none}
+.home-mode .brand-lockup>div{padding-left:16px;border-left:1px solid #8794a4}
+.home-mode .brand-lockup h1{color:#f7f8ff;font:750 clamp(18px,2vw,32px)/1.2 "Segoe UI",sans-serif;letter-spacing:0;text-transform:none}
+.home-mode .brand-lockup small,.home-mode header .tag,.home-mode header .update,.home-mode header .display-mode{display:none}
+.home-mode .app-sidebar{top:82px;width:var(--home-sidebar);padding:clamp(14px,2vw,32px) 12px;border-right:1px solid #2f3b50;background:#0a111f}
+.home-mode .app-sidebar .nav-group,.home-mode .tuned-channel,.home-mode .sidebar-footer{display:none}
+.home-mode .app-sidebar nav{gap:7px}
+.home-mode .app-sidebar nav>a{min-height:clamp(46px,4.2vw,70px);grid-template-columns:32px minmax(0,1fr);gap:clamp(4px,1vw,16px);padding:9px 11px;border:0;border-left:5px solid transparent;border-radius:10px;color:#f4f6fc;font-size:clamp(14px,1.4vw,23px);font-weight:750}
+.home-mode .app-sidebar nav>a i{font-size:1.27em;color:#f3f7ff;text-shadow:none}
+.home-mode .app-sidebar nav>a[data-screen=continue] .menu-label{font-size:.87em}
+.home-mode .app-sidebar nav>a[aria-current=page]{background:#222b3a;border-left-color:#00ecff;box-shadow:none}
+.home-mode.menu-collapsed .app-sidebar nav>a{grid-template-columns:1fr;padding-inline:5px}
+.home-mode main.wrap{margin:0 0 0 var(--home-sidebar);max-width:none;padding:0 0 30px;background:#090f1c;min-height:calc(100vh - 82px)}
+#home-spotlight{position:relative;isolation:isolate;display:grid;align-items:center;margin:0;min-height:clamp(280px,22.2vw,415px);overflow:hidden;background:#0b1221}
+#home-spotlight[hidden]{display:none}
+.home-feature-art{position:absolute;inset:0 0 0 auto;width:78%;height:100%;object-fit:cover;object-position:center 36%;z-index:-2}
+.home-feature::before{content:"";position:absolute;inset:0;background:linear-gradient(90deg,#0a101d 3%,#0a101dfa 19%,#0a101dc9 31%,#0a101d28 58%,transparent 78%);z-index:-1}
+.home-feature-empty::before{background:radial-gradient(ellipse at 88% 35%,#302455,transparent 70%),linear-gradient(140deg,#101e33,#101122)}
+.home-feature-copy{padding:24px clamp(18px,3vw,48px);max-width:min(740px,77%);color:#f6f7fb}
+.home-live-label{display:inline-block;margin-bottom:6px;padding:3px 10px;border:2px solid #f234e7;border-radius:9px;background:#310e36;color:#fff4fe;font:850 italic clamp(12px,1.4vw,23px)/1.15 "Segoe UI",sans-serif}
+.home-feature-copy h2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin:0;color:#f8f5ef;font:900 italic clamp(30px,4.5vw,78px)/1.03 "Arial Narrow","Segoe UI",sans-serif;letter-spacing:-.035em;text-shadow:0 2px 14px #080913}
+.home-feature-copy p{margin:5px 0 13px;color:#a5b6d3;font:750 clamp(14px,1.6vw,26px)/1.2 "Segoe UI",sans-serif}
+.home-feature-actions{display:flex;flex-wrap:wrap;gap:clamp(8px,1.4vw,20px);margin-top:clamp(10px,2vw,28px)}
+.home-feature-copy button,.compact-actions button{padding:10px 13px;border:1px solid #37e8f7;background:#0d192b;border-radius:8px;color:#e9f6ff;font-weight:800}
+.home-feature-copy button{min-height:44px;padding:8px clamp(12px,2vw,30px);border:2px solid #50647d;border-radius:12px;background:#131b2cca;color:white;font-size:clamp(14px,1.6vw,25px)}
+.home-feature-copy .home-watch,.compact-actions button:last-child{border-color:#08e9f5;background:#08e9f5;color:#061525}
+.home-feature-copy .home-watch{box-shadow:0 0 24px #00e5ff56}
+.home-feature-copy progress,.home-channel-copy progress{display:block;width:min(405px,100%);height:8px;margin:0;border:0;border-radius:9px;background:#45566f;accent-color:#f338de;overflow:hidden}
+.home-feature-copy progress::-webkit-progress-bar,.home-channel-copy progress::-webkit-progress-bar{background:#45566f}
+.home-feature-copy progress::-webkit-progress-value,.home-channel-copy progress::-webkit-progress-value{border-radius:9px;background:#f338de}
+.home-shelf{margin:0;padding:10px clamp(12px,1.5vw,25px) clamp(10px,1.4vw,24px)}.home-shelf-empty{display:none}
+.home-shelf h2{display:flex;align-items:center;gap:13px;margin:0 0 12px;color:#f8f8fd;font:800 clamp(21px,2vw,34px)/1.15 "Segoe UI",sans-serif}
+.home-shelf h2::before{content:"";width:6px;height:.85em;border-radius:4px;background:#f338de}
+.home-shelf-items{display:grid;grid-auto-flow:column;grid-auto-columns:calc((100% - 24px)/3);gap:12px;overflow-x:auto;padding:4px 3px 11px;scroll-snap-type:x proximity;scrollbar-width:thin;scrollbar-color:#526682 #0b1424}
+.home-shelf button{display:flex;min-width:0;min-height:clamp(86px,7.8vw,135px);overflow:hidden;padding:0;text-align:left;border:2px solid #465772;border-radius:12px;background:linear-gradient(122deg,#121a29,#0c1421);color:#eff8ff;scroll-snap-align:start}
+.home-shelf button[data-home-channel="0"]{border-color:#e33cee}
+.home-channel-image{flex:0 0 48%;min-width:0;background:linear-gradient(135deg,#264058,#17162b)}
+.home-channel-image img{width:100%;height:100%;object-fit:cover;max-height:135px}
+.home-channel-copy{min-width:0;display:grid;align-content:center;flex:1;gap:clamp(4px,.5vw,8px);padding:7px clamp(7px,1vw,16px)}
+.home-channel-copy b,.home-channel-copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.home-channel-copy b{font-size:clamp(14px,1.45vw,24px)}.home-channel-copy small{color:#9fafd0;font-size:clamp(12px,1.15vw,19px);font-weight:700}
+.home-channel-copy progress{height:6px;margin:.4em 0 0;width:100%}
+.home-shelf .home-movie{position:relative;display:block;isolation:isolate;min-height:clamp(76px,6.8vw,118px);padding:19px 4px 4px;border:2px solid #b8956c;background:linear-gradient(#242733 0 10%,#090d13 10% 15%,#1e232e 15% 24%,#10121a 25%);box-shadow:inset 0 -2px 0 #765d47}
+.home-movie::before{content:"";position:absolute;top:4px;left:12%;right:12%;height:9px;border-radius:8px;background:linear-gradient(90deg,#a5a2a8 0 18%,#1c2530 19% 77%,#a5a2a8 78%);opacity:.62}
+.home-tape-face{position:absolute;inset:20px 4px 4px;display:flex;align-items:center;gap:7px;padding:6px;border-radius:4px;overflow:hidden;background:linear-gradient(120deg,#4b1737,#162746 90%)}
+.home-tape-face img{position:absolute;inset:0 0 0 auto;width:62%;height:100%;object-fit:cover;object-position:center 42%;opacity:.8}
+.home-tape-face b{z-index:1;max-width:77%;padding:6px 8px;border-left:5px solid #e23765;background:#f2d2a4;color:#0e1017;font:850 italic clamp(13px,1.55vw,25px)/1.12 "Arial Narrow","Segoe UI",sans-serif;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.home-tape-face small{position:absolute;right:7px;bottom:7px;padding:1px 4px;border:1px solid #d3b48f;border-radius:3px;background:#121118;color:#f4d8b4;font-weight:800}
+.home-shelf .home-movie-browse{min-height:44px;align-items:center;padding:7px 11px;align-self:center}
+.home-release{margin:8px clamp(12px,1.5vw,25px);padding:10px 0;color:#92a6c2;font-size:14px}.home-release summary{cursor:pointer}.home-release summary span{margin-left:8px;color:#5ce4f1}
+.home-personal:not(:empty){display:flex;flex-wrap:wrap;gap:12px;padding:0 clamp(12px,1.5vw,25px) 14px}
+.home-personal button{display:grid;gap:4px;min-width:min(220px,100%);padding:10px 13px;text-align:left;border:1px solid #405673;border-radius:9px;background:#111d2e;color:#f4f8ff}
+.home-personal small{color:#6feaff;font-weight:700}.home-personal span{color:#a4b7d1}.home-personal button:focus-visible{outline:2px solid #66f7ff;outline-offset:2px}
+.compact-program progress{display:block;accent-color:#41e3f2;height:7px}
+.guide-mode{background:#090f1c}
+.guide-mode header{height:82px;background:#0a111e;border-bottom:1px solid #2f3b50;box-shadow:none}
+.guide-mode .hamburger{color:#02e9f7;border:2px solid #03dbea;background:#091622}
+.guide-mode .brand-lockup h1{font:750 clamp(18px,2vw,32px)/1.2 "Segoe UI",sans-serif;letter-spacing:0;color:#f7f8ff}
+.guide-mode .brand-lockup small,.guide-mode header .tag,.guide-mode header .update,.guide-mode header .display-mode{display:none}
+.guide-mode .app-sidebar{top:82px;display:none;width:min(265px,85vw);z-index:8;box-shadow:10px 0 38px #0008}
+.guide-mode.guide-menu-open .app-sidebar{display:block;transform:none}
+.guide-mode.guide-menu-open .app-sidebar nav>a{grid-template-columns:26px minmax(0,1fr)}
+.guide-mode.guide-menu-open .app-sidebar .menu-label{display:block}
+.guide-mode main.wrap{margin:0;max-width:none;padding:16px clamp(10px,1vw,20px) 24px}
+.guide-mode .live-stage{grid-template-columns:minmax(240px,37.4%) minmax(0,1fr)}
+.guide-mode .guide-toolbar{gap:9px;padding:8px 4px;background:transparent;border:0;border-top:1px solid #34435b;border-bottom:1px solid #34435b;border-radius:0}
+.guide-mode .guide-toolbar button,.guide-mode #guide-sort{min-height:40px;font-size:clamp(13px,1.28vw,21px);text-transform:none}
+.guide-mode .guide-toolbar label{flex:1 1 145px;max-width:none;min-width:115px;margin-left:0}.guide-toolbar input{width:100%;min-width:0}
+.guide-mode #guide-layout{white-space:nowrap;border-color:#e33cee;color:#f9f3ff}
+.compact-guide-mode #scan-status,.compact-guide-mode #guide-window-label{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%)}
+.guide-mode .studio-filters{margin-bottom:5px;border-bottom:0}.guide-mode .studio-filters button{font-size:clamp(12px,1.18vw,18px)}
+#guide-board.compact-guide{border:0;background:transparent;box-shadow:none}
+#guide-board.compact-guide #guide-times,#compact-guide-head[hidden]{display:none}
+.compact-guide-head,.compact-guide-row{display:grid;grid-template-columns:minmax(194px,2.15fr) minmax(103px,1.28fr) minmax(80px,1fr) minmax(80px,1fr) minmax(104px,.94fr);gap:10px}
+.compact-guide-head{align-items:center;margin:0 0 10px;padding:9px 13px;border-radius:12px;background:#1b2a40;color:#c6d6ee;font-size:clamp(14px,1.45vw,23px);font-weight:750}
+.compact-guide-head span:first-child{padding-left:22px}
+#guide-board.compact-guide #tv-guide{display:grid;gap:9px;border-radius:0;background:transparent;padding:2px;max-height:none}
+.compact-guide-row{align-items:stretch;min-height:clamp(76px,6.35vw,113px);padding:5px 8px;border:2px solid #435672;border-radius:14px;background:#0b1422}
+.compact-guide-row.tuned,.compact-guide-row:focus-within{border-color:#07edfa;box-shadow:0 0 0 1px #0fddeb}
+.compact-station,.compact-actions{display:flex;align-items:center;gap:clamp(5px,1vw,17px);min-width:0}
+.compact-station{position:relative;border-right:1px solid #667893;padding-right:4px}
+.compact-channel-image{display:block;flex:0 0 min(52%,248px);height:100%;min-height:58px;overflow:hidden;border-radius:11px;background:linear-gradient(130deg,#1f364f,#1d1735)}
+.compact-channel-image img{width:100%;height:100%;max-height:97px;object-fit:cover}
+.compact-station-copy{display:grid;gap:3px;min-width:0;border-left:5px solid #ec4ad7;border-radius:4px;padding-left:clamp(4px,.75vw,10px)}
+.compact-station b,.compact-program b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:clamp(14px,1.6vw,27px)}
+.compact-station small{color:#b6cae8;font-size:clamp(12px,1.35vw,22px);line-height:1.1}
+.compact-favorite{align-self:start;margin-left:auto;border:0;background:transparent;color:#c2b5d5;padding:0 2px;font-size:17px}
+.compact-favorite[aria-pressed=true]{color:#ffe66d}
+.compact-program{display:grid;align-content:center;gap:6px;min-width:0;padding:5px 6px;text-align:left;border:0;border-radius:6px;background:transparent;color:#e9f2ff}
+.compact-program small{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+.compact-program progress{margin:3px 0;width:95%;height:clamp(5px,.7vw,13px);border:0;border-radius:8px;overflow:hidden;background:#4f6078}
+.compact-program progress::-webkit-progress-bar{background:#4f6078}.compact-program progress::-webkit-progress-value{background:#0cecf9;border-radius:8px}
+.compact-actions{justify-content:flex-end}.compact-actions button:last-child{padding:9px 11px;white-space:nowrap;border:2px solid #99b1cf;background:#111a28;color:#f4f8ff;font-size:clamp(13px,1.4vw,24px)}
+.compact-guide-row.tuned .compact-actions button,.compact-guide-row:focus-within .compact-actions button{border-color:#08e9f5;background:#08e9f5;color:#061525}
+.home-shelf button:focus-visible,.home-feature button:focus-visible,.compact-guide-row button:focus-visible{outline:2px solid #66f7ff;outline-offset:1px}
+@media(max-width:1000px){.compact-guide-head,.compact-guide-row{grid-template-columns:minmax(135px,1.75fr) minmax(94px,1.25fr) minmax(81px,1fr) auto}.compact-program:nth-child(4),.compact-guide-head span:nth-child(4){display:none}}
+@media(max-width:660px){.guide-mode .live-stage{grid-template-columns:1fr}.compact-guide-head{display:none}.compact-guide-row{grid-template-columns:minmax(0,1fr) auto}.compact-station{grid-column:1;border:0}.compact-actions{grid-column:2;grid-row:1}.compact-program:nth-child(2),.compact-program:nth-child(3){grid-column:1/-1}.compact-program small{position:static;width:auto;height:auto;clip-path:none;color:#7eeafa}.home-feature-copy h2{font-size:26px}}
+@media(max-width:900px){.home-mode>header{height:66px;gap:12px}.home-mode .hamburger{min-width:44px;min-height:44px}.home-mode .brand-lockup{padding-left:10px;gap:9px}.home-mode .brand-lockup>div{padding-left:9px}.home-mode .brand-lockup img{width:38px;height:38px}.home-mode .app-sidebar{top:66px;width:min(250px,84vw)}.home-mode main.wrap{margin-left:0}.home-shelf-items{grid-auto-columns:calc((100% - 12px)/2)}.home-feature-copy{max-width:85%}}
+@media(max-width:520px){.home-shelf-items{grid-auto-columns:76%}.home-feature-art{width:100%;opacity:.72}.home-feature-copy{max-width:100%}.home-feature::before{background:linear-gradient(90deg,#090f1ff2,#090f1f44),linear-gradient(0deg,#090f1fdb,transparent)}}
+</style></head>''', 1)
 HTML = HTML.replace("</head>", '<link rel="stylesheet" href="/cinema.css"></head>', 1)
 HTML = HTML.replace("</body>", '<script src="/playback-diagnostics.js"></script></body>', 1)
 HTML = HTML.replace('<span class="menu-label">Updates</span>', '<span class="menu-label">System</span>', 1)
 HTML = HTML.replace('<strong>Updates</strong>', '<strong>System</strong>', 1)
 HTML = HTML.replace('><h2>Updates</h2>', '><h2>System</h2>', 1)
-HTML = HTML.replace("function stopPlayer(){++playbackGeneration;", "function stopPlayer(){saveCurrentMovie();++playbackGeneration;", 1)
+HTML = HTML.replace("function stopPlayer(){++playbackGeneration;", "function stopPlayer(){window.dispatchEvent(new Event('cf-tester-stop'));saveCurrentMovie();++playbackGeneration;", 1)
 HTML = HTML.replace('<div id="tv-release-notes" class="home-changelog"></div>',
                     '<div id="tv-release-notes" class="home-changelog"></div>'
                     '<details class="playback-troubleshooting"><summary>Playback troubleshooting</summary>'
@@ -2214,7 +2461,6 @@ if TESTER_BUILD:
     HTML = HTML.replace('<div id="tv-release-notes" class="home-changelog"></div>',
                         '<div id="tv-release-notes" class="home-changelog"></div>'
                         '<a class="update" href="?screen=developer" data-screen="developer">Developer</a>', 1)
-    HTML = HTML.replace('<script src="/playback-diagnostics.js"></script>', '')
     HTML = HTML.replace("</main>", '<section data-section-block="developer" hidden><div class="screen-title">'
                         '<span class="eyebrow">APPLICATION</span><h2>Developer</h2><p>Private Tester build</p>'
                         '<a class="update" href="?screen=updates" data-screen="updates">Back to System</a></div>'
@@ -2223,8 +2469,6 @@ if TESTER_BUILD:
     HTML = HTML.replace("</body>", '<script src="/tester-updates.js"></script>'
                         '<script src="/tester-report-ui.js"></script></body>', 1)
     HTML = HTML.replace("</body>", '<script src="/tester-tools.js"></script></body>', 1)
-    HTML = HTML.replace("function stopPlayer(){saveCurrentMovie();",
-                        "function stopPlayer(){window.dispatchEvent(new Event('cf-tester-stop'));saveCurrentMovie();", 1)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -2313,15 +2557,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if self.headers.get("Range"):
                     headers["Range"] = self.headers["Range"]
                 with open_creator_stream(url, headers) as (response, final_url):
+                    from tester_diagnostics import playback_response_headers
+                    extra = playback_response_headers(response.headers)
                     if response.status >= 400:
-                        return self.send(response.status, json.dumps({"error": f"Creator returned HTTP {response.status}."}).encode(), "application/json")
+                        return self.send(response.status, json.dumps({"error": f"Creator returned HTTP {response.status}."}).encode(), "application/json", extra)
                     content_type = response.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip().lower()
                     if "mpegurl" in content_type or urlsplit(final_url).path.lower().endswith(".m3u8"):
                         manifest = response.read(2 * 1024 * 1024 + 1)
                         if len(manifest) > 2 * 1024 * 1024 or not manifest.decode("utf-8-sig").lstrip().startswith("#EXTM3U"):
                             raise ValueError("Creator returned an invalid HLS playlist.")
-                        return self.send(response.status, rewrite_stream_manifest(manifest, final_url), "application/vnd.apple.mpegurl")
-                    extra = {"Accept-Ranges": response.headers.get("Accept-Ranges", "bytes")}
+                        return self.send(response.status, rewrite_stream_manifest(manifest, final_url), "application/vnd.apple.mpegurl", extra)
+                    extra["Accept-Ranges"] = response.headers.get("Accept-Ranges", "bytes")
                     if response.headers.get("Content-Range"):
                         extra["Content-Range"] = response.headers["Content-Range"]
                     return self.send_stream(response, content_type, extra)

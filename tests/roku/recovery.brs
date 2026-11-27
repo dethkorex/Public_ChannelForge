@@ -173,6 +173,7 @@ sub main()
   m.insertMovie = focusTarget(false)
   m.moreMovies = focusTarget(false)
   m.homeMenu = focusTarget(false)
+  m.guideSchedule = focusTarget(false)
   m.guideSort = focusTarget(false)
   m.channels = focusTarget(false)
   m.channels.itemFocused = 0
@@ -189,6 +190,8 @@ sub main()
   verify(onKeyEvent("up", true) and m.guideSort.focused, "Up from the first channel reaches guide sorting")
   m.channels.focused = false
   verify(onKeyEvent("right", true) and m.updates.focused, "Right from guide sorting reaches System")
+  m.guideSort.focused = true
+  verify(onKeyEvent("left", true) and m.guideSchedule.focused, "Left from guide sorting reaches channel schedule")
   m.home.visible = true
   focusSystemButton()
   verify(m.homeUpdate.focused, "Closing System on Home restores focus to its entry")

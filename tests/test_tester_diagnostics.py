@@ -38,3 +38,13 @@ class TesterDiagnosticsTests(unittest.TestCase):
                 self.assertEqual(clean["delivery_route"], route)
         clean = diagnostics.clean_report({"platform": "fire-tv", "delivery_route": "https://private.example/stream"})
         self.assertNotIn("delivery_route", clean)
+
+    def test_only_known_numeric_response_headers_reach_viewer_reports(self):
+        headers = {"X-ChannelForge-Relay": "vps", "X-ChannelForge-Cache": "MISS",
+                   "X-ChannelForge-Upstream-Header-Time": "0.842", "X-ChannelForge-Studio-Response-Ms": "214",
+                   "Authorization": "private"}
+        self.assertEqual(diagnostics.playback_response_headers(headers),
+                         {key: value for key, value in headers.items() if key.startswith("X-ChannelForge-")})
+        self.assertEqual(diagnostics.playback_response_headers({
+            "X-ChannelForge-Relay": "https://private.example", "X-ChannelForge-Cache": "unknown",
+            "X-ChannelForge-Upstream-Header-Time": "nan", "X-ChannelForge-Studio-Response-Ms": "0\r\nSet-Cookie:"}), {})

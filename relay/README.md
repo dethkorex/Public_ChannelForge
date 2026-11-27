@@ -89,6 +89,8 @@ For direct HTTPS, pass `--listen-port 443 --certificate /path/to/fullchain.pem -
 
 Each scoped URL uses its own loopback tunnel and cache namespace. Use the identical `https://relay.example.org/studio/<slot>` base in the enrollment profile. Existing root-only routes such as `studio-a.example.org:18091` are also supported.
 
+Playback diagnostics use a fresh playback ID for each tune or movie. Retries keep the same ID so a viewer report can be matched to Studio's local manifest trace. The relay reports cache status and time waiting for upstream response headers. Studio reports time spent preparing its response. Viewer reports also capture transfer times and rebuffering. Cache hits do not count toward upstream or Studio timing. The maximum times can come from separate requests, so compare them as clues about each stage. Roku reports player progress and buffer time, which can be matched to Studio by playback ID.
+
 ### Keep the relay running on Ubuntu
 
 Use DNS-only records pointing to the VPS for pilot Studio hostnames. Obtain a trusted certificate that covers those hostnames before starting the HTTPS listener. With NGINX installed and the generated configuration at `/etc/channelforge-relay/nginx.conf`, install the service:

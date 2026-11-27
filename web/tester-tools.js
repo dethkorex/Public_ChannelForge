@@ -5,10 +5,7 @@
     const timeline = [];
     const headers = {'Content-Type':'application/json', 'X-ChannelForge-Tester':'desktop'};
     let tracking = false, platform, version, revision;
-    let loadStart = null, firstFrame = null, stallStart = null, stallMs = 0, stalls = 0;
-    let httpError = 0, httpResource, lastPlayback;
-    let segmentLoads = 0, segmentErrors = 0, manifestErrors = 0;
-    let segmentMs = 0, segmentBytes = 0, slowestSegment = 0, slowestManifest = 0;
+    let lastPlayback;
 
     function record(kind) {
         if (!tracking) return;
@@ -16,92 +13,20 @@
         timeline.push({kind, ms:Math.round(performance.now())});
     }
 
-    function finishStall() {
-        if (stallStart === null) return;
-        stallMs += performance.now() - stallStart;
-        stallStart = null;
-    }
-
-    video.addEventListener('loadstart', () => {
-        if (!tracking) return;
-        loadStart = performance.now();
-        firstFrame = null;
-        stallStart = null;
-        stallMs = 0;
-        stalls = 0;
-        httpError = 0;
-        httpResource = undefined;
-        segmentLoads = segmentErrors = manifestErrors = 0;
-        segmentMs = segmentBytes = slowestSegment = slowestManifest = 0;
-        record('load');
-    });
-    video.addEventListener('loadeddata', () => {
-        if (!tracking || firstFrame !== null || loadStart === null) return;
-        firstFrame = performance.now() - loadStart;
-        record('first-frame');
-    });
-    video.addEventListener('waiting', () => {
-        if (!tracking || firstFrame === null || video.paused || video.seeking || stallStart !== null) return;
-        stallStart = performance.now();
-        stalls++;
-        record('buffering');
-    });
-    video.addEventListener('playing', () => {
-        finishStall();
-        record('playing');
-    });
-    video.addEventListener('ended', () => {
-        finishStall();
-        record('ended');
-    });
-    video.addEventListener('error', () => record('error'));
-    addEventListener('cf-tester-stream-error', event => {
-        if (!tracking) return;
-        const {status, kind} = event.detail;
-        if (status >= 100 && status <= 599) {
-            httpError = status;
-            httpResource = kind;
-        }
-        if (kind === 'segment') segmentErrors++;
-        if (kind === 'manifest') manifestErrors++;
-        record('error');
-    });
-    addEventListener('cf-tester-transfer', event => {
-        if (!tracking) return;
-        const {kind, bytes, duration} = event.detail;
-        if (kind === 'segment' && bytes > 0) {
-            segmentLoads++;
-            segmentMs += duration;
-            segmentBytes += bytes;
-            slowestSegment = Math.max(slowestSegment, duration);
-        } else if (kind === 'manifest') {
-            slowestManifest = Math.max(slowestManifest, duration);
-        }
-    });
+    for (const [event, kind] of Object.entries({loadstart:'load', loadeddata:'first-frame', waiting:'buffering',
+        playing:'playing', ended:'ended', error:'error'})) video.addEventListener(event, () => record(kind));
+    addEventListener('cf-tester-stream-error', () => record('error'));
     addEventListener('cf-tester-stop', () => {
         const playback = window.ChannelForgeTesterSnapshot?.();
-        if (tracking && playback?.stream_selected) {
-            lastPlayback = {...playback, ...metrics()};
-        }
+        if (tracking && playback?.stream_selected) lastPlayback = playback;
     });
-
-    function metrics() {
-        return {
-            first_frame_ms: firstFrame === null ? -1 : Math.round(firstFrame),
-            stall_ms: Math.round(stallMs + (stallStart === null ? 0 : performance.now() - stallStart)),
-            stalls, httpError, http_resource: httpResource,
-            segment_loads: segmentLoads, segment_errors: segmentErrors, manifest_errors: manifestErrors,
-            slowest_segment_ms: Math.round(slowestSegment), slowest_manifest_ms: Math.round(slowestManifest),
-            segment_rate_bps: segmentMs > 0 ? Math.round(8000 * segmentBytes / segmentMs) : -1
-        };
-    }
 
     const report = window.createTesterReport({
         section: settings,
         read: () => {
             const current = window.ChannelForgeTesterSnapshot?.() || {};
             const {resolution, ...playback} = current.stream_selected || !lastPlayback
-                ? {...current, ...metrics()} : lastPlayback;
+                ? current : lastPlayback;
             return {...playback, platform, app:version, build_revision:revision, component:"tv",
                 studios:current.studios, channels:current.channels, reconnecting:current.reconnecting,
                 ...(resolution ? {width:resolution[0], height:resolution[1]} : {}), timeline:[...timeline]};

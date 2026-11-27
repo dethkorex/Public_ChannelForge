@@ -49,6 +49,7 @@ def origin(media, number):
             self.send_response(status)
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-ChannelForge-Studio-Response-Ms", "200" if path.endswith(".ts") else "1")
             self.end_headers()
             try:
                 self.wfile.write(body)
@@ -97,11 +98,15 @@ def main():
         relay = subprocess.Popen([*command, "-g", "daemon off;"])
         context = ssl.create_default_context(cafile=str(cert))
 
-        def request(host, path, method="GET"):
+        def request(host, path, method="GET", headers_only=False):
             connection = HTTPSConnection("127.0.0.1", port, timeout=10, context=context)
             try:
                 connection.request(method, path, headers={"Host": host, "Authorization": "private", "Cookie": "private"})
                 response = connection.getresponse()
+                if headers_only:
+                    return {key: response.getheader(key) for key in (
+                        "X-ChannelForge-Relay", "X-ChannelForge-Cache", "X-ChannelForge-Upstream-Header-Time",
+                        "X-ChannelForge-Studio-Response-Ms")}
                 return response.status, response.read()
             finally:
                 connection.close()
@@ -123,6 +128,9 @@ def main():
             assert request("unknown.example.com", segment)[0] == 404
             assert request(name_a, "/api/settings")[0] == 404
             assert request(name_a, "/api/public/channels", "POST")[0] == 405
+            timing = request(name_a, "/broadcast/live/master.m3u8", headers_only=True)
+            assert timing["X-ChannelForge-Relay"] == "vps" and timing["X-ChannelForge-Studio-Response-Ms"] == "1"
+            assert float(timing["X-ChannelForge-Upstream-Header-Time"]) >= 0
             with ThreadPoolExecutor(max_workers=args.viewers) as pool:
                 responses = list(pool.map(lambda n: request(name_a, f"{segment}?viewer={n}"), range(args.viewers)))
                 alternating_hosts = ([name_a, name_b] * args.viewers)[:args.viewers]
@@ -130,6 +138,8 @@ def main():
             assert all(status == 200 and data == first for status, data in responses)
             assert mixed == [(200, first if host == name_a else second) for host in alternating_hosts]
             assert request(name_a, segment) == (200, first) and a[1][segment] == b[1][segment] == 1
+            cached = request(name_a, segment, headers_only=True)
+            assert cached["X-ChannelForge-Cache"] == "HIT" and cached["X-ChannelForge-Upstream-Header-Time"] in (None, "-")
             a[2].clear()
             assert request(name_a, segment) == (200, first)
             assert request(name_a, "/broadcast/live/master.m3u8")[0] == 503

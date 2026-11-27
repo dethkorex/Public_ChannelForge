@@ -331,10 +331,44 @@ assert.equal(retries.at(-1), true);
         self.assertIn("async function scanChannels", tv.HTML)
         self.assertIn("return value.channels.filter(channel=>channel.stream_url", tv.HTML)
         self.assertIn('id="home-changelog"', tv.HTML)
-        self.assertIn('data-section-block="cinema" hidden><h2>Creator studios', tv.HTML)
+        self.assertNotIn('data-section-block="cinema" hidden><h2>Creator studios', tv.HTML)
+        self.assertIn('id="cinema-studio-select" aria-label="Movie studio"', tv.HTML)
         self.assertIn("if(name==='cinema'&&selectedCreator)studio(selectedCreator)", tv.HTML)
         self.assertIn("channelsByStudio.set(creator.playlist_url,channels)", tv.HTML)
         self.assertIn("directoryScan=refreshDirectory()", tv.HTML)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise playback diagnostics")
+    def test_tester_snapshot_works_without_public_dialog_and_ignores_cached_studio_timings(self):
+        setup = r'''
+const assert = require('node:assert/strict');
+const video = Object.assign(new EventTarget(), {buffered:[], currentTime:3, readyState:4});
+const events = new EventTarget();
+const addEventListener = events.addEventListener.bind(events);
+const document = {getElementById:()=>null, querySelector:id=>id==='#player'?video:null,
+    documentElement:{hasAttribute:()=>true}};
+const window = globalThis, activeStreamUrl = 'https://private.example/media';
+const activeMedia = {kind:'live'}, liveMode = true, liveRetries = 0, movieRetries = 0, hls = null;
+const allCreators = [], liveChannels = [];
+'''
+        checks = r'''
+ChannelForgePlaybackStart(new URL(activeStreamUrl), 'a'.repeat(32), false, 'registered-route');
+const headers = values => ({getResponseHeader:name=>values[name]});
+ChannelForgePlaybackTransfer('manifest',500,200,headers({'X-ChannelForge-Relay':'vps',
+    'X-ChannelForge-Upstream-Header-Time':'0.342','X-ChannelForge-Studio-Response-Ms':'200'}));
+ChannelForgePlaybackTransfer('segment',60,800,headers({'X-ChannelForge-Cache':'HIT',
+    'X-ChannelForge-Studio-Response-Ms':'9000'}));
+const report = ChannelForgeTesterSnapshot();
+assert.equal(report.delivery_path,'managed-vps');
+assert.equal(report.segment_loads,1);
+assert.equal(report.relay_cache_hits,1);
+assert.equal(report.slowest_relay_upstream_ms,342);
+assert.equal(report.slowest_studio_response_ms,200);
+assert.equal(JSON.stringify(report).includes(activeStreamUrl),false);
+'''
+        script = tv.resource("web/playback-diagnostics.js").read_text(encoding="utf-8")
+        result = subprocess.run(["node", "-"], input=setup + script + checks, encoding="utf-8",
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise TV guide merging")
     def test_guide_prefers_fresh_route_without_hiding_other_studios(self):
@@ -359,7 +393,7 @@ refreshGuideFromStudios();
 assert.deepEqual(liveChannels.map(row=>row.stream_url).sort(), ['https://new.example/live', 'https://other.example/live']);
 channelsByStudio.set('new',[row('https://new.example/live','offline')]);
 refreshGuideFromStudios();
-assert.deepEqual(liveChannels.map(row=>row.stream_url).sort(), ['https://old.example/live', 'https://other.example/live']);
+assert.deepEqual(liveChannels.map(row=>row.stream_url), ['https://other.example/live']);
 '''
         result = subprocess.run(["node", "-"], input=script, encoding="utf-8", capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -377,14 +411,20 @@ const creator = {id:'studio', name:'Studio', status_url:current+'/api/public/cha
     playlist_url:current+'/exports/channels.m3u', vault_url:current+'/api/public/vault'};
 const allCreators = [creator], channelsByStudio = new Map();
 const unreachableStudioOrigins = new Set();
-let mode = 'guide-down', tester = false;
-const document = {documentElement:{hasAttribute: () => tester}};
-const localJson = async () => null, refreshGuideFromStudios = () => {};
+let mode = 'guide-down';
+const refreshGuideFromStudios = () => {};
 const discoverDirectory = async () => ({creators:[{...creator, id:'other', vault_url:previous+'/api/public/vault'},creator]});
 async function readStudioGuide(url, asJson){
     assert(url.startsWith(current));
     if(asJson){
         if(mode==='empty')return {channels:[]};
+        if(mode==='live')return {channels:[
+            {id:'channel',stream_url:'/live/channel.m3u8',online:true,state:'standby'},
+            {id:'off',stream_url:'/live/off.m3u8',online:false,state:'standby'},
+            {id:'retry',stream_url:'/live/retry.m3u8',online:true,state:'reconnecting'},
+            {id:'expired',stream_url:'/live/expired.m3u8',online:true,air_until_epoch_ms:1},
+            {id:'retired',stream_url:'/live/retired.m3u8',online:true,state:'standby'}
+        ]};
         throw Error('guide unavailable');
     }
     if(mode==='both-down')throw Error('playlist unavailable');
@@ -402,9 +442,11 @@ async function readStudioGuide(url, asJson){
     assert.equal(channels[0].id,'channel');
     assert.equal(channels[0].number,'8');
     assert.equal(channels[0].stream_url,current+'/live/channel.m3u8');
+    mode='live';
+    assert.deepEqual((await scanStudio(creator)).map(row=>row.id),['channel','retired']);
+    mode='guide-down';
+    assert.deepEqual((await scanStudio(creator)).map(row=>row.id),['channel']);
     mode='both-down';
-    assert.equal((await scanStudio(creator))[0].state,'reconnecting');
-    tester=true;
     assert.deepEqual(await scanStudio(creator),[]);
     assert(unreachableStudioOrigins.has(creator.playlist_url));
     mode='empty';

@@ -20,6 +20,8 @@ NUMBER = frozenset("""
     media_ready_state variant_bps estimated_bandwidth_bps media_error_code
     recoveries_this_attempt studios channels reconnecting first_frame_ms stalls stall_ms crash_line elapsed_ms at_ms build_revision
     segment_loads segment_errors manifest_errors slowest_segment_ms slowest_manifest_ms segment_rate_bps
+    relay_cache_hits relay_cache_misses slowest_relay_upstream_ms slowest_studio_response_ms
+    first_progress_ms
     live_channels viewer_sessions encoder_count encoder_starting upload_bps
 """.split())
 BOOLEAN = frozenset({"directoryCached", "playing", "stream_selected", "registered", "relay_constrained"})
@@ -30,6 +32,7 @@ TEXT = {
     "engine": r"Media3 ExoPlayer|hls\.js|native HTML video|inactive web player|Roku SceneGraph",
     "kind": r"live|movie",
     "delivery_route": r"preferred-relay|registered-route|registered-fallback",
+    "delivery_path": r"managed-vps|legacy-tunnel|local|direct|unknown",
     "trace_id": r"[a-f0-9]{32}",
     "phase": r"tune|rendition|movie",
     "http_resource": r"manifest|segment|other",
@@ -45,6 +48,23 @@ TEXT = {
                   r"SecurityException|IndexOutOfBoundsException|IOException|Error",
 }
 EVENT_KINDS = frozenset({"load", "first-frame", "buffering", "playing", "ended", "error", "retry", "guide"})
+
+
+def playback_response_headers(headers) -> dict[str, str]:
+    """Forward only recognized, non-identifying playback metadata to the desktop player."""
+    clean = {}
+    relay = headers.get("X-ChannelForge-Relay", "")
+    cache = headers.get("X-ChannelForge-Cache", "")
+    if relay == "vps":
+        clean["X-ChannelForge-Relay"] = relay
+    if cache in {"HIT", "MISS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED", "BYPASS"}:
+        clean["X-ChannelForge-Cache"] = cache
+    for name, pattern in (("X-ChannelForge-Upstream-Header-Time", r"\d{1,3}\.\d{3}"),
+                          ("X-ChannelForge-Studio-Response-Ms", r"\d{1,6}")):
+        value = headers.get(name, "")
+        if re.fullmatch(pattern, value):
+            clean[name] = value
+    return clean
 
 
 def report_address(value: str) -> bool:

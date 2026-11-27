@@ -69,7 +69,7 @@ import java.util.concurrent.Executors;
 
 @UnstableApi
 public class MainActivity extends Activity {
-    private final String viewerLease = UUID.randomUUID().toString().replace("-", "");
+    private String viewerLease;
     private SoundPool menuSounds;
     private int menuTick;
     private boolean menuSoundReady;
@@ -77,7 +77,6 @@ public class MainActivity extends Activity {
     private final List<Creator> creators = new ArrayList<>();
     private final List<Channel> channels = new ArrayList<>();
     private final List<VaultItem> vaultItems = new ArrayList<>();
-    private final List<View> navGroupLabels = new ArrayList<>();
     private String movieDecade = "all", movieSearch = "", movieGenre = "", movieRating = "";
     private JSONArray movieGenres = new JSONArray(), movieRatings = new JSONArray();
     private PlayerView video;
@@ -97,7 +96,7 @@ public class MainActivity extends Activity {
     private Page activePage = Page.HOME;
     private Page renderedAuxiliary;
     private final Map<Page, TextView> navButtons = new EnumMap<>(Page.class);
-    private LinearLayout guide, creatorRail, channelRail, navigationRail, menuPanel, auxiliaryPage;
+    private LinearLayout guide, channelRail, navigationRail, menuPanel, auxiliaryPage;
     private boolean menuCollapsed;
     private int navigationWidth;
 
@@ -147,6 +146,10 @@ public class MainActivity extends Activity {
     private int lastFrameCount = -1, lastErrorCode, lastHttpCode, totalRetries;
     private int segmentLoads, segmentErrors, manifestErrors;
     private long segmentLoadMs, segmentLoadBytes, slowestSegmentMs, slowestManifestMs;
+    private int relayCacheHits, relayCacheMisses;
+    private long slowestRelayUpstreamMs = -1, slowestStudioResponseMs = -1;
+    private String deliveryPath = "unknown";
+    private JSONObject lastPublicPlayback;
     private String lastReason = "none", decoderName = "unknown", lastHttpResource;
     private long directoryChecked, lastCpuTime, lastCpuTick;
     private int cpuPercent = -1;
@@ -249,6 +252,10 @@ public class MainActivity extends Activity {
     private String guideStudio = "", guideSearch = "";
     private boolean guideSortByRating;
     private int guideOffset;
+    private boolean fullGuide;
+    private LinearLayout homeLiveContent, homeCinemaContent, homePersonalContent;
+    private String homeLiveKey = "", homeCinemaAddress = "", homePersonalKey;
+    private List<VaultItem> homeCinemaMovies = Collections.emptyList();
     private TextView programTitle, programTime, programElapsed, programDuration;
     private ProgressBar programProgress;
     private ImageView programArtwork, landscapeProgramArtwork;
@@ -369,12 +376,19 @@ public class MainActivity extends Activity {
         player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
                 .setPreferredAudioLanguage("en").build());
         player.addAnalyticsListener(new androidx.media3.exoplayer.analytics.AnalyticsListener() {
+            private final androidx.media3.common.Timeline.Window eventWindow = new androidx.media3.common.Timeline.Window();
+
+            private boolean currentLoad(EventTime time) {
+                if (guideVisible || viewerLease == null || player.getCurrentMediaItem() == null) return false;
+                return time.timeline.isEmpty() || viewerLease.equals(time.timeline.getWindow(time.windowIndex, eventWindow).mediaItem.mediaId);
+            }
+
             @Override public void onVideoDecoderInitialized(EventTime time, String name, long timestamp, long duration) {
                 decoderName = name;
             }
 
             @Override public void onLoadCompleted(EventTime time, LoadEventInfo load, MediaLoadData media) {
-                if (!BuildConfig.TESTER_BUILD || guideVisible || !testerConsented()) return;
+                if (!currentLoad(time)) return;
                 if (media.dataType == C.DATA_TYPE_MEDIA && load.bytesLoaded > 0) {
                     segmentLoads++;
                     segmentLoadBytes += load.bytesLoaded;
@@ -382,14 +396,25 @@ public class MainActivity extends Activity {
                     slowestSegmentMs = Math.max(slowestSegmentMs, load.loadDurationMs);
                 } else if (media.dataType == C.DATA_TYPE_MANIFEST) {
                     slowestManifestMs = Math.max(slowestManifestMs, load.loadDurationMs);
+                } else {
+                    return;
                 }
+                recordDeliveryHeaders(load.responseHeaders);
             }
 
             @Override public void onLoadError(EventTime time, LoadEventInfo load, MediaLoadData media,
                                               IOException error, boolean canceled) {
-                if (!BuildConfig.TESTER_BUILD || guideVisible || canceled || !testerConsented()) return;
+                if (!currentLoad(time)) return;
                 if (media.dataType == C.DATA_TYPE_MEDIA) segmentErrors++;
                 else if (media.dataType == C.DATA_TYPE_MANIFEST) manifestErrors++;
+                if (error instanceof androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
+                    androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException http =
+                            (androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) error;
+                    lastHttpCode = http.responseCode;
+                    lastHttpResource = media.dataType == C.DATA_TYPE_MANIFEST ? "manifest" :
+                            media.dataType == C.DATA_TYPE_MEDIA ? "segment" : "other";
+                    recordDeliveryHeaders(http.headerFields);
+                }
             }
         });
         video.setPlayer(player);
@@ -541,7 +566,6 @@ public class MainActivity extends Activity {
     }
 
     private void buildGuideUi(FrameLayout root) {
-        navGroupLabels.clear();
         navButtons.clear();
         phoneMenuShade = null;
         phoneContent = null;
@@ -577,7 +601,11 @@ public class MainActivity extends Activity {
         brand.setSingleLine(true);
         brand.setEllipsize(android.text.TextUtils.TruncateAt.END);
         brand.setPadding(dp(compact ? 5 : 18), dp(3), dp(5), dp(3));
-        if (neonTheme()) applyPhoneWordmark(brand, phonePortrait ? 20 : 26);
+        if (neonTheme()) applyPhoneWordmark(brand, phonePortrait ? 16 : 26);
+        if (phonePortrait) {
+            brand.setSingleLine(true);
+            brand.setEllipsize(TextUtils.TruncateAt.END);
+        }
         brandBox.addView(brand);
         if (neonTheme()) brandBox.addView(phoneRule());
         else if (!compact) {
@@ -592,7 +620,7 @@ public class MainActivity extends Activity {
         screenSwitcher.setOnClickListener(v -> openCinemaScreen(!cinemaScreen));
         header.addView(screenSwitcher);
         screenSwitcher.setVisibility(phonePortrait ? View.GONE : View.VISIBLE);
-        updateButton=focusButton(BuildConfig.TESTER_BUILD ? testerVersionLabel() : "UPDATES  •  v" + BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->selectUpdate());LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
+        updateButton=focusButton(BuildConfig.TESTER_BUILD ? testerVersionLabel() : phonePortrait ? "v" + BuildConfig.VERSION_NAME : "UPDATES  •  v" + BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->selectUpdate());LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
         if (compact) {
             for (TextView control : new TextView[]{menu, screenSwitcher, updateButton}) {
                 control.setTextSize(11);
@@ -611,6 +639,8 @@ public class MainActivity extends Activity {
             updateButton.setGravity(Gravity.CENTER);
             updateButton.setSingleLine(false);
             updateButton.setMaxLines(2);
+            updateButton.setMaxWidth(dp(106));
+            updateButton.setTextSize(11);
             updateLayout.leftMargin = dp(4);
         }
         if (neonTheme()) {
@@ -674,22 +704,15 @@ public class MainActivity extends Activity {
         navigationRail = new LinearLayout(this);
         navigationRail.setOrientation(LinearLayout.VERTICAL);
         menuContent.addView(navigationRail);
-        creatorRail = new LinearLayout(this);
-        creatorRail.setOrientation(LinearLayout.VERTICAL);
-        menuContent.addView(creatorRail);
         if (phonePortrait) addPhoneBackdrop(menuContent, 113);
         navigationScroll.addView(menuContent);
         menuPanel.addView(navigationScroll, new LinearLayout.LayoutParams(-1, -1));
-        addNavigationGroup("WATCH");
         addNavigation("⌂", "Home", Page.HOME);
         addNavigation(neonTheme() ? "▣" : "◉", "Live TV Guide", Page.LIVE);
-        if (!phoneLayout) addNavigationGroup("LIBRARY");
         addNavigation("▣", "Rewind Cinema", Page.CINEMA);
         addNavigation("▶", "Continue Watching", Page.CONTINUE);
         addNavigation("★", "Favorites", Page.FAVORITES);
-        addNavigationGroup("SYSTEM");
-        if (tvTheme) addTvSystemActions();
-        else addNavigation("⚙", "System", Page.SYSTEM);
+        addNavigation("⚙", "System", Page.SYSTEM);
         LinearLayout channelsPanel = panel();
         channelRail = new LinearLayout(this);
         channelRail.setOrientation(LinearLayout.VERTICAL);
@@ -716,8 +739,6 @@ public class MainActivity extends Activity {
             }
             columns.addView(channelsPanel, new LinearLayout.LayoutParams(0, -1, 1f));
         }
-        creatorRail.addView(tvTheme ? tvHeading("CREATOR STUDIOS", false) : sectionTitle("CREATOR STUDIOS","#5DEEFF"));
-        creatorRail.addView(text("Searching worldwide…",14,false));
         syncStudioScreen();
         setMenuCollapsed(phoneLayout || !BuildConfig.TESTER_BUILD && compactTouchLayout);
         if (height >= 420 && !touchDevice) {
@@ -873,7 +894,6 @@ public class MainActivity extends Activity {
         setMenuCollapsed(wasCollapsed);
         if (!creators.isEmpty()) {
             buildStudioRails();
-            renderCreatorButtons();
             syncStudioScreen();
             if (movieShelfLoaded && currentStudio != null && currentStudio.cinemaSupported) renderMovies(currentStudio);
             showLoadedChannels();
@@ -1029,16 +1049,6 @@ public class MainActivity extends Activity {
             creator.state = row.optString("state", row.optBoolean("online", true) ? "broadcasting" : "offline");
             creator.lastHeartbeat = row.optLong("last_heartbeat");
             creator.updatedAt = row.optLong("updated_at");
-            JSONArray inventory = row.optJSONArray("channel_inventory");
-            if (inventory != null && !creator.channelStatus.isEmpty()
-                    && row.optLong("inventory_expires") > System.currentTimeMillis() / 1000) {
-                String address = Uri.parse(creator.channelStatus).buildUpon().appendQueryParameter("guide", "extended").build().toString();
-                try {
-                    creator.hubChannels = parseOnlineChannels(new JSONObject().put("channels", inventory).toString(), address);
-                } catch (JSONException invalid) {
-                    android.util.Log.w("ChannelForgeGuide", "Invalid Hub channel inventory");
-                }
-            }
             result.add(creator);
         }
         return result;
@@ -1072,17 +1082,6 @@ public class MainActivity extends Activity {
         channelsByStudio.keySet().retainAll(activeOrigins);
         staleGuides.retainAll(activeOrigins);
         unreachableStudios.retainAll(activeOrigins);
-        for (Creator creator : creators) {
-            if (creator.hubChannels != null && !channelsByStudio.containsKey(creator.playlist)) {
-                for (Channel channel : creator.hubChannels) {
-                    channel.studio = creator.name;
-                    channel.studioId = creator.id;
-                }
-                channelsByStudio.put(creator.playlist, creator.hubChannels);
-                staleGuides.add(creator.playlist);
-                unreachableStudios.remove(creator.playlist);
-            }
-        }
         if (!activeOrigins.contains(guideStudio)) guideStudio = "";
         if (changed || liveRail == null) {
             renderCreators();
@@ -1124,21 +1123,21 @@ public class MainActivity extends Activity {
     }
 
     private void renderDirectoryRecovery(Exception error){
-        creatorRail.removeAllViews();channelRail.removeAllViews();
+        channelRail.removeAllViews();
         liveRail = null;
         movieRail = null;
         currentStudio = null;
         auxiliaryPage = null;
         ++movieRequest;
         status.setText(error == null ? "NO PUBLIC STUDIOS ONLINE" : "PUBLIC DIRECTORY UNAVAILABLE  •  SELECT SCAN TO RETRY");
-        creatorRail.addView(sectionTitle("DISCOVERY","#5DEEFF"));
-        TextView retry=focusButton("↻  SCAN PUBLIC DIRECTORY");retry.setOnClickListener(v->loadDirectory());creatorRail.addView(retry,new LinearLayout.LayoutParams(-1,-2));addGap(creatorRail,10);
-        if (BuildConfig.TESTER_BUILD) creatorRail.addView(text("Open System to pair a Studio by its address.",12,false));
+        TextView retry = focusButton("↻  SCAN PUBLIC DIRECTORY");
+        retry.setOnClickListener(v -> loadDirectory());
         channelRail.addView(sectionTitle("LIVE TV GUIDE","#5DEEFF"));
         TextView detail=text(error==null?"No public studios are online. Scan for channels to check again."
                 :"The public directory is unreachable. Scan for channels to retry.",15,false);
         detail.setTextColor(color("#C6D1E7"));
         channelRail.addView(detail);
+        channelRail.addView(retry);
         retry.requestFocus();
     }
 
@@ -1159,7 +1158,6 @@ public class MainActivity extends Activity {
                         dialog.dismiss();
                         if (!hasCreator(creators, creator.playlist)) creators.add(creator);
                         unreachableStudios.remove(creator.playlist);
-                        renderCreatorButtons();
                         guideStudio = creator.playlist;
                         loadCreator(creator);
                     });
@@ -1178,41 +1176,14 @@ public class MainActivity extends Activity {
     private TextView focusButton(String label) { TextView button=text(label,14,true);button.setTextColor(color("#DFFBFF"));button.setGravity(Gravity.CENTER_VERTICAL);button.setMinHeight(dp(38));button.setFocusable(true);button.setBackground(surface(new int[]{color("#151A3D"),color("#101127")},color("#1BDFF5"),1,7));button.setOnFocusChangeListener((v, focused)->{v.setBackground(surface(focused?new int[]{color("#6A145C"),color("#231454")}:new int[]{color("#151A3D"),color("#101127")},focused?color("#FF42C5"):color("#1BDFF5"),focused?2:1,7));v.setScaleX(focused?1.018f:1f);v.setScaleY(focused?1.018f:1f);v.setTranslationZ(focused?dp(5):0);});return button;}
 
     private void renderCreators() {
-        Creator selected = renderCreatorButtons();
+        Creator selected = preferredCreator();
         loadCreator(cinemaScreen && !selected.cinemaSupported ? firstCinemaStudio(selected) : selected);
     }
 
-    private Creator renderCreatorButtons() {
-        creatorRail.removeAllViews();
-        status.setText("●  " + creators.size() + " REGISTERED STUDIOS");
-        creatorRail.addView(tvTheme ? tvHeading("CREATOR STUDIOS", false) : sectionTitle("CREATOR STUDIOS", "#5DEEFF"));
+    private Creator preferredCreator() {
         List<Creator> visible = reachableCreators();
-        Creator selected = visible.isEmpty() ? creators.get(0) : visible.get(0);
-        for (Creator creator : visible) {
-            TextView button = focusButton(tvTheme ? "◉  " + creator.name
-                    : creator.name + "\n" + (creator.state.equals("broadcasting") ? creator.description : creator.state));
-            if (tvTheme) {
-                button.setSingleLine(true);
-                button.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                button.setTextSize(12);
-                button.setMinHeight(dp(32));
-                button.setPadding(dp(8), 0, dp(5), 0);
-                button.setBackground(tvFrame(false, 8));
-                button.setOnFocusChangeListener((view, focused) -> button.setBackground(tvFrame(focused, 8)));
-            }
-            button.setTag(creator);
-            button.setOnClickListener(view -> {
-                if (activePage == Page.LIVE) {
-                    guideStudio = creator.playlist;
-                    showLoadedChannels();
-                } else loadCreator(creator);
-            });
-            LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
-            layout.setMargins(0, 0, 0, dp(9));
-            creatorRail.addView(button, layout);
-            if (creator.playlist.equals(selectedPlaylist)) selected = creator;
-        }
-        return selected;
+        for (Creator creator : visible) if (creator.playlist.equals(selectedPlaylist)) return creator;
+        return visible.isEmpty() ? creators.get(0) : visible.get(0);
     }
 
     private List<Creator> reachableCreators() {
@@ -1260,24 +1231,13 @@ public class MainActivity extends Activity {
 
     private void loadStudioGuide(Creator creator) {
         if (!loadingGuides.add(creator.playlist)) return;
-        String key = "epg:" + creator.id;
-        boolean restore = !channelsByStudio.containsKey(creator.playlist);
         studioLoader.execute(() -> {
             List<Channel> loaded = null;
             String address = Uri.parse(creator.channelStatus).buildUpon().appendQueryParameter("guide", "extended").build().toString();
-            if (restore) {
-                String cached = guideCache.read(key);
-                if (!cached.isEmpty()) try {
-                    List<Channel> rows = parseOnlineChannels(cached, address);
-                    runOnUiThread(() -> applyGuide(creator, rows, true));
-                } catch (JSONException invalid) { android.util.Log.w("ChannelForgeGuide", "Invalid EPG snapshot"); }
-            }
             boolean degraded = false;
             try {
                 if (!creator.channelStatus.isEmpty()) {
-                    String payload = get(address);
-                    loaded = parseOnlineChannels(payload, address);
-                    guideCache.write(key, payload);
+                    loaded = parseOnlineChannels(get(address), address);
                 }
             } catch (Exception unavailable) {
                 android.util.Log.w("ChannelForgeGuide", "Studio EPG request failed: " + unavailable.getClass().getSimpleName());
@@ -1286,20 +1246,19 @@ public class MainActivity extends Activity {
                 degraded = true;
                 try {
                     String playlist = get(creator.playlist);
-                    if (playlist.startsWith("#EXTM3U")) loaded = parseM3u(playlist, creator.playlist);
+                    if (playlist.trim().startsWith("#EXTM3U")) loaded = parseM3u(playlist, creator.playlist);
                 } catch (Exception unavailable) {
                     android.util.Log.w("ChannelForgeGuide", "Playlist fallback unavailable");
                 }
             }
-            final List<Channel> result = loaded == null ? creator.hubChannels : loaded;
+            final List<Channel> result = loaded;
             final boolean stale = degraded;
             runOnUiThread(() -> {
                 loadingGuides.remove(creator.playlist);
                 if (isFinishing() || isDestroyed() || !hasCreator(creators, creator.playlist)) return;
-                boolean changed = BuildConfig.TESTER_BUILD && (result == null ? unreachableStudios.add(creator.playlist)
-                        : unreachableStudios.remove(creator.playlist));
+                boolean changed = result == null ? unreachableStudios.add(creator.playlist)
+                        : unreachableStudios.remove(creator.playlist);
                 if (changed) {
-                    renderCreatorButtons();
                     if (guideStudio.equals(creator.playlist) && result == null) guideStudio = "";
                     if (cinemaScreen && currentStudio == creator && result == null) {
                         Creator online = firstCinemaStudio(creator);
@@ -1313,36 +1272,29 @@ public class MainActivity extends Activity {
 
     private void applyGuide(Creator creator, List<Channel> rows, boolean stale) {
         if (isFinishing() || isDestroyed() || !hasCreator(creators, creator.playlist)) return;
-        if (stale) staleGuides.add(creator.playlist);
+        if (stale && rows != null) staleGuides.add(creator.playlist);
         else staleGuides.remove(creator.playlist);
-        List<Channel> prior = channelsByStudio.get(creator.playlist);
-        if (rows != null && (!stale || prior == null || prior.isEmpty())) {
+        if (rows == null) {
+            channelsByStudio.remove(creator.playlist);
+        } else {
+            List<Channel> prior = stale ? channelsByStudio.get(creator.playlist) : null;
             for (Channel channel : rows) {
                 channel.studio = creator.name;
                 channel.studioId = creator.id;
-            }
-            channelsByStudio.put(creator.playlist, rows);
-        } else if (rows != null) {
-            // A working playlist can restore tuning while the schedule endpoint is unavailable.
-            // Only the schedule endpoint can authoritatively remove a channel and its EPG.
-            for (Channel row : rows) {
-                Channel existing = null;
+                if (prior == null) continue;
                 for (Channel previous : prior) {
-                    if ((!row.id.isEmpty() && row.id.equals(previous.id)) || row.url.equals(previous.url)) {
-                        existing = previous;
+                    if ((!channel.id.isEmpty() && channel.id.equals(previous.id)) || channel.url.equals(previous.url)) {
+                        channel.programs = previous.programs;
+                        channel.airUntil = previous.airUntil;
+                        if (channel.url.equals(previous.url)) {
+                            channel.continuousUrl = previous.continuousUrl;
+                            channel.fireTvUrl = previous.fireTvUrl;
+                        }
                         break;
                     }
                 }
-                if (existing == null) {
-                    row.studio = creator.name;
-                    row.studioId = creator.id;
-                    prior.add(row);
-                } else if (row.programs == null && !existing.url.equals(row.url)) {
-                    existing.url = row.url;
-                    existing.continuousUrl = "";
-                    existing.fireTvUrl = "";
-                }
             }
+            channelsByStudio.put(creator.playlist, rows);
         }
         showLoadedChannels();
     }
@@ -1352,13 +1304,15 @@ public class MainActivity extends Activity {
         channels.clear();
         Map<String, Channel> unique = new java.util.LinkedHashMap<>();
         Map<String, Creator> origin = new HashMap<>();
+        long now = System.currentTimeMillis();
         for (Creator studio : reachableCreators()) {
-            if (guideStudio.isEmpty() || studio.playlist.equals(guideStudio) || activePage == Page.FAVORITES) {
+            if (activePage != Page.LIVE || guideStudio.isEmpty() || studio.playlist.equals(guideStudio)) {
                 List<Channel> loaded = channelsByStudio.get(studio.playlist);
                 if (loaded == null) continue;
                 String name = studio.name.trim().toLowerCase(java.util.Locale.ROOT);
                 boolean fresh = !staleGuides.contains(studio.playlist);
                 for (Channel channel : loaded) {
+                    if (channel.airUntil > 0 && channel.airUntil <= now) continue;
                     String key = !name.isEmpty() && channel.id.matches("[a-fA-F0-9]{16}") ? name + "/" + channel.id : channel.url;
                     Creator previous = origin.get(key);
                     boolean previousFresh = previous != null && !staleGuides.contains(previous.playlist);
@@ -1380,6 +1334,7 @@ public class MainActivity extends Activity {
             }
         }
         renderChannels(name);
+        if (activePage == Page.HOME) renderHomeContent();
         if (activePage == Page.FAVORITES) syncStudioScreen();
     }
 
@@ -1413,46 +1368,6 @@ public class MainActivity extends Activity {
         paintNavigation(button, page);
         navigationRail.addView(button);
         navButtons.put(page, button);
-    }
-
-    private void addNavigationGroup(String label) {
-        if (tvTheme) {
-            View heading = tvHeading(label, false);
-            navGroupLabels.add(heading);
-            navigationRail.addView(heading);
-            return;
-        }
-        TextView heading = sectionTitle(label, "#63EFFF");
-        heading.setTextSize(9);
-        heading.setPadding(dp(7), dp(9), dp(4), dp(4));
-        if (phonePortrait) {
-            heading.setTextColor(Color.WHITE);
-            heading.setTextSize(11);
-            heading.setBackground(phonePanel(true, 5));
-        }
-        navGroupLabels.add(heading);
-        navigationRail.addView(heading);
-    }
-
-    private void addTvSystemActions() {
-        LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.VERTICAL);
-        addTvSystemAction(actions, "⟳  Check for Update", this::openSystemUpdates);
-        addTvSystemAction(actions, BuildConfig.TESTER_BUILD ? "◇  Developer" : "◇  Diagnostics", this::openSystemDiagnostics);
-        if (BuildConfig.TESTER_BUILD) addTvSystemAction(actions, "＋  Pair a Studio", this::showPairingDialog);
-        navGroupLabels.add(actions);
-        navigationRail.addView(actions);
-    }
-
-    private void addTvSystemAction(LinearLayout actions, String label, Runnable action) {
-        TextView button = navigationButton(label);
-        button.setBackground(null);
-        button.setOnClickListener(view -> { playMenuSound(); action.run(); });
-        button.setOnFocusChangeListener((view, focused) -> {
-            if (focused) playMenuSound();
-            button.setBackground(focused ? tvFrame(true, 7) : null);
-        });
-        actions.addView(button);
     }
 
     private void paintNavigation(TextView button, Page page) {
@@ -1504,8 +1419,6 @@ public class MainActivity extends Activity {
             } else menuPanel.setTranslationX(0);
         }
         menuPanel.requestLayout();
-        creatorRail.setVisibility(menuCollapsed ? View.GONE : View.VISIBLE);
-        for (View heading : navGroupLabels) heading.setVisibility(menuCollapsed ? View.GONE : View.VISIBLE);
         for (TextView button : navButtons.values()) {
             String[] parts = (String[]) button.getTag();
             button.setText(menuCollapsed ? parts[0] : parts[0] + "  " + parts[1]);
@@ -1531,7 +1444,7 @@ public class MainActivity extends Activity {
             if (supported != currentStudio) { loadCreator(supported); return; }
         }
         syncStudioScreen();
-        if (page == Page.LIVE || page == Page.FAVORITES) showLoadedChannels();
+        if (page == Page.LIVE || page == Page.FAVORITES || page == Page.HOME) showLoadedChannels();
         if (cinemaScreen && currentStudio != null && currentStudio.cinemaSupported && !movieShelfLoaded && !moviePageLoading)
             loadMoviePage(currentStudio, 0);
     }
@@ -1548,13 +1461,6 @@ public class MainActivity extends Activity {
         if (liveRail != null) liveRail.setVisibility(activePage == Page.LIVE ? View.VISIBLE : View.GONE);
         boolean showMovies = cinemaScreen && currentStudio != null && currentStudio.cinemaSupported;
         if (movieRail != null) movieRail.setVisibility(showMovies ? View.VISIBLE : View.GONE);
-        for (int i = 0; i < creatorRail.getChildCount(); i++) {
-            View child = creatorRail.getChildAt(i);
-            if (child.getTag() instanceof Creator) {
-                Creator item = (Creator) child.getTag();
-                child.setVisibility(cinemaScreen && !item.cinemaSupported ? View.GONE : View.VISIBLE);
-            }
-        }
         if (auxiliaryPage != null && renderedAuxiliary == activePage
                 && (activePage == Page.HOME || activePage == Page.SYSTEM)) return;
         if (auxiliaryPage != null) channelRail.removeView(auxiliaryPage);
@@ -1619,239 +1525,233 @@ public class MainActivity extends Activity {
     }
 
     private void buildHomePage() {
-        if (phonePortrait) {
-            buildPhoneHome();
-            return;
-        }
-        if (tvTheme) {
-            buildTvHome();
-            return;
-        }
-        LinearLayout hero = new LinearLayout(this);
-        hero.setGravity(Gravity.CENTER_VERTICAL);
-        hero.setPadding(dp(18), dp(15), dp(18), dp(15));
-        hero.setBackground(surface(new int[]{color("#2A1550"), color("#0A2138"), color("#241242")},
-                color("#48E5FF"), 1, 13));
-        LinearLayout copy = new LinearLayout(this);
-        copy.setOrientation(LinearLayout.VERTICAL);
-        copy.addView(sectionTitle("WELCOME TO CHANNELFORGE TV", "#55EFFF"));
-        TextView headline = text("Live channels.\nOne community dial.", compactTouchLayout ? 30 : 39, true);
-        headline.setTextColor(color("#FAFCFF"));
-        copy.addView(headline);
-        copy.addView(text("Watch community-created live channels and explore shared movie collections.", 13, false));
-        hero.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
-        if (!compactTouchLayout) {
-            TextView badge = text("● LIVE\nPUBLIC GUIDE", 15, true);
-            badge.setTextColor(color("#70FFA4"));
-            badge.setGravity(Gravity.CENTER);
-            badge.setPadding(dp(10), dp(14), dp(10), dp(14));
-            badge.setBackground(surface(new int[]{color("#171330"), color("#111A26")}, color("#E657D1"), 1, 9));
-            hero.addView(badge);
-        }
-        auxiliaryPage.addView(hero);
-        addGap(auxiliaryPage, 12);
-        addHomePair(auxiliaryPage,
-                homeTile("▣", "Live TV Guide", "See what’s on now and what’s next", () -> openPage(Page.LIVE)),
-                homeTile("▶", "Rewind Cinema", "Explore movies from connected studios", () -> openPage(Page.CINEMA)));
-        addGap(auxiliaryPage, 12);
-        LinearLayout notes = panel(), quick = panel();
-        notes.addView(sectionTitle("LATEST UPDATE", "#56EFFF"));
-        notes.addView(homeTile("↓", "Release notes", "ChannelForge v" + BuildConfig.VERSION_NAME, this::selectUpdate));
-        quick.addView(sectionTitle("QUICK ACTIONS", "#56EFFF"));
-        addHomePair(quick,
-                homeTile("☆", "Favorites", "Your saved channels", () -> openPage(Page.FAVORITES)),
-                homeTile("▷", "Continue Watching", "Pick up where you left off", () -> openPage(Page.CONTINUE)));
-        addHomePair(auxiliaryPage, notes, quick);
+        homeLiveContent = panel();
+        homeLiveKey = null;
+        auxiliaryPage.addView(homeLiveContent);
+        homeCinemaContent = panel();
+        auxiliaryPage.addView(homeCinemaContent);
+        homePersonalContent = panel();
+        homePersonalKey = null;
+        auxiliaryPage.addView(homePersonalContent);
+        renderHomeContent();
     }
 
-    private FrameLayout brandedHomeHero() {
-        FrameLayout hero = new FrameLayout(this);
-        hero.setBackground(phonePanel(true, 12));
-        hero.setClipToOutline(true);
-        ImageView art = phoneBackdrop();
-        art.setScaleType(ImageView.ScaleType.MATRIX);
-        art.addOnLayoutChangeListener((view, l, t, r, b, oldL, oldT, oldR, oldB) -> {
-            Drawable image = art.getDrawable();
-            float scale = (float) (b - t) / image.getIntrinsicHeight();
-            android.graphics.Matrix matrix = new android.graphics.Matrix();
-            matrix.setScale(scale, scale);
-            matrix.postTranslate(r - l - image.getIntrinsicWidth() * scale, 0);
-            art.setImageMatrix(matrix);
-        });
-        hero.addView(art, new FrameLayout.LayoutParams(-1, -1));
-        View scrim = new View(this);
-        scrim.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                new int[]{color("#FF06091D"), color("#FA06091D"), color("#9506091D"), color("#0006091D")}));
-        hero.addView(scrim, new FrameLayout.LayoutParams(-1, -1));
-        LinearLayout copy = new LinearLayout(this);
-        copy.setOrientation(LinearLayout.VERTICAL);
-        copy.setPadding(dp(tvTheme ? 23 : 11), dp(18), dp(17), dp(16));
-        copy.addView(sectionTitle("WELCOME TO", "#36E6FF"));
-        TextView wordmark = text("", 27, true);
-        applyPhoneWordmark(wordmark, phonePortrait ? 30 : tvTheme ? 34 : 42);
-        copy.addView(wordmark);
-        View titleRule = phoneRule();
-        if (tvTheme) titleRule.getLayoutParams().width = dp(395);
-        copy.addView(titleRule);
-        addGap(copy, tvTheme ? 5 : 12);
-        TextView headline = text(tvTheme ? "Live channels. One community dial." : "Live channels.\nOne community dial.",
-                phonePortrait ? 23 : tvTheme ? 26 : 32, true);
-        headline.setPadding(dp(5), 0, 0, dp(4));
-        copy.addView(headline);
-        TextView description = text("Watch community-created channels and explore shared movie collections.", 13, false);
-        description.setPadding(dp(5), dp(3), dp(40), 0);
-        if (tvTheme) description.setMaxWidth(dp(415));
-        copy.addView(description);
-        hero.addView(copy, new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_VERTICAL));
-        if (tvTheme) {
-            View border = new View(this);
-            border.setBackground(surface(new int[]{Color.TRANSPARENT, Color.TRANSPARENT}, color("#75DAFF"), 2, 12));
-            hero.addView(border, new FrameLayout.LayoutParams(-1, -1));
+    private void renderHomeContent() {
+        if (homeLiveContent == null || homeCinemaContent == null) return;
+        long now = System.currentTimeMillis();
+        List<Channel> shelf = channels.subList(0, Math.min(4, channels.size()));
+        StringBuilder signature = new StringBuilder();
+        for (Channel channel : shelf) {
+            JSONObject current = programAt(channel, now);
+            signature.append(channel.url).append('\n').append(current == null ? "" : current.optString("start")).append('\n');
         }
+        if (!signature.toString().equals(homeLiveKey)) {
+            homeLiveKey = signature.toString();
+            homeLiveContent.removeAllViews();
+            if (shelf.isEmpty()) {
+                homeLiveContent.addView(homeSpotlight(null, null, now));
+            } else {
+                Channel featured = shelf.get(0);
+                for (Channel channel : shelf) if (programAt(channel, now) != null) { featured = channel; break; }
+                Channel selected = featured;
+                JSONObject current = programAt(selected, now);
+                homeLiveContent.addView(homeSpotlight(selected, current, now));
+                homeLiveContent.addView(sectionTitle("ON NOW", "#5AEFFF"));
+                LinearLayout cards = new LinearLayout(this);
+                if (phonePortrait) cards.setOrientation(LinearLayout.VERTICAL);
+                for (Channel channel : shelf) cards.addView(homeProgramCard(channel, programAt(channel, now), now));
+                if (phonePortrait) homeLiveContent.addView(cards);
+                else addHorizontalStrip(homeLiveContent, cards);
+            }
+        }
+        Creator cinema = firstCinemaStudio(null);
+        String address = cinema == null ? "" : cinema.vault;
+        if (!address.equals(homeCinemaAddress)) {
+            homeCinemaAddress = address;
+            homeCinemaMovies = Collections.emptyList();
+            paintHomeCinema();
+            if (!address.isEmpty()) movieCatalogLoader.execute(() -> {
+                try {
+                    String page = Uri.parse(address).buildUpon().appendQueryParameter("limit", "4").build().toString();
+                    List<VaultItem> movies = parseVault(new JSONObject(get(page)));
+                    for (VaultItem movie : movies) movie.studioId = cinema.id;
+                    runOnUiThread(() -> {
+                        if (isFinishing() || isDestroyed() || !address.equals(homeCinemaAddress)) return;
+                        homeCinemaMovies = movies.subList(0, Math.min(4, movies.size()));
+                        if (activePage == Page.HOME) paintHomeCinema();
+                    });
+                } catch (Exception ignored) { /* Keep the Browse action available. */ }
+            });
+        }
+        if (homeCinemaContent.getChildCount() == 0) paintHomeCinema();
+        renderHomePersonal();
+    }
+
+    private void renderHomePersonal() {
+        if (homePersonalContent == null) return;
+        VaultItem saved = null;
+        long resumeAt = 0;
+        JSONArray history = movieHistory();
+        for (int index = 0; index < history.length(); index++) {
+            JSONObject entry = history.optJSONObject(index);
+            if (entry != null && !entry.optString("url").isEmpty() && entry.optLong("position") > 0) {
+                saved = movieFromHistory(entry);
+                resumeAt = entry.optLong("position");
+                break;
+            }
+        }
+        Channel favorite = null;
+        for (Channel channel : channels) if (isFavorite(channel)) { favorite = channel; break; }
+        String key = (saved == null ? "" : saved.url + "@" + resumeAt) + "\n" + (favorite == null ? "" : favorite.url);
+        if (key.equals(homePersonalKey)) return;
+        homePersonalKey = key;
+        homePersonalContent.removeAllViews();
+        homePersonalContent.setVisibility(saved == null && favorite == null ? View.GONE : View.VISIBLE);
+        if (saved != null) {
+            VaultItem movie = saved;
+            long position = resumeAt;
+            homePersonalContent.addView(homeTile("▷", movie.title, "Continue at " + elapsedTime(position), () -> playMovie(movie, position)));
+        }
+        if (favorite != null) {
+            Channel channel = favorite;
+            homePersonalContent.addView(homeTile("★", channel.name, "Watch favorite live", () -> play(channel)));
+        }
+    }
+
+    private View homeSpotlight(Channel channel, JSONObject program, long now) {
+        FrameLayout hero = new FrameLayout(this);
+        hero.setBackground(phonePanel(false, 9));
+        hero.setClipToOutline(true);
+        int minimumHeight = phonePortrait ? 195 : 180;
+        hero.setMinimumHeight(dp(minimumHeight));
+        String art = channel == null ? "" : channelArtwork(channel, program);
+        if (!art.isEmpty()) {
+            ImageView artwork = new ImageView(this);
+            artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            artwork.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            int width = getResources().getConfiguration().screenWidthDp;
+            hero.addView(artwork, new FrameLayout.LayoutParams(phonePortrait ? -1 : dp(width / 2), dp(minimumHeight), Gravity.END | Gravity.CENTER_VERTICAL));
+            posterLoader.execute(() -> loadPoster(art, artwork));
+        }
+        View shade = new View(this);
+        shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{color("#FF080E1C"), color(phonePortrait ? "#DB080E1C" : "#D4080E1C"), color("#18080E1C")}));
+        hero.addView(shade, new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout copy = panel();
+        copy.setGravity(Gravity.CENTER_VERTICAL);
+        copy.setMinimumHeight(dp(minimumHeight));
+        copy.setPadding(dp(13), dp(9), dp(13), dp(9));
+        if (channel != null) copy.addView(sectionTitle("LIVE NOW", "#F352E8"));
+        TextView title = text(program != null ? program.optString("title", channel.name) : channel == null ? "Live TV" : channel.name,
+                phonePortrait ? 24 : 32, true);
+        title.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD_ITALIC));
+        title.setMaxLines(2);
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        copy.addView(title);
+        copy.addView(text(channel == null ? "No channels are online right now." : channel.name + "  •  CH " + channel.number, 14, true));
+        addHomeProgress(copy, program, now);
+        LinearLayout actions = new LinearLayout(this);
+        if (channel != null) guideControl(actions, "▶ WATCH LIVE", "home-watch", () -> play(channel), null);
+        guideControl(actions, "OPEN GUIDE", "home-guide", () -> openPage(Page.LIVE), null);
+        copy.addView(actions);
+        hero.addView(copy, new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_VERTICAL));
         return hero;
     }
 
-    private void buildPhoneHome() {
-        float fontScale = getResources().getConfiguration().fontScale;
-        int heroHeight = 211 + (int) (Math.max(0, fontScale - 1f) * 134);
-        auxiliaryPage.addView(brandedHomeHero(), new LinearLayout.LayoutParams(-1, dp(heroHeight)));
-        addGap(auxiliaryPage, 13);
-        LinearLayout watch = new LinearLayout(this);
-        addPhoneHomeTile(watch, "Live TV Guide", "See what’s on now and what’s next", false, Page.LIVE);
-        addPhoneHomeTile(watch, "Rewind Cinema", "Movies from connected studios", true, Page.CINEMA);
-        auxiliaryPage.addView(watch);
-        addGap(auxiliaryPage, 16);
-
-        LinearLayout notes = panel();
-        notes.setBackground(phonePanel(true, 11));
-        notes.addView(sectionTitle("LATEST UPDATE", "#F0A7FF"));
-        notes.addView(phoneRule());
-        notes.addView(homeTile("↓", "Release notes", "ChannelForge v" + BuildConfig.VERSION_NAME, this::selectUpdate));
-        auxiliaryPage.addView(notes);
-        addGap(auxiliaryPage, 14);
-
-        LinearLayout quick = panel();
-        quick.setBackground(phonePanel(false, 11));
-        quick.addView(sectionTitle("QUICK ACTIONS", "#43E8FF"));
-        LinearLayout actions = new LinearLayout(this);
-        addPhoneHomeTile(actions, "Favorites", "Your saved channels", false, Page.FAVORITES);
-        addPhoneHomeTile(actions, "Continue Watching", "Pick up where you left off", true, Page.CONTINUE);
-        quick.addView(actions);
-        auxiliaryPage.addView(quick);
-        addPhoneBackdrop(auxiliaryPage, 106);
-    }
-
-    private void buildTvHome() {
-        int screenHeight = getResources().getConfiguration().screenHeightDp;
-        float fontScale = getResources().getConfiguration().fontScale;
-        int heroHeight = (screenHeight < 470 ? 166 : 183) + (int) (Math.max(0, fontScale - 1f) * 132);
-        auxiliaryPage.addView(brandedHomeHero(), new LinearLayout.LayoutParams(-1, dp(heroHeight)));
-        addGap(auxiliaryPage, 9);
-        LinearLayout watch = new LinearLayout(this);
-        addHomePair(watch,
-                tvHomeCard("Live TV Guide", "See what’s on now and what’s next", Page.LIVE, false, false, () -> openPage(Page.LIVE)),
-                tvHomeCard("Rewind Cinema", "Movies from connected studios", Page.CINEMA, true, false, () -> openPage(Page.CINEMA)));
-        auxiliaryPage.addView(watch);
-        addGap(auxiliaryPage, 9);
-        LinearLayout notes = tvHomeGroup("LATEST UPDATE", true);
-        notes.addView(tvHomeCard("Release Notes", "ChannelForge v" + BuildConfig.VERSION_NAME, null,
-                true, true, this::selectUpdate));
-        LinearLayout shortcuts = tvHomeGroup("QUICK ACTIONS", false);
-        addHomePair(shortcuts,
-                tvHomeCard("Favorites", "Your saved channels", Page.FAVORITES, false, true, () -> openPage(Page.FAVORITES)),
-                tvHomeCard("Continue Watching", "Pick up where you left off", Page.CONTINUE, false, true, () -> openPage(Page.CONTINUE)));
-        LinearLayout lower = new LinearLayout(this);
-        lower.addView(notes, new LinearLayout.LayoutParams(0, -1, .88f));
-        LinearLayout.LayoutParams quick = new LinearLayout.LayoutParams(0, -1, 1.12f);
-        quick.leftMargin = dp(9);
-        lower.addView(shortcuts, quick);
-        auxiliaryPage.addView(lower);
-    }
-
-    private LinearLayout tvHomeGroup(String title, boolean purple) {
-        LinearLayout group = panel();
-        group.setBackground(tvFrame(purple, 12));
-        group.setPadding(dp(9), dp(4), dp(9), dp(6));
-        group.addView(tvHeading(title, purple));
-        addGap(group, 4);
-        return group;
-    }
-
-    private FrameLayout tvHomeCard(String title, String subtitle, Page glyph, boolean purple, boolean compact, Runnable action) {
-        FrameLayout card = new FrameLayout(this);
-        card.setBackground(tvFrame(purple, compact ? 8 : 13));
+    private View homeProgramCard(Channel channel, JSONObject program, long now) {
+        LinearLayout card = new LinearLayout(this);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(phonePortrait ? -1 : dp(235), dp(phonePortrait ? 64 : 70));
+        if (phonePortrait) layout.bottomMargin = dp(6);
+        else layout.setMarginEnd(dp(8));
+        card.setLayoutParams(layout);
         card.setFocusable(true);
-        card.setOnClickListener(view -> { playMenuSound(); action.run(); });
-        card.setOnFocusChangeListener((view, focused) -> {
-            if (focused) playMenuSound();
-            card.setBackground(tvFrame(purple || focused, compact ? 8 : 13));
-            card.setTranslationZ(focused ? dp(4) : 0);
-        });
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(compact ? 9 : 18), dp(compact ? 4 : 9), dp(8), dp(compact ? 4 : 9));
-        View icon = glyph == null ? text("↓", 25, true) : navigationGlyph(glyph, purple && !compact);
-        if (icon instanceof TextView) {
-            TextView symbol = (TextView) icon;
-            symbol.setTextColor(color("#44EBFF"));
-            symbol.setPadding(0, 0, 0, 0);
-            symbol.setGravity(Gravity.CENTER);
-            symbol.setIncludeFontPadding(false);
-        }
-        int iconSize = dp(compact ? 26 : 45);
-        row.addView(icon, new LinearLayout.LayoutParams(iconSize, iconSize));
-        LinearLayout copy = new LinearLayout(this);
-        copy.setOrientation(LinearLayout.VERTICAL);
-        TextView label = text(title, compact ? 14 : 21, true);
-        label.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
-        label.setPadding(0, 0, 0, 0);
+        card.setContentDescription("Watch live: " + channel.name);
+        card.setBackground(phonePanel(false, 8));
+        card.setClipToOutline(true);
+        card.setOnFocusChangeListener((view, focused) -> card.setBackground(phonePanel(focused, 8)));
+        card.setOnClickListener(view -> play(channel));
+        String art = channelArtwork(channel, program);
+        ImageView artwork = new ImageView(this);
+        artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        artwork.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        card.addView(artwork, new LinearLayout.LayoutParams(dp(81), -1));
+        if (!art.isEmpty()) posterLoader.execute(() -> loadPoster(art, artwork));
+        LinearLayout copy = panel();
+        copy.setPadding(dp(6), 0, dp(5), 0);
+        TextView station = text(channel.name, 13, true);
+        station.setMaxLines(1);
+        station.setEllipsize(TextUtils.TruncateAt.END);
+        copy.addView(station);
+        TextView label = text(program == null ? "CH " + channel.number : program.optString("title", channel.name), 12, false);
+        label.setMaxLines(1);
+        label.setEllipsize(TextUtils.TruncateAt.END);
         copy.addView(label);
-        TextView hint = text(subtitle, compact ? 11 : 13, false);
-        hint.setTypeface(Typeface.create("sans-serif-condensed", Typeface.NORMAL));
-        hint.setPadding(0, 0, 0, 0);
-        copy.addView(hint);
-        LinearLayout.LayoutParams content = new LinearLayout.LayoutParams(0, -2, 1);
-        content.leftMargin = dp(compact ? 6 : 14);
-        row.addView(copy, content);
-        card.addView(row);
-        if (!compact) {
-            FrameLayout.LayoutParams stripe = new FrameLayout.LayoutParams(dp(46), dp(16), Gravity.BOTTOM | Gravity.END);
-            stripe.rightMargin = dp(5);
-            stripe.bottomMargin = dp(4);
-            card.addView(tvStripes(purple), stripe);
-        }
+        addHomeProgress(copy, program, now);
+        card.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
         return card;
     }
 
-    private void addPhoneHomeTile(LinearLayout row, String title, String subtitle, boolean violet, Page page) {
-        LinearLayout tile = new LinearLayout(this);
-        tile.setOrientation(LinearLayout.VERTICAL);
-        tile.setGravity(Gravity.CENTER);
-        tile.setPadding(dp(7), dp(9), dp(7), dp(9));
-        tile.setBackground(phonePanel(violet, 12));
-        tile.setFocusable(true);
-        tile.setContentDescription(title);
-        tile.setOnClickListener(view -> { playMenuSound(); openPage(page); });
-        tile.setOnFocusChangeListener((view, focused) -> {
-            if (focused) playMenuSound();
-            tile.setBackground(phonePanel(focused || violet, 12));
-            tile.setTranslationZ(focused ? dp(4) : 0);
-            tile.setAlpha(focused ? 1f : .94f);
-        });
-        tile.addView(navigationGlyph(page, violet), new LinearLayout.LayoutParams(dp(38), dp(38)));
-        addGap(tile, 3);
-        TextView label = text(title, 17, true);
-        label.setGravity(Gravity.CENTER);
-        label.setPadding(0, 0, 0, dp(2));
-        tile.addView(label);
-        TextView hint = text(subtitle, 12, false);
-        hint.setTextColor(color("#D2DBEF"));
-        hint.setGravity(Gravity.CENTER);
-        hint.setPadding(0, 0, 0, 0);
-        tile.addView(hint);
-        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(0, -1, 1);
-        if (row.getChildCount() > 0) layout.setMarginStart(dp(9));
-        row.addView(tile, layout);
+    private void addHomeProgress(LinearLayout copy, JSONObject program, long now) {
+        if (program == null) return;
+        long start = guideTimeMillis(program, "start");
+        long duration = guideTimeMillis(program, "stop") - start;
+        if (duration <= 0) return;
+        ProgressBar progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progress.setMax(1000);
+        progress.setProgress((int) Math.min(1000, Math.max(0, 1000 * (now - start) / duration)));
+        progress.setContentDescription("Program progress");
+        progress.setProgressTintList(android.content.res.ColorStateList.valueOf(color("#F23BD9")));
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, dp(6));
+        size.setMargins(dp(4), dp(4), dp(6), dp(7));
+        copy.addView(progress, size);
+    }
+
+    private String channelArtwork(Channel channel, JSONObject program) {
+        if (program != null) {
+            for (String key : new String[]{"backdrop_url", "series_poster_url", "poster_url"}) {
+                String address = program.optString(key);
+                if (!address.isEmpty()) return address;
+            }
+        }
+        return channel.logo;
+    }
+
+    private void paintHomeCinema() {
+        homeCinemaContent.removeAllViews();
+        homeCinemaContent.addView(sectionTitle("FROM REWIND CINEMA", "#F0A7FF"));
+        LinearLayout row = new LinearLayout(this);
+        if (phonePortrait) row.setOrientation(LinearLayout.VERTICAL);
+        for (VaultItem item : homeCinemaMovies) {
+            FrameLayout tape = new FrameLayout(this);
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(phonePortrait ? -1 : dp(237), dp(61));
+            if (phonePortrait) size.bottomMargin = dp(6);
+            else size.setMarginEnd(dp(8));
+            tape.setFocusable(true);
+            tape.setContentDescription("Select " + item.title);
+            tape.setBackground(phonePanel(false, 8));
+            tape.setClipToOutline(true);
+            ImageView shell = new ImageView(this);
+            shell.setScaleType(ImageView.ScaleType.FIT_XY);
+            shell.setImageResource(R.drawable.cinema_spine);
+            shell.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            tape.addView(shell, new FrameLayout.LayoutParams(-1, -1));
+            TextView title = text(item.title, 15, true);
+            title.setGravity(Gravity.CENTER_VERTICAL);
+            title.setTextColor(color("#211621"));
+            title.setBackgroundColor(color("#F0D2A7"));
+            title.setMaxLines(1);
+            title.setEllipsize(TextUtils.TruncateAt.END);
+            FrameLayout.LayoutParams label = new FrameLayout.LayoutParams(-1, dp(32), Gravity.CENTER_VERTICAL);
+            label.setMargins(dp(16), dp(8), dp(18), 0);
+            tape.addView(title, label);
+            tape.setOnFocusChangeListener((view, focused) -> title.setBackgroundColor(color(focused ? "#F1A9FD" : "#F0D2A7")));
+            tape.setOnClickListener(view -> showPhoneMovieDetails(item));
+            row.addView(tape, size);
+        }
+        guideControl(row, "BROWSE MOVIES", "home-cinema", () -> openPage(Page.CINEMA), null);
+        if (phonePortrait) homeCinemaContent.addView(row);
+        else addHorizontalStrip(homeCinemaContent, row);
     }
 
     private View navigationGlyph(Page page, boolean purple) {
@@ -1911,22 +1811,6 @@ public class MainActivity extends Activity {
         return icon;
     }
 
-    private void addHomePair(LinearLayout parent, View left, View right) {
-        if (phonePortrait) {
-            parent.addView(left, new LinearLayout.LayoutParams(-1, -2));
-            addGap(parent, 7);
-            parent.addView(right, new LinearLayout.LayoutParams(-1, -2));
-            return;
-        }
-        LinearLayout row = new LinearLayout(this);
-        row.setBaselineAligned(false);
-        LinearLayout.LayoutParams first = new LinearLayout.LayoutParams(0, -2, 1);
-        first.rightMargin = dp(8);
-        row.addView(left, first);
-        row.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
-        parent.addView(row, new LinearLayout.LayoutParams(-1, -2));
-    }
-
     private View homeTile(String symbol, String title, String subtitle, Runnable action) {
         LinearLayout tile = new LinearLayout(this);
         tile.setGravity(Gravity.CENTER_VERTICAL);
@@ -1958,10 +1842,7 @@ public class MainActivity extends Activity {
         for (int index = 0; index < history.length(); index++) {
             JSONObject entry = history.optJSONObject(index);
             if (entry == null) continue;
-            VaultItem movie = new VaultItem(entry.optString("title"), entry.optString("year"), "",
-                    entry.optString("poster"), entry.optString("fullPoster"), entry.optString("url"));
-            movie.id = entry.optString("id");
-            movie.studioId = entry.optString("studioId");
+            VaultItem movie = movieFromHistory(entry);
             long position = entry.optLong("position");
             if (!movie.url.isEmpty() && position > 0) {
                 if (BuildConfig.TESTER_BUILD) {
@@ -1976,6 +1857,14 @@ public class MainActivity extends Activity {
             }
         }
         if (added == 0) auxiliaryPage.addView(text("No unfinished movies yet.", 13, false));
+    }
+
+    private VaultItem movieFromHistory(JSONObject entry) {
+        VaultItem movie = new VaultItem(entry.optString("title"), entry.optString("year"), "",
+                entry.optString("poster"), entry.optString("fullPoster"), entry.optString("url"));
+        movie.id = entry.optString("id");
+        movie.studioId = entry.optString("studioId");
+        return movie;
     }
 
     private void showResumeChoices(VaultItem movie, long position) {
@@ -2123,7 +2012,8 @@ public class MainActivity extends Activity {
         for (int i = 0; i < entries.length(); i++) {
             JSONObject entry = entries.getJSONObject(i);
             String availability = entry.optString("state", entry.optBoolean("online", true) ? "broadcasting" : "offline");
-            if (entry.has("stream_url") && !"offline".equals(availability)) {
+            if (entry.has("stream_url") && entry.optBoolean("online", true)
+                    && !"offline".equals(availability) && !"reconnecting".equals(availability)) {
                 String address = studioMediaAddress(entry.getString("stream_url"), guideUrl);
                 if (address.isEmpty()) continue;
                 Channel channel = new Channel(entry.getString("name"), address);
@@ -2216,6 +2106,7 @@ public class MainActivity extends Activity {
     }
 
     private static final long HALF_HOUR = 30 * 60 * 1000L;
+    private static final int GUIDE_HOURS_AHEAD = 12;
 
     private void renderChannels(String creator) {
         if (activePage != Page.LIVE) {
@@ -2244,6 +2135,11 @@ public class MainActivity extends Activity {
                 "search", () -> searchGuide(), previousFocus);
         guideControl(tools, guideSortByRating ? "SORT: RATING" : "SORT: CHANNEL", "guide-sort",
                 this::chooseGuideSort, previousFocus);
+        guideControl(tools, fullGuide ? "COMPACT GUIDE" : "FULL GUIDE", "guide-layout", () -> {
+            fullGuide = !fullGuide;
+            guideOffset = 0;
+            showLoadedChannels();
+        }, previousFocus);
         addGuideStrip(tools);
         addGap(liveRail, 6);
         LinearLayout filters = new LinearLayout(this);
@@ -2258,6 +2154,10 @@ public class MainActivity extends Activity {
         if (channels.isEmpty()) {
             liveRail.addView(text(loadingGuides.isEmpty() ? "No live channels are reachable. Select Scan to check again."
                     : "Finding live channels…", 14, false));
+            return;
+        }
+        if (!fullGuide) {
+            renderCompactChannels(previousFocus);
             return;
         }
         int viewport = getResources().getDisplayMetrics().widthPixels
@@ -2326,6 +2226,79 @@ public class MainActivity extends Activity {
         addGap(liveRail, 7);
     }
 
+    private List<JSONObject> upcomingPrograms(Channel channel, long now) {
+        List<JSONObject> next = new ArrayList<>();
+        if (channel.programs == null) return next;
+        for (int i = 0; i < channel.programs.length() && next.size() < 2; i++) {
+            JSONObject entry = channel.programs.optJSONObject(i);
+            if (entry != null && guideTimeMillis(entry, "start") > now) next.add(entry);
+        }
+        return next;
+    }
+
+    private void renderCompactChannels(Object previousFocus) {
+        long now = System.currentTimeMillis();
+        List<Integer> displayed = displayedGuideIndices();
+        if (displayed.isEmpty()) {
+            liveRail.addView(text("No channels match this search.", 13, false));
+            return;
+        }
+        showProgram(channels.get(displayed.get(0)));
+        for (int index : displayed) {
+            Channel channel = channels.get(index);
+            JSONObject current = programAt(channel, now);
+            List<JSONObject> next = upcomingPrograms(channel, now);
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(5), dp(4), dp(5), dp(4));
+            row.setBackground(phonePanel(false, 8));
+            String art = channelArtwork(channel, current);
+            if (!art.isEmpty()) {
+                ImageView artwork = new ImageView(this);
+                artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                artwork.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                artwork.setBackground(phonePanel(false, 7));
+                artwork.setClipToOutline(true);
+                row.addView(artwork, new LinearLayout.LayoutParams(dp(phoneLayout ? 73 : 110), dp(phoneLayout ? 47 : 59)));
+                posterLoader.execute(() -> loadPoster(art, artwork));
+            }
+            addCompactCell(row, "CH " + displayNumber(channel, index) + guideRatingLabel(channel), channel.name, 1.2f);
+            addCompactCell(row, "On Now", current == null ? "Schedule unavailable" : current.optString("title"), 1f);
+            addCompactCell(row, "Up Next", next.isEmpty() ? "—" : next.get(0).optString("title"), 1f);
+            if (getResources().getConfiguration().screenWidthDp >= 850)
+                addCompactCell(row, "Later", next.size() < 2 ? "—" : next.get(1).optString("title"), 1f);
+            boolean saved = isFavorite(channel);
+            TextView star = navigationButton(saved ? "★" : "☆");
+            star.setContentDescription("Favorite " + channel.name);
+            star.setOnClickListener(view -> toggleFavorite(channel, star));
+            row.addView(star);
+            String tag = "compact-watch:" + channel.url;
+            guideControl(row, "▶ WATCH LIVE", tag, () -> play(channel), previousFocus);
+            View watch = row.findViewWithTag(tag);
+            watch.setContentDescription("Watch live: " + channel.name);
+            watch.setOnFocusChangeListener((view, focused) -> {
+                if (focused) { playMenuSound(); showProgram(channel); }
+            });
+            liveRail.addView(row);
+            addGap(liveRail, 5);
+        }
+    }
+
+    private void addCompactCell(LinearLayout row, String label, String value, float weight) {
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setPadding(dp(5), 0, dp(5), 0);
+        TextView heading = text(label, 10, true);
+        heading.setTextColor(color("#6BEAFF"));
+        heading.setSingleLine(true);
+        TextView title = text(value, 13, true);
+        title.setSingleLine(true);
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        cell.addView(heading);
+        cell.addView(title);
+        row.addView(cell, new LinearLayout.LayoutParams(0, -2, weight));
+    }
+
     private void addPhoneGuideDestination(LinearLayout row, String label, Page page) {
         boolean selected = page == Page.LIVE;
         LinearLayout button = new LinearLayout(this);
@@ -2388,7 +2361,7 @@ public class MainActivity extends Activity {
 
     private void choosePhoneGuideTime() {
         long now = System.currentTimeMillis();
-        String[] times = new String[7];
+        String[] times = new String[GUIDE_HOURS_AHEAD + 2];
         for (int i = 0; i < times.length; i++) {
             times[i] = i == 1 ? "Now" : guideTime(now + 2L * (i - 1) * HALF_HOUR);
         }
@@ -2423,12 +2396,14 @@ public class MainActivity extends Activity {
             markLabel.setGravity(Gravity.CENTER);
             markLabel.setTextColor(color("#52F0FB"));
             mark.addView(markLabel, new FrameLayout.LayoutParams(-1, -1));
-            if (!channel.logo.isEmpty()) {
+            JSONObject scheduled = programAt(channel, guideTime);
+            String art = channelArtwork(channel, scheduled);
+            if (!art.isEmpty()) {
                 ImageView logo = new ImageView(this);
                 logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
                 logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
                 mark.addView(logo, new FrameLayout.LayoutParams(-1, -1));
-                posterLoader.execute(() -> loadPoster(channel.logo, logo));
+                posterLoader.execute(() -> loadPoster(art, logo));
             }
             card.addView(mark, new LinearLayout.LayoutParams(dp(83), dp(68)));
             LinearLayout identity = new LinearLayout(this);
@@ -2443,7 +2418,6 @@ public class MainActivity extends Activity {
             TextView name = text(channel.name, 16, true);
             name.setPadding(0, dp(2), 0, 0);
             identity.addView(name);
-            JSONObject scheduled = programAt(channel, guideTime);
             String program = scheduled == null ? "No program listed" : scheduled.optString("title", "No program listed");
             TextView summary = text(program, 12, false);
             summary.setTextColor(color("#BED3E8"));
@@ -2451,6 +2425,14 @@ public class MainActivity extends Activity {
             summary.setMaxLines(2);
             summary.setEllipsize(TextUtils.TruncateAt.END);
             identity.addView(summary);
+            List<JSONObject> upcoming = upcomingPrograms(channel, guideTime);
+            if (!upcoming.isEmpty()) {
+                TextView next = text("Next: " + upcoming.get(0).optString("title"), 11, false);
+                next.setMaxLines(1);
+                next.setEllipsize(TextUtils.TruncateAt.END);
+                next.setPadding(0, dp(2), 0, 0);
+                identity.addView(next);
+            }
             if (guideOffset == 0 && scheduled != null) {
                 long scheduledStart = guideTimeMillis(scheduled, "start");
                 long duration = guideTimeMillis(scheduled, "stop") - scheduledStart;
@@ -2506,6 +2488,7 @@ public class MainActivity extends Activity {
         parent.addView(viewport);
     }
 
+
     private void guideControl(LinearLayout row, String label, String id, Runnable action, Object previous) {
         TextView button = navigationButton(label);
         button.setTag(id);
@@ -2520,7 +2503,8 @@ public class MainActivity extends Activity {
     }
 
     private void moveGuide(int direction) {
-        guideOffset = Math.max(-1, Math.min(5, guideOffset + direction));
+        fullGuide = true;
+        guideOffset = Math.max(-1, Math.min(GUIDE_HOURS_AHEAD, guideOffset + direction));
         showLoadedChannels();
     }
 
@@ -3456,7 +3440,8 @@ public class MainActivity extends Activity {
         updateSession = -1;
         installConfirmation = null;
         updateButton.setText(BuildConfig.TESTER_BUILD ? testerVersionLabel()
-                : pendingUpdate == null ? "UP TO DATE ✓  v" + BuildConfig.VERSION_NAME : "UPDATE TO v" + pendingUpdate.version);
+                : pendingUpdate == null ? (phonePortrait ? "v" : "UP TO DATE ✓  v") + BuildConfig.VERSION_NAME
+                : (phonePortrait ? "UPDATE\nv" : "UPDATE TO v") + pendingUpdate.version);
         if (resumed && guideVisible && !message.isEmpty()) showBanner(message);
     }
 
@@ -3628,6 +3613,10 @@ public class MainActivity extends Activity {
         video.removeCallbacks(resetPlaybackRetries);
         Uri fallback = Uri.parse(url);
         Uri input = preferredPlayback(fallback, live);
+        String host = input.getHost();
+        deliveryPath = host == null ? "unknown" : host.equals("channelforge-vps.tailb58ce4.ts.net") ? "managed-vps" :
+                host.endsWith(".lhr.life") ? "legacy-tunnel" :
+                host.equals("localhost") || host.equals("127.0.0.1") || host.equals("[::1]") ? "local" : "direct";
         usingPreferredRelay = !input.equals(fallback);
         if (usingPreferredRelay) android.util.Log.i("ChannelForgePlayback", "Using preferred media relay");
         String path = input.getPath();
@@ -3635,7 +3624,7 @@ public class MainActivity extends Activity {
         if (path != null && (path.startsWith("/broadcast/") || path.startsWith("/live/") || path.startsWith("/vault/"))) {
             input = input.buildUpon().appendQueryParameter("viewer", viewerLease).build();
         }
-        MediaItem.Builder media = new MediaItem.Builder().setUri(input).setMimeType(MimeTypes.APPLICATION_M3U8);
+        MediaItem.Builder media = new MediaItem.Builder().setUri(input).setMediaId(viewerLease).setMimeType(MimeTypes.APPLICATION_M3U8);
         if (live) {
             media.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(20000).build());
             player.setMediaItem(media.build());
@@ -3648,6 +3637,8 @@ public class MainActivity extends Activity {
 
     private void beginTune() {
         ++playGeneration;
+        viewerLease = UUID.randomUUID().toString().replace("-", "");
+        recentEvents.clear();
         recovering = false;
         usingPreferredRelay = skipPreferredRelay = false;
         finishRebuffer();
@@ -3658,11 +3649,37 @@ public class MainActivity extends Activity {
         lastHttpResource = null;
         segmentLoads = segmentErrors = manifestErrors = 0;
         segmentLoadMs = segmentLoadBytes = slowestSegmentMs = slowestManifestMs = 0;
+        relayCacheHits = relayCacheMisses = 0;
+        slowestRelayUpstreamMs = slowestStudioResponseMs = -1;
         resumePosition = 0;
         lastReason = "none";
         tuneStarted = SystemClock.elapsedRealtime();
         firstFrameMs = -1;
         testerEvent("load");
+    }
+
+    private static String responseHeader(Map<String, List<String>> headers, String name) {
+        for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
+            if (name.equalsIgnoreCase(entry.getKey()) && entry.getValue() != null && !entry.getValue().isEmpty())
+                return entry.getValue().get(0);
+        }
+        return "";
+    }
+
+    private void recordDeliveryHeaders(Map<String, List<String>> headers) {
+        if ("vps".equals(responseHeader(headers, "X-ChannelForge-Relay"))) deliveryPath = "managed-vps";
+        String cache = responseHeader(headers, "X-ChannelForge-Cache");
+        if ("HIT".equals(cache) || "STALE".equals(cache) || "UPDATING".equals(cache) || "REVALIDATED".equals(cache)) {
+            relayCacheHits++;
+            return; // Cached headers describe an earlier Studio fetch.
+        }
+        if ("MISS".equals(cache) || "EXPIRED".equals(cache) || "BYPASS".equals(cache)) relayCacheMisses++;
+        String upstream = responseHeader(headers, "X-ChannelForge-Upstream-Header-Time");
+        String studio = responseHeader(headers, "X-ChannelForge-Studio-Response-Ms");
+        if (upstream.matches("[0-9]{1,3}\\.[0-9]{3}"))
+            slowestRelayUpstreamMs = Math.max(slowestRelayUpstreamMs, Math.round(Double.parseDouble(upstream) * 1000));
+        if (studio.matches("[0-9]{1,6}"))
+            slowestStudioResponseMs = Math.max(slowestStudioResponseMs, Long.parseLong(studio));
     }
 
     private void recover(String reason) {
@@ -4045,7 +4062,8 @@ public class MainActivity extends Activity {
                 + "bufferMs positionMs playing bandwidthEstimateBps retries temporaryBitrateCapBps "
                 + "postStartRebuffers postStartRebufferMs playerErrorCode httpError http_resource build_revision width height "
                 + "videoBitrateBps videoMime audioMime audioChannels renderedFrames droppedFrames "
-                + "delivery_route segment_loads segment_errors manifest_errors slowest_segment_ms slowest_manifest_ms segment_rate_bps").split(" ")) {
+                + "delivery_route delivery_path segment_loads segment_errors manifest_errors slowest_segment_ms slowest_manifest_ms segment_rate_bps "
+                + "relay_cache_hits relay_cache_misses slowest_relay_upstream_ms slowest_studio_response_ms").split(" ")) {
             if (snapshot.has(key)) shared.put(key, snapshot.get(key));
         }
         shared.put("platform", TesterApplication.platform())
@@ -4113,6 +4131,8 @@ public class MainActivity extends Activity {
                     .put("manifest_errors", manifestErrors).put("slowest_segment_ms", slowestSegmentMs)
                     .put("slowest_manifest_ms", slowestManifestMs)
                     .put("segment_rate_bps", segmentLoadMs == 0 ? -1 : Math.round(8000.0 * segmentLoadBytes / segmentLoadMs))
+                    .put("delivery_path", deliveryPath).put("relay_cache_hits", relayCacheHits).put("relay_cache_misses", relayCacheMisses)
+                    .put("slowest_relay_upstream_ms", slowestRelayUpstreamMs).put("slowest_studio_response_ms", slowestStudioResponseMs)
                     .put("decoder", decoderName).put("processCpuPercentOfOneCore", cpuPercent)
                     .put("pssKiB", android.os.Debug.getPss()).put("events", new JSONArray(recentEvents));
             if (tunedChannel != null || activeMovie != null) {
@@ -4140,7 +4160,7 @@ public class MainActivity extends Activity {
     }
 
     private void showDiagnostics() {
-        JSONObject snapshot = diagnosticSnapshot();
+        JSONObject snapshot = guideVisible && lastPublicPlayback != null ? lastPublicPlayback : diagnosticSnapshot();
         String report;
         try { report = snapshot.toString(2); } catch (JSONException e) { return; }
         new AlertDialog.Builder(this).setTitle("Playback diagnostics").setMessage(
@@ -4332,9 +4352,13 @@ public class MainActivity extends Activity {
     private void returnToGuide() {
         boolean refreshAfterStall = !guideVisible && resumed
                 && (playbackFailed || playbackWaiting || liveRetries > 0 || movieRetries > 0);
-        if (BuildConfig.TESTER_BUILD && testerConsented() && (tunedChannel != null || activeMovie != null)) {
-            try { lastPlaybackReport = snapshotForSharing(); }
-            catch (JSONException ignored) { lastPlaybackReport = null; }
+        if (tunedChannel != null || activeMovie != null) {
+            if (BuildConfig.TESTER_BUILD && testerConsented()) {
+                try { lastPlaybackReport = snapshotForSharing(); }
+                catch (JSONException ignored) { lastPlaybackReport = null; }
+            } else {
+                lastPublicPlayback = diagnosticSnapshot();
+            }
         }
         ++playGeneration;
         recovering = false;
@@ -4397,7 +4421,6 @@ public class MainActivity extends Activity {
         String playbackOrigin = "";
         long lastHeartbeat;
         long updatedAt;
-        List<Channel> hubChannels;
         Creator(String name, String description, String playlist, String vault, String channelStatus, boolean cinemaSupported) {
             this.name = name;
             this.description = description;

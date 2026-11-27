@@ -2,5 +2,18 @@
 <component name="ChannelCard" extends="Group">
   <interface><field id="itemContent" type="node" onChange="itemChanged"/><field id="focusPercent" type="float" onChange="focusChanged"/></interface>
   <script type="text/brightscript" uri="ChannelCard.brs" />
-  <children><Rectangle id="background" width="760" height="88" color="0x0d1724ff"/><Label id="number" translation="[18,13]" width="105" height="60" color="0x67f0c2ff" font="font:MediumBoldSystemFont"/><Label id="title" translation="[126,10]" width="600" height="35" font="font:MediumBoldSystemFont"/><Label id="now" translation="[126,47]" width="600" height="28" color="0xa9b7c8ff" font="font:SmallSystemFont"/></children>
+  <children>
+    <Rectangle id="background" width="1180" height="88" color="0x0d1724ff"/>
+    <Poster id="logo" translation="[12,10]" width="140" height="68" loadDisplayMode="scaleToZoom"/>
+    <Rectangle translation="[164,19]" width="4" height="49" color="0xeb59e5ff"/>
+    <Label id="number" translation="[178,9]" width="158" height="29" color="0x67f0c2ff" font="font:SmallSystemFont"/>
+    <Label id="title" translation="[178,43]" width="158" height="34" color="0xf3fbffff" font="font:MediumBoldSystemFont"/>
+    <Label text="ON NOW" translation="[350,9]" width="205" height="30" color="0x72d9ffff" font="font:SmallSystemFont"/>
+    <Label id="now" translation="[350,43]" width="230" height="30" color="0xf3fbffff" font="font:SmallSystemFont"/>
+    <Label text="UP NEXT" translation="[590,9]" width="200" height="30" color="0x72d9ffff" font="font:SmallSystemFont"/>
+    <Label id="next" translation="[590,43]" width="205" height="30" color="0xf3fbffff" font="font:SmallSystemFont"/>
+    <Label text="LATER" translation="[805,9]" width="190" height="30" color="0x72d9ffff" font="font:SmallSystemFont"/>
+    <Label id="later" translation="[805,43]" width="185" height="30" color="0xf3fbffff" font="font:SmallSystemFont"/>
+    <Label text="OK · WATCH" translation="[999,17]" width="166" height="52" horizAlign="center" color="0x72efffff" font="font:SmallSystemFont"/>
+  </children>
 </component>
