@@ -50,7 +50,7 @@ APP_NAME = "Public_ChannelForge"
 TESTER_CONFIG = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets/tester-config.json"
 TESTER_BUILD = TESTER_CONFIG.is_file()
 APP_TITLE = "ChannelForge Studio Tester" if TESTER_BUILD else "ChannelForge Studio"
-VERSION = "4.2.0"
+VERSION = "4.5.0"
 if TESTER_BUILD:
     VERSION = json.loads(TESTER_CONFIG.read_text(encoding="utf-8")).get("version", VERSION)
 DISCOVERY_VERSION = VERSION.partition("-")[0]
@@ -76,6 +76,8 @@ STUDIO_TRAFFIC = {}
 STUDIO_TRAFFIC_LOCK = threading.Lock()
 STREAM_TRACES = deque(maxlen=128)
 LIVE_PLAYOUT = {}
+BROADCAST_DEFAULT = (720, 2500)
+BROADCAST_HEIGHTS = (270, 480, 720)
 EXPORT_CHANNEL_IDS = None
 DEFAULT_DIRECTORY_URL = "https://channelforge-directory.fresh-anorak.workers.dev"
 OLD_DIRECTORY_URL = "https://directory.channelforge.tv"
@@ -1873,6 +1875,16 @@ def media_rating_level(value) -> int:
     return CHANNEL_RATING_LEVELS.get(rating, 0)
 
 
+def broadcast_settings(channel: dict) -> tuple[int, int]:
+    height = channel.get("broadcast_height", BROADCAST_DEFAULT[0])
+    bitrate = channel.get("broadcast_kbps", BROADCAST_DEFAULT[1])
+    if type(height) is not int or height not in BROADCAST_HEIGHTS:
+        raise ValueError("Choose a broadcast quality of 270p, 480p, or 720p.")
+    if type(bitrate) is not int or not 250 <= bitrate <= BROADCAST_DEFAULT[1]:
+        raise ValueError("Choose a broadcast bitrate from 250 to 2500 kbps.")
+    return height, bitrate
+
+
 def clean_channel(payload: dict, existing_id: str = "") -> dict:
     name = str(payload.get("name", "")).strip()
     if not name:
@@ -1884,6 +1896,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         raise ValueError("Choose a supported channel rating.")
     if not number:
         raise ValueError("Channel number is required.")
+    broadcast_height, broadcast_kbps = broadcast_settings(payload)
     items = payload.get("items", [])
     if not isinstance(items, list) or not items:
         raise ValueError("Select at least one media title.")
@@ -1923,6 +1936,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
     return {
         "id": existing_id or secrets.token_hex(8), "name": name[:100], "number": number[:12],
         "section": section, "items": normalized, "channel_rating": channel_rating,
+        "broadcast_height": broadcast_height, "broadcast_kbps": broadcast_kbps,
         "logo_asset_id": str(payload.get("logo_asset_id", ""))[:80],
         "background_asset_id": str(payload.get("background_asset_id", ""))[:80],
         "corner_bug_asset_id": str(payload.get("corner_bug_asset_id", ""))[:80],
@@ -1944,6 +1958,9 @@ def save_channel(payload: dict, channel_id: str = "") -> dict:
             if not payload.get("schedule_anchor"):
                 payload["schedule_anchor"] = previous.get("schedule_anchor")
             payload.setdefault("channel_rating", previous.get("channel_rating", ""))
+            height, bitrate = broadcast_settings(previous)
+            payload.setdefault("broadcast_height", height)
+            payload.setdefault("broadcast_kbps", bitrate)
         item = clean_channel(payload, channel_id)
         number = channel_number_key(item["number"])
         changed = not previous or number != channel_number_key(previous["number"])
@@ -3174,18 +3191,49 @@ def square_pixel_scale(width: int, height: int) -> str:
     return f"scale=w='max(2,trunc({display_width}*{factor}/2)*2)':h='max(2,trunc(ih*{factor}/2)*2)',setsar=1"
 
 
-def relay_renditions(constrained=False, *, on_demand=False):
+def relay_renditions(constrained=False, *, on_demand=False, limits=BROADCAST_DEFAULT):
     # name, max dimensions, video target/peak (kbit/s), threads, advertised peak including audio and TS.
     economy = ("economy", 480, 270, 104, 124, 1, 224000) if constrained else ("economy", 480, 270, 128, 165, 1, 270000)
     balanced = ("balanced", 854, 480, 430, 540, 1, 690000)
-    hd = (("hd", 1280, 720, 1150, 1450, 2, 1750000) if constrained or on_demand
-          else ("hd", 1280, 720, 3000, 3400, 2, 4000000))
-    return economy, balanced, hd
+    hd = ("hd", 1280, 720, 1150, 1450, 2, 1750000)
+    if on_demand:
+        return economy, balanced, hd
+    max_height, max_kbps = limits
+    rows = [row for row in (economy, balanced, hd) if row[2] <= max_height]
+    result = []
+    for index, (name, width, height, target, peak, threads, bandwidth) in enumerate(rows):
+        ceiling = min(max_kbps, bandwidth // 1000) if constrained or index < len(rows) - 1 else max_kbps
+        # Reserve space for AAC, MPEG-TS overhead, and variation within a segment.
+        if ceiling * 1000 != bandwidth:
+            peak = max(95, int(ceiling * 0.90) - 64)
+            target = int(peak * 0.91)
+        if result and ceiling * 1000 <= result[-1][-1]:
+            result.pop()
+            name = "economy" if not result else name
+        result.append((name, width, height, target, peak, threads, ceiling * 1000))
+    return tuple(result)
+
+
+def limit_hls_master(manifest: bytes, max_bandwidth: int) -> bytes:
+    if not max_bandwidth:
+        return manifest
+    pattern = rb"(?m)^#EXT-X-STREAM-INF:(?:[^\r\n]*?,)?BANDWIDTH=(\d+)[^\r\n]*\r?\n[^#\r\n][^\r\n]*\r?\n?"
+    choices = list(re.finditer(pattern, manifest))
+    if not choices:
+        return manifest
+    eligible = [choice for choice in choices if int(choice[1]) <= max_bandwidth]
+    keep = {choice.start() for choice in (eligible or [min(choices, key=lambda choice: int(choice[1]))])}
+    return re.sub(pattern, lambda choice: choice[0] if choice.start() in keep else b"", manifest)
+
+
+def requested_playback_bandwidth(query: str) -> int:
+    cap = urllib.parse.parse_qs(query).get("max_kbps", [""])[0]
+    return int(cap) * 1000 if cap in {"400", "1000"} else 0
 
 
 def adaptive_relay_options(directory: Path, audio_index: int, has_audio: bool, video_limit_kbps: int | None = None,
-                           *, constrained=False, on_demand=False) -> tuple[list[str], list[str], dict[str, int]]:
-    renditions = relay_renditions(constrained, on_demand=on_demand)
+                           *, constrained=False, on_demand=False, limits=BROADCAST_DEFAULT) -> tuple[list[str], list[str], dict[str, int]]:
+    renditions = relay_renditions(constrained, on_demand=on_demand, limits=limits)
     inputs = "".join(f"[{name}_in]" for name, *_ in renditions)
     filters = [f"[0:v:0]{DEINTERLACE_VIDEO},split={len(renditions)}{inputs}"]
     maps, variants, peaks = [], [], {}
@@ -3233,7 +3281,8 @@ def start_or_reuse_encoder(channel: dict, *, public_delivery: bool = False, cons
     if position.get("recovery_key"):
         start_key += ":" + position["recovery_key"]
     profile = "constrained" if constrained_live else "public" if public_delivery else "standard"
-    reuse_key = (channel["id"], media_source_identity(item), start_key, profile)
+    reuse_key = (channel["id"], media_source_identity(item), start_key, profile,
+                 None if on_demand else broadcast_settings(channel))
     with LOCK:
         generation = ENCODER_GENERATION
         for identity, existing in FFMPEG_SESSIONS.items():
@@ -3338,18 +3387,24 @@ def launch_encoder(identity, channel, position, profile, relay, budget, *, softw
     media_rate = int((budget - 8 * 1024**2) * 8 / max(1, duration) / 1000 * 0.82) if on_demand else None
     audio_rate = 64 if has_audio is not False else 0
     peaks = {}
-    if constrained_live and has_audio is None:
+    limits = BROADCAST_DEFAULT if on_demand else broadcast_settings(channel)
+    renditions = relay_renditions(constrained_live, on_demand=on_demand, limits=limits)
+    if constrained_live and has_audio is None and len(renditions) > 1:
         encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?", "-threads:v", "2",
                     "-vf", f"{DEINTERLACE_VIDEO},{square_pixel_scale(480, 270)}",
                     "-b:v", "104k", "-maxrate", "124k", "-bufsize", "124k"]
         output = ["-hls_segment_filename", str(directory / "segment%06d.ts"), str(directory / "index.m3u8")]
-    elif relay and has_audio is not None and (media_rate is None or media_rate >= 750):
+    elif relay and len(renditions) > 1 and has_audio is not None and (media_rate is None or media_rate >= 750):
         video_limit = media_rate - 3 * audio_rate if media_rate is not None else None
         encoding, output, peaks = adaptive_relay_options(directory, audio_index, has_audio, video_limit,
-                                                         constrained=constrained_live, on_demand=on_demand)
+                                                         constrained=constrained_live, on_demand=on_demand, limits=limits)
     else:
         encoding = ["-map", "0:v:0", "-map", f"0:a:{audio_index}?"]
-        if relay:
+        if not on_demand:
+            _, width, height, target, maximum, _, _ = renditions[-1]
+            encoding += ["-vf", f"{DEINTERLACE_VIDEO},{square_pixel_scale(width, height)}",
+                         "-b:v", f"{target}k", "-maxrate", f"{maximum}k", "-bufsize", f"{maximum}k"]
+        elif relay:
             maximum = min(1000, media_rate - audio_rate) if media_rate is not None else 1000
             encoding += ["-vf", f"{DEINTERLACE_VIDEO},{square_pixel_scale(1280, 720)}",
                          "-b:v", f"{min(800, maximum)}k", "-maxrate", f"{maximum}k", "-bufsize", f"{maximum}k"]
@@ -3634,6 +3689,8 @@ class LivePlayout:
         self.resume_at = None
         self.media_start = None
         self.segment_seconds = 1
+        self.broadcast_limits = BROADCAST_DEFAULT
+        self.constrained = False
 
     def prepare_upcoming(self):
         boundary = self.next_boundary
@@ -3812,7 +3869,7 @@ class LivePlayout:
         last = -1
         media_cursor = self.media_start
         progressed_at = time.monotonic()
-        names = ("economy", "balanced", "hd") if adaptive else ("economy",)
+        names = tuple(re.findall(r"(?m)^index_(economy|balanced|hd)\.m3u8\r?$", master)) if adaptive else ("economy",)
         paths = {name: directory / (f"index_{name}.m3u8" if adaptive else "index.m3u8") for name in names}
         fingerprints, snapshots, final_playlist = {}, {}, {}
         common = []
@@ -4183,8 +4240,12 @@ def movie_added_at(item: dict) -> int:
 
 def public_movie(base: str, item_id: str, section: str, item: dict) -> dict:
     thumb = str(item.get("thumb", ""))
+    backdrop = str(item.get("art", ""))
+    backdrop_url = ""
     if item.get("source") == "jellyfin":
         poster_url = f"{base}/api/public/movie-art?id={item_id}" if jellyfin_id(thumb) else ""
+        if jellyfin_id(backdrop):
+            backdrop_url = f"{base}/api/public/movie-art?id={item_id}&type=Backdrop"
     elif item.get("source") == "local" and thumb:
         params = urllib.parse.urlencode({"section": item.get("section") or section, "id": item.get("id", "")})
         poster_url = f"{base}/api/local/image?{params}"
@@ -4193,12 +4254,15 @@ def public_movie(base: str, item_id: str, section: str, item: dict) -> dict:
         poster_url = f"{base}/api/plex/image?{params}"
     else:
         poster_url = ""
+    if backdrop.startswith("/library/") and item.get("source") not in {"jellyfin", "local"}:
+        params = urllib.parse.urlencode({"path": backdrop, "server": item.get("plex_server_id", ""), "size": "backdrop"})
+        backdrop_url = f"{base}/api/plex/image?{params}"
     return {
         "id": item_id, "title": item.get("title", "Untitled"), "year": item.get("year", ""),
         "type": "movie", "summary": item.get("summary", ""),
         "genres": list(item.get("genres", [])), "content_rating": item.get("content_rating", "") or "Unrated",
         "library": item.get("library", ""),
-        "poster_url": poster_url, "stream_url": f"{base}/vault/{item_id}.m3u8",
+        "poster_url": poster_url, "backdrop_url": backdrop_url, "stream_url": f"{base}/vault/{item_id}.m3u8",
         "thumbnail_url": poster_url.replace("&size=poster", "&size=mini"),
         "duration_ms": item.get("duration_ms", 1800000),
         "added_at": movie_added_at(item),
@@ -4506,7 +4570,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
-    def broadcast(self, channel_id, playlist, token, viewer=None):
+    def broadcast(self, channel_id, playlist, token, viewer=None, max_bandwidth=0):
         public, constrained = self.delivery_profile()
         if playlist in ("master", "firetv"):
             channel = next((row for row in channels() if row["id"] == channel_id), None)
@@ -4514,6 +4578,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(404, {"error": "Channel offline."})
             if run_finished(channel):
                 return self.send_json(410, {"error": "This channel has finished its lineup."})
+            limits = broadcast_settings(channel)
 
             def open_program(boundary, warm=False):
                 current = next((row for row in channels() if row["id"] == channel_id), None)
@@ -4521,6 +4586,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Channel offline.")
                 if run_finished(current, boundary):
                     return None
+                current = {**current, "broadcast_height": limits[0], "broadcast_kbps": limits[1]}
                 position = schedule_position(current, boundary)
                 position["_broadcast_feed"] = feed
                 position["recovery_key"] = feed.token
@@ -4550,7 +4616,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 feed_key = next((key for key in LIVE_PLAYOUT if key[0] == channel_id), (channel_id, public, constrained))
                 feed = LIVE_PLAYOUT.get(feed_key)
-                if not feed or not feed.active() or feed.run_anchor != channel.get("schedule_anchor"):
+                if not feed or not feed.active() or feed.run_anchor != channel.get("schedule_anchor") or feed.broadcast_limits != limits:
                     if feed:
                         with feed.condition:
                             feed.stopped = True
@@ -4560,6 +4626,8 @@ class Handler(BaseHTTPRequestHandler):
                     feed_key = (channel_id, public, constrained)
                     feed = LIVE_PLAYOUT[feed_key] = LivePlayout(open_program, channel.get("schedule_anchor"),
                                                                channel_id, lambda boundary: open_program(boundary, warm=True))
+                    feed.broadcast_limits = limits
+                    feed.constrained = constrained
                     start_feed = True
                 else:
                     start_feed = False
@@ -4570,11 +4638,11 @@ class Handler(BaseHTTPRequestHandler):
                 threading.Thread(target=feed.run, daemon=True, name="channel-playout").start()
             constrained = feed_key[2]
             lines = ["#EXTM3U"]
-            variants = [(name, peak) for name, *_, peak in relay_renditions(constrained)]
+            variants = [(name, peak) for name, *_, peak in relay_renditions(constrained, limits=limits)]
             if playlist == "firetv" and not constrained:
                 # A TV begins with the 480p track and can move down to 270p
                 # or up to 720p without starting another compatibility encoder.
-                variants = (variants[1], variants[0], variants[2])
+                variants.sort(key=lambda variant: variant[0] != "balanced")
             for name, bandwidth in variants:
                 lines.extend([f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}",
                               f"/broadcast/{channel_id}/{feed.token}/{name}.m3u8" + (f"?viewer={viewer}" if viewer else "")])
@@ -4590,6 +4658,8 @@ class Handler(BaseHTTPRequestHandler):
                                                 "error": public_playback_message(reason)})
                 if not feed or feed.token != token or not feed.active():
                     return self.send_json(410, {"error": "Tune this channel again."})
+                if playlist not in {row[0] for row in relay_renditions(feed.constrained, limits=feed.broadcast_limits)}:
+                    return self.send_json(404, {"error": "This quality is unavailable."})
             try:
                 manifest = feed.playlist(playlist, viewer)
             except EncoderCapacityError as exc:
@@ -4598,9 +4668,9 @@ class Handler(BaseHTTPRequestHandler):
                 reason = broadcast_failure_reason(feed.error) if feed.error else "starting"
                 return self.send_json(503, {"state": "reconnecting" if feed.error else "starting", "reason": reason,
                                            "error": public_playback_message(reason) if feed.error else "The studio is preparing video."})
-        self.send_bytes(200, manifest.encode(), "application/vnd.apple.mpegurl")
+        self.send_bytes(200, limit_hls_master(manifest.encode(), max_bandwidth), "application/vnd.apple.mpegurl")
 
-    def send_playback_manifest(self, route: str, *, constrained_live: bool = False) -> None:
+    def send_playback_manifest(self, route: str, *, constrained_live: bool = False, max_bandwidth=0) -> None:
         match = re.fullmatch(r"(/ffmpeg-stream/([a-zA-Z0-9_-]+)/)index\.m3u8", route)
         if match:
             with LOCK:
@@ -4615,7 +4685,7 @@ class Handler(BaseHTTPRequestHandler):
                     # master is inlined so a tune saves one network round trip.
                     manifest = re.sub(rb"(?m)^index_(economy|balanced|hd)\.m3u8$",
                                       lambda line: match[1].encode() + line[0], manifest)
-                    return self.send_bytes(200, manifest, "application/vnd.apple.mpegurl")
+                    return self.send_bytes(200, limit_hls_master(manifest, max_bandwidth), "application/vnd.apple.mpegurl")
         if constrained_live:
             master = f"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=224000\n{route}\n".encode()
             return self.send_bytes(200, master, "application/vnd.apple.mpegurl")
@@ -4646,7 +4716,8 @@ class Handler(BaseHTTPRequestHandler):
             if broadcast:
                 viewer = urllib.parse.parse_qs(parsed.query).get("viewer", [""])[0]
                 return self.broadcast(broadcast[1], broadcast[3] or broadcast[4], broadcast[2],
-                                      viewer if LIVE_VIEWER_ID.fullmatch(viewer) else None)
+                                      viewer if LIVE_VIEWER_ID.fullmatch(viewer) else None,
+                                      requested_playback_bandwidth(parsed.query))
             if parsed.path == "/api/local-creator":
                 settings = config()
                 name = settings["creator_profile"].get("name") or settings["plex_profile"].get("server_name")
@@ -4777,15 +4848,21 @@ class Handler(BaseHTTPRequestHandler):
                     payload["items"] = vault_items(self.catalog_base())
                 self.send_json(200, payload)
             elif parsed.path == "/api/public/movie-art":
-                item_id = urllib.parse.parse_qs(parsed.query).get("id", [""])[0]
+                query = urllib.parse.parse_qs(parsed.query)
+                item_id = query.get("id", [""])[0]
+                image_type = query.get("type", ["Primary"])[0]
                 if not re.fullmatch(r"[a-f0-9]{24}", item_id):
                     raise FileNotFoundError
                 item = vault_source(item_id)
-                image_id = jellyfin_id(item.get("thumb"))
+                artwork = {"Primary": ("thumb", 480), "Backdrop": ("art", 720)}.get(image_type)
+                if artwork is None:
+                    raise FileNotFoundError
+                field, max_width = artwork
+                image_id = jellyfin_id(item.get(field))
                 if item.get("source") != "jellyfin" or not image_id:
                     raise FileNotFoundError
                 source, _ = jellyfin_section(item.get("section", ""))
-                image, content_type = jellyfin_request(source, f"/Items/{image_id}/Images/Primary?maxWidth=480", image=True)
+                image, content_type = jellyfin_request(source, f"/Items/{image_id}/Images/{image_type}?maxWidth={max_width}", image=True)
                 self.send_bytes(200, image, content_type, {"Cache-Control": "public, max-age=300"})
             elif parsed.path == "/api/public/channels":
                 guide = urllib.parse.parse_qs(parsed.query).get("guide")
@@ -4829,13 +4906,15 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path.startswith("/live/") and parsed.path.endswith(".m3u8"):
                 channel_id = Path(parsed.path).stem
                 viewer = urllib.parse.parse_qs(parsed.query).get("viewer", [""])[0]
-                return self.broadcast(channel_id, "master", None, viewer if LIVE_VIEWER_ID.fullmatch(viewer) else None)
+                return self.broadcast(channel_id, "master", None, viewer if LIVE_VIEWER_ID.fullmatch(viewer) else None,
+                                      requested_playback_bandwidth(parsed.query))
             elif parsed.path.startswith("/vault/") and parsed.path.endswith(".m3u8"):
                 item_id = Path(parsed.path).stem
                 if not re.fullmatch(r"[a-f0-9]{24}", item_id):
                     raise FileNotFoundError
                 public_delivery, _ = self.delivery_profile()
-                self.send_playback_manifest(start_vault_session(item_id, public_delivery=public_delivery))
+                self.send_playback_manifest(start_vault_session(item_id, public_delivery=public_delivery),
+                                            max_bandwidth=requested_playback_bandwidth(parsed.query))
             elif parsed.path.startswith("/ffmpeg-stream/"):
                 parts = parsed.path.strip("/").split("/")
                 if len(parts) != 3 or not re.fullmatch(ENCODER_FILE, parts[2]):

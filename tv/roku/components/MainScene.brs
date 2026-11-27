@@ -2,18 +2,20 @@ sub init()
   m.guide = m.top.findNode("guide") : m.video = m.top.findNode("video") : m.creators = m.top.findNode("creators") : m.channels = m.top.findNode("channels") : m.vault = m.top.findNode("vault") : m.updates = m.top.findNode("updates") : m.status = m.top.findNode("status") : m.directoryTimer = m.top.findNode("directoryTimer")
   m.creators.observeField("itemSelected", "creatorSelected") : m.channels.observeField("itemSelected", "channelSelected") : m.vault.observeField("itemSelected", "vaultSelected") : m.updates.observeField("buttonSelected", "showSystem")
   m.home = m.top.findNode("home")
+  m.livePresentation = m.top.findNode("livePresentation")
+  m.libraryPresentation = m.top.findNode("libraryPresentation")
   m.homeLive = m.top.findNode("homeLive")
   m.homeCinema = m.top.findNode("homeCinema")
-  m.homeUpdate = m.top.findNode("homeUpdate")
   m.homeContinue = m.top.findNode("homeContinue")
   m.continuePage = m.top.findNode("continuePage")
   m.continueMovies = m.top.findNode("continueMovies")
-  m.homeContinue.observeField("buttonSelected", "resumeFromHome")
+  m.homeContinue.observeField("buttonSelected", "showContinueWatching")
   m.continueMovies.observeField("itemSelected", "resumeSavedMovie")
   m.homeMenu = m.top.findNode("homeMenu")
   m.homeWatch = m.top.findNode("homeWatch")
   m.homeChannels = m.top.findNode("homeChannels")
   m.homeMovies = m.top.findNode("homeMovies")
+  m.homeResumes = m.top.findNode("homeResumes")
   m.drawer = m.top.findNode("navigationDrawer")
   m.drawerItems = m.top.findNode("navigationItems")
   choices = CreateObject("roSGNode", "ContentNode")
@@ -25,15 +27,16 @@ sub init()
   m.homeWatch.observeField("buttonSelected", "watchHomeChannel")
   m.homeChannels.observeField("itemSelected", "watchHomeSelection")
   m.homeMovies.observeField("itemSelected", "selectHomeMovie")
+  m.homeResumes.observeField("itemSelected", "resumeFromHome")
   m.guideSort = m.top.findNode("guideSort")
   m.guideSchedule = m.top.findNode("guideSchedule")
   m.guideSchedule.observeField("buttonSelected", "openGuideSchedule")
   m.guideSort.observeField("buttonSelected", "toggleGuideSort")
+  selectCatalogPresentation(false, false)
   m.sortByRating = false
   m.navigationTick = m.top.findNode("navigationTick")
   m.homeLive.observeField("buttonSelected", "openLiveGuide")
   m.homeCinema.observeField("buttonSelected", "openCinema")
-  m.homeUpdate.observeField("buttonSelected", "showSystem")
   m.homeMenu.observeField("buttonSelected", "toggleDrawer")
   m.programArt = m.top.findNode("programArt")
   m.channels.observeField("itemFocused", "updateGuideArtwork")
@@ -49,7 +52,8 @@ sub init()
     m.testerVersionLabel = alphaVersionLabel(installedVersion)
     m.updateButtonLabel = "SYSTEM  •  " + m.testerVersionLabel
   else
-    m.updateButtonLabel = "SYSTEM  •  v" + installedVersion
+    if Right(installedVersion, 2) = ".0" then installedVersion = Left(installedVersion, Len(installedVersion) - 2)
+    m.updateButtonLabel = "Alpha Version " + installedVersion
   end if
   m.updates.text = m.updateButtonLabel
   m.progressTimer = m.top.findNode("progressTimer")
@@ -92,6 +96,7 @@ sub init()
   m.creatorId = ""
   m.movieKeys = {}
   m.pairBase = CreateObject("roRegistrySection", "ChannelForge").Read("creator_url")
+  m.qualityKbps = Int(Val(CreateObject("roRegistrySection", "ChannelForge").Read("quality_kbps")))
   refreshCatalog()
 end sub
 sub refreshCatalog()
@@ -104,6 +109,7 @@ sub showHome()
   playMenuSound()
   m.continuePage.visible = false
   m.home.visible = true
+  selectCatalogPresentation(false, false)
   if m.homeWatch <> invalid then updateHomeFeature()
   m.homeLive.SetFocus(true)
   completeAppLaunch()
@@ -180,7 +186,6 @@ sub selectHomeMovie()
   item = m.homeMovies.content.GetChild(m.homeMovies.itemSelected)
   if item = invalid then return
   openCinema()
-  m.vault.jumpToItem = m.homeMovies.itemSelected
   revealMovie(item)
 end sub
 sub openLiveGuide()
@@ -190,6 +195,7 @@ sub openLiveGuide()
   playMenuSound()
   m.continuePage.visible = false
   m.home.visible = false
+  selectCatalogPresentation(false, true)
   m.channels.SetFocus(true)
   updateGuideArtwork()
   m.top.signalBeacon("EPGLaunchComplete")
@@ -200,7 +206,14 @@ sub openCinema()
   playMenuSound()
   m.continuePage.visible = false
   m.home.visible = false
+  selectCatalogPresentation(true, true)
   m.vault.SetFocus(true)
+end sub
+sub selectCatalogPresentation(cinema as boolean, showControls as boolean)
+  if m.livePresentation <> invalid then m.livePresentation.visible = not cinema
+  if m.libraryPresentation <> invalid then m.libraryPresentation.visible = cinema
+  if m.guideSchedule <> invalid then m.guideSchedule.visible = showControls and not cinema
+  if m.guideSort <> invalid then m.guideSort.visible = showControls and not cinema
 end sub
 sub playMenuSound()
   if m.navigationTick <> invalid and m.navigationTick.state <> "playing" then m.navigationTick.control = "play"
@@ -211,7 +224,7 @@ sub showSystem()
   panel.title = "System"
   diagnostics = "Playback diagnostics"
   if m.testerVersionLabel <> invalid then diagnostics = "Developer"
-  panel.buttons = ["Check for Update", diagnostics, "Pair a Studio", "Close"]
+  panel.buttons = ["Check for Update", diagnostics, "Pair a Studio", "Close", "Playback quality"]
   panel.observeField("buttonSelected", "systemSelected")
   m.top.dialog = panel
 end sub
@@ -223,10 +236,39 @@ sub systemSelected()
   if choice = 1 then showDiagnostics()
   if choice = 2 then showPairing()
   if choice = 3 then focusSystemButton()
+  if choice = 4 then showPlaybackQuality()
+end sub
+sub showPlaybackQuality()
+  panel = CreateObject("roSGNode", "Dialog")
+  panel.title = "Playback quality"
+  panel.message = "Lower the quality when a channel or movie buffers."
+  panel.buttons = ["Auto", "Balanced · 1 Mbps", "Data saver · 0.4 Mbps", "Close"]
+  panel.observeField("buttonSelected", "playbackQualitySelected")
+  m.top.dialog = panel
+end sub
+sub playbackQualitySelected()
+  if m.top.dialog = invalid then return
+  choice = m.top.dialog.buttonSelected
+  m.top.dialog = invalid
+  if choice < 0 or choice > 2 then return
+  picks = [0, 1000, 400]
+  if m.qualityKbps = picks[choice] then return
+  m.qualityKbps = picks[choice]
+  registry = CreateObject("roRegistrySection", "ChannelForge")
+  registry.Write("quality_kbps", m.qualityKbps.ToStr())
+  registry.Flush()
+  if m.guide.visible
+    focusSystemButton()
+  else if m.activeMovie <> invalid and not m.ejectingMovie
+    if m.video.position > 0 then m.moviePosition = m.video.position
+    restartMovie()
+  else if m.liveItem <> invalid
+    restartLive()
+  end if
 end sub
 sub focusSystemButton()
   if not m.guide.visible or m.continuePage.visible then return
-  if m.home.visible then m.homeUpdate.SetFocus(true) else m.updates.SetFocus(true)
+  m.updates.SetFocus(true)
 end sub
 sub showDiagnostics()
   playMenuSound()
@@ -357,11 +399,12 @@ sub showContinueWatching()
   completeAppLaunch()
   m.home.visible = false
   m.continuePage.visible = true
+  selectCatalogPresentation(false, false)
   root = CreateObject("roSGNode", "ContentNode")
   for each row in savedMovies()
     if row.position > 0 and row.url <> ""
       item = root.CreateChild("ContentNode")
-      item.AddFields({movieKey: row.movieKey, savedStudioId: row.studioId, resumePosition: row.position})
+      item.AddFields({movieKey: row.movieKey, savedStudioId: row.studioId, resumePosition: row.position, progress: 0.0})
       item.title = row.title
       item.url = row.url
       item.streamFormat = "hls"
@@ -380,19 +423,11 @@ sub showContinueWatching()
   end if
 end sub
 sub resumeFromHome()
-  row = m.homeBookmark
-  if row = invalid
-    showContinueWatching()
-    return
-  end if
-  item = CreateObject("roSGNode", "ContentNode")
-  item.AddFields({movieKey: row.movieKey})
-  item.url = row.url
-  item.title = row.title
-  item.hdPosterUrl = row.poster
-  item.streamFormat = "hls"
+  if m.homeResumes.content = invalid then return
+  item = m.homeResumes.content.GetChild(m.homeResumes.itemSelected)
+  if item = invalid then return
   m.home.visible = false
-  startCinemaMovie(item, row.position, row.studioId, false)
+  startCinemaMovie(item, item.resumePosition, item.savedStudioId, false)
 end sub
 function movieTimeLabel(position as float) as string
   seconds = Int(position)
@@ -407,6 +442,7 @@ sub resumeSavedMovie()
   startCinemaMovie(item, item.resumePosition, item.savedStudioId, false)
 end sub
 sub updateGuideArtwork()
+  if m.libraryPresentation <> invalid and m.libraryPresentation.visible then return
   if m.home.visible or not m.guide.visible or m.channels.content = invalid then return
   index = m.channels.itemFocused
   if index < 0 then index = 0
@@ -437,19 +473,42 @@ function guideFeature(channel as object) as object
   return result
 end function
 sub updateHomeFeature()
-  m.homeBookmark = invalid
-  m.homeContinue.text = "CONTINUE WATCHING"
+  resumes = CreateObject("roSGNode", "ContentNode")
+  titles = {}
   for each row in savedMovies()
-    if row.position > 0 and row.url <> ""
-      m.homeBookmark = row
-      m.homeContinue.text = "RESUME " + Left(row.title, 24)
-      exit for
+    if row.position > 0 and row.url <> "" and row.title <> "" and not titles.DoesExist(row.movieKey)
+      titles[row.movieKey] = true
+      item = resumes.CreateChild("ContentNode")
+      item.AddFields({movieKey: row.movieKey, resumePosition: row.position, savedStudioId: row.studioId, progress: 0.0})
+      item.url = row.url
+      item.title = row.title
+      item.hdPosterUrl = row.poster
+      item.streamFormat = "hls"
+      item.shortDescriptionLine1 = "Resume at " + movieTimeLabel(row.position)
+      if resumes.GetChildCount() >= 4 then exit for
     end if
   end for
+  m.homeResumes.content = resumes
+  m.homeResumes.visible = resumes.GetChildCount() > 0
+  m.top.findNode("homeResumeHeading").visible = m.homeResumes.visible
   root = m.channels.content
   hasChannel = root <> invalid and root.GetChildCount() > 0
   m.homeWatch.visible = hasChannel
-  m.homeChannels.content = root
+  previews = CreateObject("roSGNode", "ContentNode")
+  if hasChannel
+    last = root.GetChildCount() - 1
+    if last > 4 then last = 4
+    for index = 0 to last
+      channel = root.GetChild(index)
+      display = guideFeature(channel)
+      item = previews.CreateChild("ContentNode")
+      item.title = channel.title
+      item.hdPosterUrl = display.artwork
+      item.shortDescriptionLine1 = display.title
+      item.AddFields({progress: display.fraction})
+    end for
+  end if
+  m.homeChannels.content = previews
   if hasChannel
     channel = root.GetChild(0)
     feature = guideFeature(channel)
@@ -537,12 +596,15 @@ end sub
 sub clearStudio()
   cancelContentTask(m.playlistTask)
   cancelContentTask(m.vaultTask)
+  cancelContentTask(m.homeVaultTask)
   cancelContentTask(m.onAirGuideTask)
   m.playlistTask = invalid
   m.vaultTask = invalid
+  m.homeVaultTask = invalid
   m.onAirGuideTask = invalid
   m.channels.content = invalid
   m.vault.content = invalid
+  if m.homeMovies <> invalid then m.homeMovies.content = invalid
   m.selectedMovie = invalid
   m.movieKeys = {}
   m.creatorUrl = ""
@@ -664,6 +726,29 @@ sub loadCreator(index as integer)
     m.vaultTask = vaultTask
     vaultTask.control = "run"
   end if
+  if m.homeMovies <> invalid and creator.shortDescriptionLine2 <> ""
+    if m.homeVaultTask = invalid or m.homeVaultTask.url <> creator.shortDescriptionLine2
+      cancelContentTask(m.homeVaultTask)
+      m.homeMovies.content = invalid
+      m.top.findNode("homeRewindHeading").text = "FROM REWIND CINEMA"
+      recent = CreateObject("roSGNode", "VaultTask")
+      recent.url = creator.shortDescriptionLine2
+      recent.recent = true
+      recent.observeField("content", "homeVaultLoaded")
+      m.homeVaultTask = recent
+      recent.control = "run"
+    end if
+  end if
+end sub
+sub homeVaultLoaded(event as object)
+  if not currentTask(event, m.homeVaultTask) or not m.homeVaultTask.loaded then return
+  content = m.homeVaultTask.content
+  hasDates = content.GetChildCount() > 0
+  for each item in content.GetChildren(-1, 0)
+    hasDates = hasDates and item.hasAddedDate
+  end for
+  if hasDates then m.top.findNode("homeRewindHeading").text = "RECENTLY ADDED TO REWIND"
+  m.homeMovies.content = content
 end sub
 sub vaultLoaded(event as object)
   if not currentTask(event, m.vaultTask) then return
@@ -674,7 +759,6 @@ sub vaultLoaded(event as object)
   end if
   if m.vaultTask.offset = 0 or m.vault.content = invalid
     m.vault.content = m.vaultTask.content
-    if m.homeMovies <> invalid then m.homeMovies.content = m.vault.content
     m.movieKeys = {}
     for index = 0 to m.vault.content.GetChildCount() - 1
       m.movieKeys[m.vault.content.GetChild(index).movieKey] = true
@@ -688,6 +772,7 @@ sub vaultLoaded(event as object)
         m.movieKeys[movie.movieKey] = true
         entry = current.CreateChild("ContentNode")
         entry.AddFields({movieKey: movie.movieKey})
+        if movie.landscapeArtwork <> invalid then entry.AddFields({landscapeArtwork: movie.landscapeArtwork})
         entry.title = movie.title
         entry.hdPosterUrl = movie.hdPosterUrl
         entry.description = movie.description
@@ -696,7 +781,7 @@ sub vaultLoaded(event as object)
         entry.shortDescriptionLine1 = movie.shortDescriptionLine1
       end if
     end for
-    if m.guide.visible and not m.home.visible then m.vault.SetFocus(true)
+    if m.guide.visible and not m.home.visible and (m.libraryPresentation = invalid or m.libraryPresentation.visible) then m.vault.SetFocus(true)
   end if
   m.moreMovies.visible = m.vaultTask.nextOffset > 0
   m.moreMovies.text = "MORE MOVIES"
@@ -726,7 +811,7 @@ sub playlistLoaded(event as object)
   m.status.text = m.playlistTask.content.GetChildCount().ToStr() + " channels ready"
   if m.catalogTask <> invalid and m.catalogTask.stale then m.status.text += " • Directory incomplete"
   if m.playlistTask.stale then m.status.text = "Studio unavailable. No channels ready."
-  if firstGuide and m.playlistTask.content.GetChildCount() > 0 and m.guide.visible and not m.home.visible and not m.vault.HasFocus() and not m.insertMovie.HasFocus() and not m.moreMovies.HasFocus() then m.channels.SetFocus(true)
+  if firstGuide and m.playlistTask.content.GetChildCount() > 0 and m.guide.visible and not m.home.visible and not m.continuePage.visible and not m.vault.HasFocus() and not m.insertMovie.HasFocus() and not m.moreMovies.HasFocus() then m.channels.SetFocus(true)
   updateGuideArtwork()
   playLinkedChannel()
 end sub
@@ -861,8 +946,10 @@ sub tapeMotionDone()
     if m.continuePage.visible
       showContinueWatching()
     else if m.top.findNode("movieDetails").visible
+      selectCatalogPresentation(true, true)
       m.insertMovie.SetFocus(true)
     else
+      selectCatalogPresentation(true, true)
       m.vault.SetFocus(true)
     end if
   else if m.crtLit = true
@@ -907,6 +994,7 @@ sub channelSelected()
 end sub
 sub playChannel(index as integer)
   if m.channels.content = invalid or m.channels.content.GetChildCount() = 0 then return
+  selectCatalogPresentation(false, true)
   if index < 0 then index = m.channels.content.GetChildCount() - 1
   if index >= m.channels.content.GetChildCount() then index = 0
   m.channels.jumpToItem = index
@@ -1342,6 +1430,12 @@ sub configureHls(item as object, recovering as boolean, live as boolean)
     ' Roku measures bandwidth after startup and may use every advertised variant.
     initialKibps = 800
     if recovering then initialKibps = 320
+    if m.qualityKbps <> invalid and (m.qualityKbps = 400 or m.qualityKbps = 1000)
+      separator = "?"
+      if Instr(1, item.url, "?") > 0 then separator = "&"
+      item.url += separator + "max_kbps=" + m.qualityKbps.ToStr()
+      if m.qualityKbps = 400 then initialKibps = 390
+    end if
     item.AdaptiveMaxStartBitrate = initialKibps
   end if
 end sub
@@ -1353,34 +1447,53 @@ function onKeyEvent(key as string, press as boolean) as boolean
   end if
   if key = "back" and m.deepLink <> invalid then showHome() : return true
   if m.home <> invalid and m.home.visible
+    hasChannels = m.homeChannels.content <> invalid and m.homeChannels.content.GetChildCount() > 0
+    hasMovies = m.homeMovies.content <> invalid and m.homeMovies.content.GetChildCount() > 0
+    if key = "right" and m.homeMenu.HasFocus() then m.updates.SetFocus(true) : return true
+    if key = "left" and m.updates.HasFocus() then m.homeMenu.SetFocus(true) : return true
     if key = "left" and m.homeLive.HasFocus() and m.homeWatch.visible then m.homeWatch.SetFocus(true) : return true
     if key = "right" and m.homeWatch.HasFocus() then m.homeLive.SetFocus(true) : return true
     if key = "up" and (m.homeWatch.HasFocus() or m.homeLive.HasFocus()) then m.homeMenu.SetFocus(true) : return true
-    if key = "down" and m.homeMenu.HasFocus() then m.homeLive.SetFocus(true) : return true
-    if key = "down" and (m.homeWatch.HasFocus() or m.homeLive.HasFocus()) and m.homeChannels.content <> invalid and m.homeChannels.content.GetChildCount() > 0 then m.homeChannels.SetFocus(true) : return true
-    if key = "up" and m.homeChannels.HasFocus() and m.homeChannels.itemFocused <= 0 then m.homeLive.SetFocus(true) : return true
-    if key = "right" and m.homeChannels.HasFocus() then m.homeContinue.SetFocus(true) : return true
-    if key = "left" and m.homeContinue.HasFocus() and m.homeChannels.content <> invalid and m.homeChannels.content.GetChildCount() > 0 then m.homeChannels.SetFocus(true) : return true
-    if key = "down" and m.homeChannels.HasFocus() and m.homeChannels.content <> invalid and m.homeChannels.itemFocused >= m.homeChannels.content.GetChildCount() - 1 then m.homeCinema.SetFocus(true) : return true
-    if key = "down" and m.homeContinue.HasFocus() then m.homeUpdate.SetFocus(true) : return true
-    if key = "down" and m.homeUpdate.HasFocus() then m.homeCinema.SetFocus(true) : return true
-    if key = "left" and m.homeCinema.HasFocus() and m.homeMovies.content <> invalid and m.homeMovies.content.GetChildCount() > 0 then m.homeMovies.SetFocus(true) : return true
-    if key = "right" and m.homeMovies.HasFocus() then m.homeCinema.SetFocus(true) : return true
-    if key = "right" and m.homeLive.HasFocus() then m.homeCinema.SetFocus(true) : return true
-    if key = "left" and m.homeCinema.HasFocus() then m.homeLive.SetFocus(true) : return true
-    if key = "right" and m.homeContinue.HasFocus() then m.homeUpdate.SetFocus(true) : return true
-    if key = "left" and m.homeUpdate.HasFocus() then m.homeContinue.SetFocus(true) : return true
-    if key = "down" and m.homeLive.HasFocus() then m.homeContinue.SetFocus(true) : return true
-    if key = "down" and m.homeCinema.HasFocus() then m.homeUpdate.SetFocus(true) : return true
-    if key = "up" and m.homeUpdate.HasFocus() then m.homeCinema.SetFocus(true) : return true
-    if key = "up" and m.homeContinue.HasFocus() then m.homeLive.SetFocus(true) : return true
+    if key = "down" and (m.homeMenu.HasFocus() or m.updates.HasFocus()) then m.homeLive.SetFocus(true) : return true
+    if key = "up" and m.homeChannels.HasFocus() then m.homeLive.SetFocus(true) : return true
+    if key = "down" and (m.homeWatch.HasFocus() or m.homeLive.HasFocus() or m.homeChannels.HasFocus())
+      if hasChannels and not m.homeChannels.HasFocus()
+        m.homeChannels.SetFocus(true)
+      else if hasMovies
+        m.homeMovies.SetFocus(true)
+      else
+        m.homeCinema.SetFocus(true)
+      end if
+      return true
+    end if
+    if key = "left" and m.homeCinema.HasFocus() and hasMovies then m.homeMovies.SetFocus(true) : return true
+    if key = "right" and m.homeMovies.HasFocus() and hasMovies and m.homeMovies.itemFocused = m.homeMovies.content.GetChildCount() - 1 then m.homeCinema.SetFocus(true) : return true
+    if key = "up" and (m.homeMovies.HasFocus() or m.homeCinema.HasFocus())
+      if hasChannels then m.homeChannels.SetFocus(true) else m.homeLive.SetFocus(true)
+      return true
+    end if
+    if key = "down" and (m.homeMovies.HasFocus() or m.homeCinema.HasFocus())
+      if m.homeResumes.visible then m.homeResumes.SetFocus(true) else m.homeContinue.SetFocus(true)
+      return true
+    end if
+    if key = "up" and (m.homeResumes.HasFocus() or m.homeContinue.HasFocus())
+      if hasMovies then m.homeMovies.SetFocus(true) else m.homeCinema.SetFocus(true)
+      return true
+    end if
+    if key = "right" and m.homeResumes.HasFocus() and m.homeResumes.itemFocused = m.homeResumes.content.GetChildCount() - 1 then m.homeContinue.SetFocus(true) : return true
+    if key = "left" and m.homeContinue.HasFocus() and m.homeResumes.visible then m.homeResumes.SetFocus(true) : return true
     return false
   end if
   if m.guide.visible and m.continuePage.visible
     if key = "back" then showHome() : return true
+    if key = "up" and m.homeMenu.HasFocus() = false and m.continueMovies.itemFocused <= 0 then m.homeMenu.SetFocus(true) : return true
+    if key = "right" and m.homeMenu.HasFocus() then m.updates.SetFocus(true) : return true
+    if key = "left" and m.updates.HasFocus() then m.homeMenu.SetFocus(true) : return true
+    if key = "down" and m.homeMenu.HasFocus() then m.continueMovies.SetFocus(true) : return true
     return false
   end if
   if m.guide.visible = false
+    if key = "options" and not m.ejectingMovie then showPlaybackQuality() : return true
     if key = "OK" and m.bufferPanel.visible and (m.retryPending or m.resolvingLive or m.resolvingMovie) then return true
     if key = "OK" and m.bufferPanel.visible and not m.waitingForVideo and m.activeMovie <> invalid and not m.ejectingMovie and not m.top.findNode("tapeMotion").visible
       m.movieRetries = 1
@@ -1422,6 +1535,16 @@ function onKeyEvent(key as string, press as boolean) as boolean
     end if
   end if
   if key = "back" and m.guide.visible and m.home <> invalid then showHome() : return true
+  if m.guide.visible and m.libraryPresentation <> invalid and m.libraryPresentation.visible
+    if key = "right" and m.homeMenu.HasFocus() then m.updates.SetFocus(true) : return true
+    if key = "left" and m.updates.HasFocus() then m.homeMenu.SetFocus(true) : return true
+    if key = "down" and m.updates.HasFocus() then m.vault.SetFocus(true) : return true
+    if key = "up" and m.vault.HasFocus() and m.vault.itemFocused <= 0 then m.updates.SetFocus(true) : return true
+    if key = "down" and m.homeMenu.HasFocus() then m.creators.SetFocus(true) : return true
+    if key = "up" and m.creators.HasFocus() and m.creators.itemFocused <= 0 then m.homeMenu.SetFocus(true) : return true
+    if key = "right" and m.creators.HasFocus() then m.vault.SetFocus(true) : return true
+    if key = "left" and m.vault.HasFocus() then m.creators.SetFocus(true) : return true
+  end if
   if key = "right" and m.guide.visible and m.homeMenu.HasFocus() then m.guideSchedule.SetFocus(true) : return true
   if key = "left" and m.guide.visible and m.guideSchedule.HasFocus() then m.homeMenu.SetFocus(true) : return true
   if key = "right" and m.guide.visible and m.guideSchedule.HasFocus() then m.guideSort.SetFocus(true) : return true
@@ -1436,9 +1559,7 @@ function onKeyEvent(key as string, press as boolean) as boolean
   end if
   if key = "left" and m.guide.visible and not m.vault.HasFocus() then m.creators.SetFocus(true) : return true
   if key = "right" and m.guide.visible and not m.vault.HasFocus() then m.channels.SetFocus(true) : return true
-  if key = "down" and m.guide.visible and m.channels.HasFocus() and m.channels.content <> invalid and m.channels.itemFocused >= m.channels.content.GetChildCount() - 1 then m.vault.SetFocus(true) : return true
-  if key = "up" and m.guide.visible and m.vault.HasFocus() then m.channels.SetFocus(true) : return true
-  if key = "up" and m.guide.visible and m.creators.HasFocus() then m.updates.SetFocus(true) : return true
+  if key = "up" and m.guide.visible and m.creators.HasFocus() and m.creators.itemFocused <= 0 then m.homeMenu.SetFocus(true) : return true
   if key = "up" and m.guide.visible and m.channels.HasFocus() and m.channels.itemFocused <= 0 then m.guideSort.SetFocus(true) : return true
   if key = "down" and m.guide.visible and (m.updates.HasFocus() or m.guideSort.HasFocus() or m.guideSchedule.HasFocus()) then m.channels.SetFocus(true) : return true
   if key = "down" and m.guide.visible and m.homeMenu.HasFocus() then m.creators.SetFocus(true) : return true

@@ -7,7 +7,7 @@
     <Group id="face">
     <Rectangle id="case" width="550" height="70" color="0xc8a77bff"/>
     <Rectangle translation="[6,3]" width="541" height="64" color="0x31203bff"/>
-    <Poster id="poster" translation="[13,8]" width="94" height="52" loadDisplayMode="scaleToFill"/>
+    <Poster id="poster" translation="[13,8]" width="94" height="52" loadDisplayMode="scaleToZoom"/>
     <Label id="title" translation="[118,9]" width="346" height="53" wrap="true" numLines="2" font="font:SmallBoldSystemFont"/>
     <Label text="VHS" translation="[476,21]" width="55" height="31" color="0xffb17dff" font="font:SmallBoldSystemFont"/>
     </Group>

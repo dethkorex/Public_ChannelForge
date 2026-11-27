@@ -74,10 +74,21 @@ class BroadcastTests(unittest.TestCase):
         direct = app.relay_renditions()
         constrained = app.relay_renditions(constrained=True)
         movie = app.relay_renditions(on_demand=True)
-        self.assertEqual(direct[-1][1:5], (1280, 720, 3000, 3400))
+        self.assertEqual(direct[-1][1:3], (1280, 720))
+        self.assertEqual(direct[-1][-1], 2500000)
+        self.assertLess(direct[-1][4], 2500)
         self.assertEqual(constrained[-1], movie[-1])
         self.assertEqual(direct[1], constrained[1])
         self.assertEqual([row[0] for row in direct], ["economy", "balanced", "hd"])
+        self.assertEqual([row[0] for row in app.relay_renditions(limits=(480, 1100))], ["economy", "balanced"])
+        self.assertEqual(app.relay_renditions(limits=(480, 1100))[-1][-1], 1100000)
+        self.assertEqual(app.relay_renditions(limits=(270, 350))[-1][2], 270)
+        self.assertEqual(app.broadcast_settings({}), (720, 2500))
+        with self.assertRaises(ValueError):
+            app.broadcast_settings({"broadcast_height": 720, "broadcast_kbps": 2501})
+        master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=270000\neconomy.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2500000\nhd.m3u8\n"
+        self.assertEqual(app.limit_hls_master(master, 400000), master.split(b"#EXT-X-STREAM-INF:BANDWIDTH=2500000")[0])
+        self.assertEqual(app.limit_hls_master(master, 0), master)
 
     def test_active_playlist_leases_segments_until_last_viewer_leaves(self):
         feed = app.LivePlayout(lambda _: None)
@@ -333,7 +344,7 @@ class BroadcastTests(unittest.TestCase):
                     with concurrent.futures.ThreadPoolExecutor(2) as pool:
                         masters = list(pool.map(viewer, [app.Handler, app.PublicMediaHandler]))
                     self.assertEqual(masters[0], masters[1])
-                    self.assertIn(b"#EXT-X-STREAM-INF:BANDWIDTH=4000000\n", masters[0])
+                    self.assertIn(b"#EXT-X-STREAM-INF:BANDWIDTH=2500000\n", masters[0])
                     self.assertEqual(len(app.LIVE_PLAYOUT), 1)
                     feed = next(iter(app.LIVE_PLAYOUT.values()))
                     self.assertIn("#EXTINF:", feed.playlist("balanced"))

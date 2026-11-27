@@ -84,6 +84,7 @@
     if (!existing) container.append(trigger);
 
     const panel = document.createElement('dialog');
+    panel.className = 'diagnostics-dialog';
     panel.setAttribute('aria-label', 'Playback diagnostics');
     panel.style.cssText = 'width:min(92vw,740px);max-height:85vh;padding:20px;color:#eeefff;background:#101529;border:1px solid #54dcea;border-radius:12px';
     panel.innerHTML = '<h2>Playback diagnostics</h2><p role="status"></p><textarea aria-label="Troubleshooting report" readonly spellcheck="false" style="width:100%;height:42vh;font:13px monospace"></textarea><div><button type="button">Refresh</button> <button type="button">Copy report</button> <button type="button">Close</button></div>';

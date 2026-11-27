@@ -128,6 +128,7 @@ public class MainActivity extends Activity {
     };
     private boolean playbackWaiting, playbackFailed, consumingRetryKey;
     private int temporaryBitrateCap = Integer.MAX_VALUE, rebufferCount;
+    private int viewerBitrateCap = Integer.MAX_VALUE;
     private long rebufferStarted, totalRebufferMs;
     private final ArrayDeque<Long> recentLiveStalls = new ArrayDeque<>();
     private boolean recovering;
@@ -252,7 +253,6 @@ public class MainActivity extends Activity {
     private String guideStudio = "", guideSearch = "";
     private boolean guideSortByRating;
     private int guideOffset;
-    private boolean fullGuide;
     private LinearLayout homeLiveContent, homeCinemaContent, homePersonalContent;
     private String homeLiveKey = "", homeCinemaAddress = "", homePersonalKey;
     private List<VaultItem> homeCinemaMovies = Collections.emptyList();
@@ -264,10 +264,10 @@ public class MainActivity extends Activity {
         @Override public void run() {
             if (!resumed || !guideVisible || activePage != Page.LIVE || previewChannel == null) return;
             updateProgram(previewChannel);
-            programArtwork.postDelayed(this, phoneLayout ? 3000 : 1000);
+            programArtwork.postDelayed(this, 3000);
         }
     };
-    private TextView screenSwitcher;
+    private ScrollView channelScroll;
     private boolean cinemaScreen;
     private Creator currentStudio;
     private int movieRequest = 0;
@@ -354,7 +354,7 @@ public class MainActivity extends Activity {
     private int dp(int value){return Math.round(value*getResources().getDisplayMetrics().density);}
     private int color(String value){return Color.parseColor(value);}
     private GradientDrawable surface(int[] colors,int strokeColor,int strokeWidth,int radius){GradientDrawable value=new GradientDrawable(GradientDrawable.Orientation.TL_BR,colors);value.setCornerRadius(dp(radius));if(strokeWidth>0)value.setStroke(dp(strokeWidth),strokeColor);return value;}
-    private LinearLayout panel(){LinearLayout value=new LinearLayout(this);value.setOrientation(LinearLayout.VERTICAL);value.setPadding(dp(10),dp(9),dp(10),dp(9));value.setBackground(surface(new int[]{color("#101938"),color("#090B20")},color("#174F75"),1,10));return value;}
+    private LinearLayout panel(){LinearLayout value=new LinearLayout(this);value.setOrientation(LinearLayout.VERTICAL);value.setPadding(dp(10),dp(9),dp(10),dp(9));value.setBackground(tvTheme ? tvSurface(false) : surface(new int[]{color("#101938"),color("#090B20")},color("#174F75"),1,10));return value;}
     private TextView sectionTitle(String value,String accent){TextView title=text(value,14,true);title.setTextColor(color(accent));title.setLetterSpacing(.10f);return title;}
     private void addGap(LinearLayout parent,int height){Space gap=new Space(this);parent.addView(gap,new LinearLayout.LayoutParams(1,dp(height)));}
 
@@ -373,8 +373,9 @@ public class MainActivity extends Activity {
                 .setBandwidthMeter(bandwidth)
                 .setAudioAttributes(AudioAttributes.DEFAULT, true)
                 .build();
+        viewerBitrateCap = getSharedPreferences(PREFS, MODE_PRIVATE).getInt("playback_quality_cap", Integer.MAX_VALUE);
         player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
-                .setPreferredAudioLanguage("en").build());
+                .setPreferredAudioLanguage("en").setMaxVideoBitrate(viewerBitrateCap).build());
         player.addAnalyticsListener(new androidx.media3.exoplayer.analytics.AnalyticsListener() {
             private final androidx.media3.common.Timeline.Window eventWindow = new androidx.media3.common.Timeline.Window();
 
@@ -470,13 +471,22 @@ public class MainActivity extends Activity {
         eject.setVisibility(View.GONE);
         eject.setOnClickListener(v -> ejectMovie());
         root.addView(eject, ejectLayout);
-        video.setControllerVisibilityListener((PlayerView.ControllerVisibilityListener) visibility ->
-                eject.setVisibility(visibility == View.VISIBLE && activeMovie != null && !ejectingTape
-                        && cassetteMotion == null ? View.VISIBLE : View.GONE));
+        TextView quality = focusButton("QUALITY");
+        quality.setOnClickListener(view -> choosePlaybackQuality());
+        quality.setVisibility(View.GONE);
+        FrameLayout.LayoutParams qualityLayout = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
+        qualityLayout.setMargins(dp(12), dp(12), 0, 0);
+        root.addView(quality, qualityLayout);
+        video.setControllerVisibilityListener((PlayerView.ControllerVisibilityListener) visibility -> {
+            eject.setVisibility(visibility == View.VISIBLE && activeMovie != null && !ejectingTape
+                    && cassetteMotion == null ? View.VISIBLE : View.GONE);
+            quality.setVisibility(visibility == View.VISIBLE && !guideVisible && !ejectingTape
+                    && cassetteMotion == null ? View.VISIBLE : View.GONE);
+        });
         if (phoneLayout) root.setFitsSystemWindows(true);
         setContentView(root);
-        if (tvTheme) focusHomeNavigation();
-        else if (!phoneLayout) screenSwitcher.requestFocus();
+        if (tvTheme) guide.post(this::focusHomeNavigation);
+        else if (!phoneLayout) updateButton.requestFocus();
         player.addListener(new Player.Listener() {
             @Override public void onEvents(Player source, Player.Events events) {
                 if (events.containsAny(Player.EVENT_PLAY_WHEN_READY_CHANGED, Player.EVENT_PLAYBACK_STATE_CHANGED,
@@ -576,12 +586,13 @@ public class MainActivity extends Activity {
         compactTouchLayout = phoneLayout ? phonePortrait : touchDevice && width < 850;
         boolean compact = width < 800 || height < 450;
         guide = new LinearLayout(this); guide.setOrientation(LinearLayout.VERTICAL);
-        int inset = dp(phoneLayout ? 10 : compact ? 14 : 19);
-        guide.setPadding(inset,dp(9),inset,dp(compact ? 9 : 13));
+        int inset = dp(phoneLayout ? 8 : tvTheme ? 12 : compact ? 10 : 14);
+        guide.setPadding(inset,dp(phoneLayout ? 4 : tvTheme ? 8 : 9),inset,dp(phoneLayout ? 5 : tvTheme || compact ? 9 : 13));
         guide.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                neonTheme() ? new int[]{color("#04091A"), color("#070C1C"), color("#190B35")}
+                tvTheme ? new int[]{color("#080F1B"), color("#0B1621"), color("#08141D")}
+                        : phoneLayout ? new int[]{color("#04091A"), color("#070C1C"), color("#190B35")}
                         : new int[]{color("#050F20"), color("#09152B"), color("#20103D")}));
-        LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(8));
+        LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(0,0,0,dp(phoneLayout || tvTheme ? 4 : 8));
         phoneHeader = header;
         TextView menu = focusButton("☰");
         menu.setContentDescription("Toggle navigation menu");
@@ -591,7 +602,7 @@ public class MainActivity extends Activity {
         ImageView logo=new ImageView(this);
         logo.setImageResource(BuildConfig.TESTER_BUILD ? R.drawable.channel_forge_tv_tester_icon : R.drawable.channel_forge_viewer_brand);
         logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        int logoSize = dp(phoneLayout ? 48 : compact ? 36 : 44);
+        int logoSize = dp(phoneLayout || compact || tvTheme ? 36 : 40);
         logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         header.addView(logo,new LinearLayout.LayoutParams(logoSize,logoSize));
         LinearLayout brandBox=new LinearLayout(this);brandBox.setOrientation(LinearLayout.VERTICAL);
@@ -601,14 +612,14 @@ public class MainActivity extends Activity {
         brand.setSingleLine(true);
         brand.setEllipsize(android.text.TextUtils.TruncateAt.END);
         brand.setPadding(dp(compact ? 5 : 18), dp(3), dp(5), dp(3));
-        if (neonTheme()) applyPhoneWordmark(brand, phonePortrait ? 16 : 26);
+        if (neonTheme()) applyPhoneWordmark(brand, tvTheme ? 23 : phonePortrait ? 16 : compact ? 18 : 22);
         if (phonePortrait) {
             brand.setSingleLine(true);
             brand.setEllipsize(TextUtils.TruncateAt.END);
         }
         brandBox.addView(brand);
-        if (neonTheme()) brandBox.addView(phoneRule());
-        else if (!compact) {
+        if (phoneLayout) brandBox.addView(phoneRule());
+        else if (!tvTheme && !compact) {
             TextView subtitle=text("THE COMMUNITY DIAL",11,true);
             subtitle.setTextColor(color("#55EFFF"));subtitle.setLetterSpacing(.28f);
             subtitle.setSingleLine(true);
@@ -616,13 +627,14 @@ public class MainActivity extends Activity {
             brandBox.addView(subtitle);
         }
         header.addView(brandBox,new LinearLayout.LayoutParams(0,-2,1));
-        screenSwitcher=focusButton("REWIND CINEMA");
-        screenSwitcher.setOnClickListener(v -> openCinemaScreen(!cinemaScreen));
-        header.addView(screenSwitcher);
-        screenSwitcher.setVisibility(phonePortrait ? View.GONE : View.VISIBLE);
-        updateButton=focusButton(BuildConfig.TESTER_BUILD ? testerVersionLabel() : phonePortrait ? "v" + BuildConfig.VERSION_NAME : "UPDATES  •  v" + BuildConfig.VERSION_NAME);updateButton.setOnClickListener(v->selectUpdate());LinearLayout.LayoutParams updateLayout=new LinearLayout.LayoutParams(-2,-2);updateLayout.setMargins(dp(10),0,0,0);header.addView(updateButton,updateLayout);guide.addView(header);
+        updateButton = focusButton(installedVersionLabel());
+        updateButton.setOnClickListener(v -> openPage(Page.SYSTEM));
+        LinearLayout.LayoutParams updateLayout = new LinearLayout.LayoutParams(-2, -2);
+        updateLayout.setMarginStart(dp(6));
+        header.addView(updateButton, updateLayout);
+        guide.addView(header);
         if (compact) {
-            for (TextView control : new TextView[]{menu, screenSwitcher, updateButton}) {
+            for (TextView control : new TextView[]{menu, updateButton}) {
                 control.setTextSize(11);
                 control.setSingleLine(true);
                 control.setMinHeight(dp(34));
@@ -632,37 +644,35 @@ public class MainActivity extends Activity {
             updateButton.setEllipsize(android.text.TextUtils.TruncateAt.END);
         }
         if (phonePortrait) {
-            menu.setMinWidth(dp(48));
-            menu.setMinHeight(dp(48));
+            menu.setMinWidth(dp(44));
+            menu.setMinHeight(dp(44));
             menu.setTextSize(19);
-            updateButton.setMinHeight(dp(48));
+            updateButton.setMinHeight(dp(44));
             updateButton.setGravity(Gravity.CENTER);
             updateButton.setSingleLine(false);
             updateButton.setMaxLines(2);
-            updateButton.setMaxWidth(dp(106));
+            updateButton.setMaxWidth(dp(98));
             updateButton.setTextSize(11);
             updateLayout.leftMargin = dp(4);
         }
-        if (neonTheme()) {
+        if (phoneLayout) {
             menu.setBackground(phonePanel(false, 10));
             updateButton.setBackground(phonePanel(false, 10));
-            screenSwitcher.setBackground(phonePanel(true, 10));
         }
         if (tvTheme) {
-            menu.setBackground(tvFrame(false, 11));
-            updateButton.setBackground(tvFrame(false, 11));
-            updateButton.setOnClickListener(v -> openPage(Page.SYSTEM));
-            screenSwitcher.setBackground(tvFrame(false, 11));
+            menu.setTextSize(20);
+            menu.setMinWidth(dp(42));
+            menu.setMinHeight(dp(34));
+            menu.setGravity(Gravity.CENTER);
+            updateButton.setTextSize(12);
+            updateButton.setMinHeight(dp(34));
         }
         menu.setId(View.generateViewId());
-        screenSwitcher.setId(View.generateViewId());
         updateButton.setId(View.generateViewId());
-        menu.setNextFocusRightId(screenSwitcher.getId());
-        screenSwitcher.setNextFocusLeftId(menu.getId());
-        screenSwitcher.setNextFocusRightId(updateButton.getId());
-        updateButton.setNextFocusLeftId(screenSwitcher.getId());
-        View line = neonTheme() ? phoneRule() : new View(this);
-        if (!neonTheme()) line.setBackgroundColor(color("#16DFF5"));
+        menu.setNextFocusRightId(updateButton.getId());
+        updateButton.setNextFocusLeftId(menu.getId());
+        View line = phoneLayout ? phoneRule() : new View(this);
+        if (!phoneLayout) line.setBackgroundColor(color(tvTheme ? "#23505F" : "#16DFF5"));
         phoneHeaderLine = line;
         guide.addView(line,new LinearLayout.LayoutParams(-1,dp(2)));
         status = text(phonePortrait ? "Finding channels…" : "●  CONNECTING TO THE PUBLIC CHANNEL DIRECTORY…", 12, true);
@@ -670,27 +680,19 @@ public class MainActivity extends Activity {
         if (!phonePortrait) status.setBackground(surface(new int[]{color("#111A3B"),color("#0A0B20")},color("#225E8B"),1,8));
         LinearLayout.LayoutParams statusLayout = new LinearLayout.LayoutParams(-1, -2);
         statusLayout.setMargins(0, dp(6), 0, dp(6));
-        if (tvTheme) {
-            FrameLayout statusBar = new FrameLayout(this);
-            statusBar.setBackground(tvFrame(false, 13));
-            status.setBackground(null);
-            status.setPadding(dp(14), dp(5), dp(52), dp(5));
-            statusBar.addView(status, new FrameLayout.LayoutParams(-1, -2));
-            FrameLayout.LayoutParams accent = new FrameLayout.LayoutParams(dp(52), dp(17), Gravity.END | Gravity.CENTER_VERTICAL);
-            accent.rightMargin = dp(9);
-            statusBar.addView(tvStripes(true), accent);
-            guide.addView(statusBar, statusLayout);
-        } else guide.addView(status, statusLayout);
+        if (tvTheme) status.setBackground(tvSurface(false));
+        guide.addView(status, statusLayout);
+        if (tvTheme) addGap(guide, 5);
         LinearLayout columns = new LinearLayout(this);
         FrameLayout phoneWorkspace = phonePortrait ? new FrameLayout(this) : null;
         guide.addView(phonePortrait ? phoneWorkspace : columns, new LinearLayout.LayoutParams(-1, 0, 1));
         menuPanel = new LinearLayout(this);
         menuPanel.setOrientation(LinearLayout.VERTICAL);
-        menuPanel.setBackground(surface(new int[]{color("#0A0B1C"), color("#150B2B")}, color("#2D365B"), 1, 10));
-        if (neonTheme()) menuPanel.setBackground(phonePanel(false, 11));
-        if (tvTheme) menuPanel.setBackground(tvFrame(false, 14));
-        navigationWidth = dp(phonePortrait ? Math.min(324, width - 27)
-                : Math.max(compact ? 116 : 138, Math.min(180, width / 6)));
+        menuPanel.setBackground(tvTheme ? tvSurface(false)
+                : surface(new int[]{color("#071319"), color("#0B1929")}, color("#215469"), 1, 9));
+        navigationWidth = dp(phonePortrait ? Math.min(252, width - 27)
+                : tvTheme ? Math.max(144, Math.min(180, width / 6))
+                : Math.max(compact ? 112 : 129, Math.min(157, width / 7)));
         LinearLayout.LayoutParams menuLayout = new LinearLayout.LayoutParams(navigationWidth, -1);
         menuLayout.setMargins(0, 0, dp(9), 0);
         if (!phonePortrait) columns.addView(menuPanel, menuLayout);
@@ -705,6 +707,17 @@ public class MainActivity extends Activity {
         navigationRail.setOrientation(LinearLayout.VERTICAL);
         menuContent.addView(navigationRail);
         if (phonePortrait) addPhoneBackdrop(menuContent, 113);
+        if (tvTheme && height >= 440) {
+            menuContent.addView(new Space(this), new LinearLayout.LayoutParams(1, 0, 1));
+            ImageView mark = new ImageView(this);
+            mark.setImageResource(R.drawable.channel_forge_viewer_brand);
+            mark.setAlpha(.46f);
+            mark.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            mark.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LinearLayout.LayoutParams markSize = new LinearLayout.LayoutParams(-1, dp(63));
+            markSize.bottomMargin = dp(9);
+            menuContent.addView(mark, markSize);
+        }
         navigationScroll.addView(menuContent);
         menuPanel.addView(navigationScroll, new LinearLayout.LayoutParams(-1, -1));
         addNavigation("⌂", "Home", Page.HOME);
@@ -713,10 +726,15 @@ public class MainActivity extends Activity {
         addNavigation("▶", "Continue Watching", Page.CONTINUE);
         addNavigation("★", "Favorites", Page.FAVORITES);
         addNavigation("⚙", "System", Page.SYSTEM);
+        if (tvTheme) {
+            TextView home = navButtons.get(Page.HOME);
+            menu.setNextFocusDownId(home.getId());
+            home.setNextFocusUpId(menu.getId());
+        }
         LinearLayout channelsPanel = panel();
         channelRail = new LinearLayout(this);
         channelRail.setOrientation(LinearLayout.VERTICAL);
-        ScrollView channelScroll = new ScrollView(this);
+        channelScroll = new ScrollView(this);
         channelScroll.setVerticalScrollBarEnabled(false);
         channelScroll.addView(channelRail);
         channelsPanel.addView(channelScroll, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -741,20 +759,11 @@ public class MainActivity extends Activity {
         }
         syncStudioScreen();
         setMenuCollapsed(phoneLayout || !BuildConfig.TESTER_BUILD && compactTouchLayout);
-        if (height >= 420 && !touchDevice) {
-            TextView help = text(tvTheme ? "↑↓  Surf Channels     |     OK  Watch / Guide     |     ↶  Back"
-                    : "↑↓  SURF CHANNELS     •     OK  WATCH / GUIDE     •     BACK  RETURN TO GUIDE", 10, true);
-            help.setTextColor(color(tvTheme ? "#E2F3FF" : "#7184A9"));
+        if (height >= 420 && !touchDevice && !tvTheme) {
+            TextView help = text("↑↓  SURF CHANNELS     •     OK  WATCH / GUIDE     •     BACK  RETURN TO GUIDE", 10, true);
+            help.setTextColor(color("#7184A9"));
             help.setSingleLine(true);
-            if (tvTheme) {
-                addGap(guide, 6);
-                guide.addView(phoneRule());
-                FrameLayout footer = new FrameLayout(this);
-                help.setPadding(dp(6), dp(5), 0, dp(3));
-                footer.addView(help);
-                footer.addView(tvStripes(true), new FrameLayout.LayoutParams(dp(72), dp(19), Gravity.END | Gravity.BOTTOM));
-                guide.addView(footer);
-            } else guide.addView(help);
+            guide.addView(help);
         }
         guide.setVisibility(guideVisible ? View.VISIBLE : View.GONE);
         root.addView(guide, 1, new FrameLayout.LayoutParams(-1,-1));
@@ -766,58 +775,23 @@ public class MainActivity extends Activity {
                 color(purple ? "#D146F0" : "#29D9F9"), 1, radius);
     }
 
-    private Drawable tvFrame(boolean purple, int radius) {
-        GradientDrawable trim = surface(new int[]{color(purple ? "#F452FF" : "#38E7FF"), color("#E5F7FF"),
-                color(purple ? "#D444F1" : "#08BEF4")}, 0, 0, radius);
-        GradientDrawable fill = surface(new int[]{color(purple ? "#231038" : "#052B44"), color("#060C1C"),
-                color(purple ? "#1E0C38" : "#061726")}, 0, 0, radius - 1);
-        LayerDrawable layered = new LayerDrawable(new Drawable[]{trim, fill});
-        int inset = dp(2);
-        layered.setLayerInset(1, inset, inset, inset, inset);
-        return layered;
+    private GradientDrawable tvSurface(boolean focused) {
+        return surface(new int[]{color(focused ? "#163B50" : "#111F2C"), color("#0A1522")},
+                color(focused ? "#57F1FF" : "#35536D"), focused ? 2 : 1, 8);
     }
 
-    private View tvStripes(boolean purple) {
-        View stripes = new View(this) {
-            private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-            private final android.graphics.Path stripe = new android.graphics.Path();
-
-            @Override protected void onDraw(android.graphics.Canvas canvas) {
-                float step = getWidth() / 4f, rise = Math.min(getHeight(), step);
-                paint.setColor(color(purple ? "#EB30FF" : "#29E5FF"));
-                for (int index = 0; index < 3; index++) {
-                    float x = index * step;
-                    stripe.reset();
-                    stripe.moveTo(x, getHeight());
-                    stripe.lineTo(x + rise, 0);
-                    stripe.lineTo(x + rise + step * .7f, 0);
-                    stripe.lineTo(x + step * .7f, getHeight());
-                    stripe.close();
-                    paint.setAlpha(245 - 60 * index);
-                    canvas.drawPath(stripe, paint);
-                }
-            }
-        };
-        stripes.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        return stripes;
-    }
-
-    private View tvHeading(String label, boolean purple) {
-        LinearLayout section = new LinearLayout(this);
-        section.setOrientation(LinearLayout.VERTICAL);
+    private void addTvShelfHeading(LinearLayout section, String label, String action, Runnable open) {
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        TextView heading = sectionTitle(label, purple ? "#F2B5FF" : "#43F3FF");
-        heading.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
-        heading.setTextSize(label.length() > 14 ? 11 : 13);
-        heading.setLetterSpacing(.05f);
+        View bar = new View(this);
+        bar.setBackground(surface(new int[]{color("#F041DE"), color("#D026C0")}, 0, 0, 2));
+        row.addView(bar, new LinearLayout.LayoutParams(dp(4), dp(17)));
+        TextView heading = text(label, 18, true);
         heading.setSingleLine(true);
-        heading.setPadding(dp(6), dp(2), dp(2), dp(1));
+        heading.setPadding(dp(8), dp(5), 0, dp(5));
         row.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
-        row.addView(tvStripes(purple), new LinearLayout.LayoutParams(dp(31), dp(11)));
+        guideControl(row, "View all ›", action, open, null);
         section.addView(row);
-        section.addView(phoneRule());
-        return section;
     }
 
     private boolean neonTheme() {
@@ -912,6 +886,11 @@ public class MainActivity extends Activity {
     }
 
     private String testerVersionLabel() { return alphaVersionLabel(BuildConfig.VERSION_NAME); }
+
+    private String installedVersionLabel() {
+        return BuildConfig.TESTER_BUILD ? testerVersionLabel()
+                : alphaVersionLabel(BuildConfig.VERSION_NAME).replace("Alpha V", "Alpha Version ");
+    }
 
     private static String alphaVersionLabel(String version) {
         return "Alpha V" + (version.endsWith(".0") ? version.substring(0, version.length() - 2) : version);
@@ -1173,7 +1152,27 @@ public class MainActivity extends Activity {
         dialog.show();
     }
 
-    private TextView focusButton(String label) { TextView button=text(label,14,true);button.setTextColor(color("#DFFBFF"));button.setGravity(Gravity.CENTER_VERTICAL);button.setMinHeight(dp(38));button.setFocusable(true);button.setBackground(surface(new int[]{color("#151A3D"),color("#101127")},color("#1BDFF5"),1,7));button.setOnFocusChangeListener((v, focused)->{v.setBackground(surface(focused?new int[]{color("#6A145C"),color("#231454")}:new int[]{color("#151A3D"),color("#101127")},focused?color("#FF42C5"):color("#1BDFF5"),focused?2:1,7));v.setScaleX(focused?1.018f:1f);v.setScaleY(focused?1.018f:1f);v.setTranslationZ(focused?dp(5):0);});return button;}
+    private TextView focusButton(String label) {
+        TextView button = text(label, 14, true);
+        button.setTextColor(color("#DFFBFF"));
+        button.setGravity(Gravity.CENTER_VERTICAL);
+        button.setMinHeight(dp(38));
+        button.setFocusable(true);
+        button.setBackground(tvTheme ? tvSurface(false)
+                : surface(new int[]{color("#151A3D"), color("#101127")}, color("#1BDFF5"), 1, 7));
+        button.setOnFocusChangeListener((view, focused) -> {
+            view.setBackground(tvTheme ? tvSurface(focused) : surface(focused
+                    ? new int[]{color("#6A145C"), color("#231454")}
+                    : new int[]{color("#151A3D"), color("#101127")},
+                    focused ? color("#FF42C5") : color("#1BDFF5"), focused ? 2 : 1, 7));
+            if (!tvTheme) {
+                view.setScaleX(focused ? 1.018f : 1f);
+                view.setScaleY(focused ? 1.018f : 1f);
+                view.setTranslationZ(focused ? dp(5) : 0);
+            }
+        });
+        return button;
+    }
 
     private void renderCreators() {
         Creator selected = preferredCreator();
@@ -1346,15 +1345,26 @@ public class MainActivity extends Activity {
         button.setMaxLines(1);
         button.setEllipsize(android.text.TextUtils.TruncateAt.END);
         if (tvTheme) {
-            button.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
-            button.setMinHeight(dp(25));
+            button.setMinHeight(dp(30));
             button.setTextSize(13);
         }
         return button;
     }
 
     private void addNavigation(String icon, String label, Page page) {
-        TextView button = navigationButton(icon + "  " + label);
+        TextView button = navigationButton(icon + (tvTheme ? " " : "  ") + label);
+        if (tvTheme) {
+            button.setId(View.generateViewId());
+            button.setTextSize(13);
+            button.setPadding(dp(7), dp(3), dp(5), dp(3));
+            button.setMinHeight(dp(38));
+            int previousIndex = navigationRail.getChildCount() - 1;
+            if (previousIndex >= 0) {
+                View previous = navigationRail.getChildAt(previousIndex);
+                previous.setNextFocusDownId(button.getId());
+                button.setNextFocusUpId(previous.getId());
+            }
+        }
         button.setTag(new String[]{icon, label});
         button.setContentDescription(label);
         button.setOnClickListener(v -> {
@@ -1363,27 +1373,28 @@ public class MainActivity extends Activity {
         });
         button.setOnFocusChangeListener((view, focused) -> {
             if (focused) playMenuSound();
-            paintNavigation(button, page);
+            navigationRail.post(this::repaintNavigation);
         });
         paintNavigation(button, page);
-        navigationRail.addView(button);
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, -2);
+        if (tvTheme) size.bottomMargin = dp(3);
+        navigationRail.addView(button, size);
         navButtons.put(page, button);
     }
 
     private void paintNavigation(TextView button, Page page) {
         boolean selected = activePage == page;
-        if (tvTheme) {
-            button.setBackground(selected || button.isFocused() ? tvFrame(true, 8) : null);
-            button.setTextColor(color("#F4F7FF"));
-            return;
-        }
-        if (neonTheme() && (selected || button.isFocused())) {
-            button.setBackground(phonePanel(!phonePortrait && selected, 7));
-        } else if (selected || button.isFocused()) {
-            button.setBackground(surface(new int[]{color("#251849"), color("#17102C")},
-                    color(button.isFocused() ? "#FF77D9" : "#D242AA"), 1, 7));
+        if (tvTheme && (button.isFocused() || selected && !navigationRail.hasFocus())) {
+            button.setBackground(tvSurface(button.isFocused()));
+        } else if (button.isFocused() || selected && !navigationRail.hasFocus()) {
+            button.setBackground(surface(new int[]{color("#123648"), color("#10202C")},
+                    color(button.isFocused() ? "#79F7FF" : "#25BBDB"), button.isFocused() ? 2 : 1, 7));
         } else button.setBackgroundColor(Color.TRANSPARENT);
         button.setTextColor(color(selected ? "#FFFFFF" : "#B7C8E5"));
+    }
+
+    private void repaintNavigation() {
+        for (Map.Entry<Page, TextView> entry : navButtons.entrySet()) paintNavigation(entry.getValue(), entry.getKey());
     }
 
     private void toggleMenu() {
@@ -1421,22 +1432,21 @@ public class MainActivity extends Activity {
         menuPanel.requestLayout();
         for (TextView button : navButtons.values()) {
             String[] parts = (String[]) button.getTag();
-            button.setText(menuCollapsed ? parts[0] : parts[0] + "  " + parts[1]);
+            button.setText(menuCollapsed ? parts[0] : parts[0] + (tvTheme ? " " : "  ") + parts[1]);
             if (phoneLayout && !phonePortrait) {
                 button.setGravity(collapsed ? Gravity.CENTER : Gravity.CENTER_VERTICAL);
                 button.setTextSize(collapsed ? 21 : 12);
                 button.setMinHeight(dp(collapsed ? 40 : 35));
+            } else if (tvTheme) {
+                button.setGravity(collapsed ? Gravity.CENTER : Gravity.CENTER_VERTICAL);
+                button.setTextSize(collapsed ? 20 : 13);
             }
         }
     }
 
-    private void openCinemaScreen(boolean cinema) {
-        openPage(cinema ? Page.CINEMA : Page.LIVE);
-    }
-
     private void openPage(Page page) {
         if (phonePortrait && !menuCollapsed) setMenuCollapsed(true);
-        if (!BuildConfig.TESTER_BUILD && page == Page.LIVE && activePage != Page.LIVE) setMenuCollapsed(true);
+        if (activePage != page && channelScroll != null) channelScroll.scrollTo(0, 0);
         activePage = page;
         cinemaScreen = page == Page.CINEMA;
         if (cinemaScreen && currentStudio != null && !currentStudio.cinemaSupported) {
@@ -1456,8 +1466,7 @@ public class MainActivity extends Activity {
 
     private void syncStudioScreen() {
         if (channelRail == null) return;
-        for (Map.Entry<Page, TextView> entry : navButtons.entrySet()) paintNavigation(entry.getValue(), entry.getKey());
-        screenSwitcher.setText(cinemaScreen ? "LIVE TV GUIDE" : "REWIND CINEMA");
+        repaintNavigation();
         if (liveRail != null) liveRail.setVisibility(activePage == Page.LIVE ? View.VISIBLE : View.GONE);
         boolean showMovies = cinemaScreen && currentStudio != null && currentStudio.cinemaSupported;
         if (movieRail != null) movieRail.setVisibility(showMovies ? View.VISIBLE : View.GONE);
@@ -1474,17 +1483,18 @@ public class MainActivity extends Activity {
             buildHomePage();
         } else if (activePage == Page.FAVORITES) {
             auxiliaryPage.addView(sectionTitle("FAVORITE CHANNELS", "#63EFFF"));
-            boolean found = false;
+            List<View> cards = new ArrayList<>();
             for (int i = 0; i < channels.size(); i++) {
                 int index = i;
                 Channel channel = channels.get(index);
                 if (!isFavorite(channel)) continue;
-                found = true;
-                TextView row = focusButton("★  CH " + displayNumber(channel, index) + "  " + channel.name);
-                row.setOnClickListener(v -> play(index));
-                auxiliaryPage.addView(row);
+                JSONObject current = programAt(channel, System.currentTimeMillis());
+                String caption = "CH " + displayNumber(channel, index) + "  ·  "
+                        + (current == null ? channel.studio : current.optString("title"));
+                cards.add(collectionCard(channel.name, caption, channelArtwork(channel, current),
+                        channel.logo, () -> play(channel)));
             }
-            if (!found) auxiliaryPage.addView(text("Use the star in the guide to save a channel.", 13, false));
+            showCollection(cards, "Use the star in the guide to save a channel.");
         } else if (activePage == Page.CONTINUE) {
             auxiliaryPage.addView(sectionTitle("CONTINUE WATCHING", "#63EFFF"));
             showContinueWatching();
@@ -1511,7 +1521,7 @@ public class MainActivity extends Activity {
 
     private void buildSystemPage() {
         LinearLayout options = panel();
-        if (neonTheme()) options.setBackground(phonePanel(false, 11));
+        if (phoneLayout) options.setBackground(phonePanel(false, 11));
         options.addView(sectionTitle("SYSTEM", "#53EFFF"));
         options.addView(homeTile("↻", "Check for Update", "Find a newer version of ChannelForge TV", this::openSystemUpdates));
         addGap(options, 7);
@@ -1531,6 +1541,12 @@ public class MainActivity extends Activity {
         homeCinemaContent = panel();
         auxiliaryPage.addView(homeCinemaContent);
         homePersonalContent = panel();
+        if (phonePortrait || tvTheme) {
+            for (LinearLayout shelf : new LinearLayout[]{homeLiveContent, homeCinemaContent, homePersonalContent}) {
+                shelf.setBackground(null);
+                shelf.setPadding(dp(1), dp(3), dp(1), dp(5));
+            }
+        }
         homePersonalKey = null;
         auxiliaryPage.addView(homePersonalContent);
         renderHomeContent();
@@ -1539,7 +1555,8 @@ public class MainActivity extends Activity {
     private void renderHomeContent() {
         if (homeLiveContent == null || homeCinemaContent == null) return;
         long now = System.currentTimeMillis();
-        List<Channel> shelf = channels.subList(0, Math.min(4, channels.size()));
+        int cardsOnNow = phonePortrait ? 3 : tvTheme ? 5 : 4;
+        List<Channel> shelf = channels.subList(0, Math.min(cardsOnNow, channels.size()));
         StringBuilder signature = new StringBuilder();
         for (Channel channel : shelf) {
             JSONObject current = programAt(channel, now);
@@ -1556,7 +1573,10 @@ public class MainActivity extends Activity {
                 Channel selected = featured;
                 JSONObject current = programAt(selected, now);
                 homeLiveContent.addView(homeSpotlight(selected, current, now));
-                homeLiveContent.addView(sectionTitle("ON NOW", "#5AEFFF"));
+                if (tvTheme) {
+                    addGap(homeLiveContent, 3);
+                    addTvShelfHeading(homeLiveContent, "On Now", "all-live", () -> openPage(Page.LIVE));
+                } else homeLiveContent.addView(sectionTitle("ON NOW", "#5AEFFF"));
                 LinearLayout cards = new LinearLayout(this);
                 if (phonePortrait) cards.setOrientation(LinearLayout.VERTICAL);
                 for (Channel channel : shelf) cards.addView(homeProgramCard(channel, programAt(channel, now), now));
@@ -1572,12 +1592,13 @@ public class MainActivity extends Activity {
             paintHomeCinema();
             if (!address.isEmpty()) movieCatalogLoader.execute(() -> {
                 try {
-                    String page = Uri.parse(address).buildUpon().appendQueryParameter("limit", "4").build().toString();
+                    String page = Uri.parse(address).buildUpon().appendQueryParameter("limit", "6")
+                            .appendQueryParameter("sort", "added").build().toString();
                     List<VaultItem> movies = parseVault(new JSONObject(get(page)));
                     for (VaultItem movie : movies) movie.studioId = cinema.id;
                     runOnUiThread(() -> {
                         if (isFinishing() || isDestroyed() || !address.equals(homeCinemaAddress)) return;
-                        homeCinemaMovies = movies.subList(0, Math.min(4, movies.size()));
+                        homeCinemaMovies = movies.subList(0, Math.min(6, movies.size()));
                         if (activePage == Page.HOME) paintHomeCinema();
                     });
                 } catch (Exception ignored) { /* Keep the Browse action available. */ }
@@ -1589,40 +1610,68 @@ public class MainActivity extends Activity {
 
     private void renderHomePersonal() {
         if (homePersonalContent == null) return;
-        VaultItem saved = null;
-        long resumeAt = 0;
+        List<JSONObject> resumes = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        StringBuilder signature = new StringBuilder();
         JSONArray history = movieHistory();
-        for (int index = 0; index < history.length(); index++) {
+        for (int index = 0; index < history.length() && resumes.size() < 4; index++) {
             JSONObject entry = history.optJSONObject(index);
-            if (entry != null && !entry.optString("url").isEmpty() && entry.optLong("position") > 0) {
-                saved = movieFromHistory(entry);
-                resumeAt = entry.optLong("position");
-                break;
+            if (entry != null && !entry.optString("url").isEmpty() && !entry.optString("title").trim().isEmpty()
+                    && entry.optLong("position") > 0 && seen.add(movieFromHistory(entry).releaseKey())) {
+                resumes.add(entry);
+                signature.append(entry.optString("url")).append('@').append(entry.optLong("position")).append('\n');
             }
         }
-        Channel favorite = null;
-        for (Channel channel : channels) if (isFavorite(channel)) { favorite = channel; break; }
-        String key = (saved == null ? "" : saved.url + "@" + resumeAt) + "\n" + (favorite == null ? "" : favorite.url);
+        String key = signature.toString();
         if (key.equals(homePersonalKey)) return;
         homePersonalKey = key;
         homePersonalContent.removeAllViews();
-        homePersonalContent.setVisibility(saved == null && favorite == null ? View.GONE : View.VISIBLE);
-        if (saved != null) {
-            VaultItem movie = saved;
-            long position = resumeAt;
-            homePersonalContent.addView(homeTile("▷", movie.title, "Continue at " + elapsedTime(position), () -> playMovie(movie, position)));
+        homePersonalContent.setVisibility(resumes.isEmpty() ? View.GONE : View.VISIBLE);
+        if (resumes.isEmpty()) return;
+        if (tvTheme) addTvShelfHeading(homePersonalContent, "Continue Watching", "all-resume", () -> openPage(Page.CONTINUE));
+        else homePersonalContent.addView(sectionTitle("CONTINUE WATCHING", "#F0A7FF"));
+        LinearLayout cards = new LinearLayout(this);
+        for (JSONObject entry : resumes) {
+            VaultItem movie = movieFromHistory(entry);
+            long position = entry.optLong("position");
+            LinearLayout card = new LinearLayout(this);
+            card.setGravity(Gravity.CENTER_VERTICAL);
+            card.setBackground(tvTheme ? tvSurface(false) : phonePanel(false, 8));
+            card.setClipToOutline(true);
+            card.setFocusable(true);
+            card.setContentDescription("Continue watching " + movie.title);
+            card.setOnFocusChangeListener((view, focused) -> card.setBackground(tvTheme ? tvSurface(focused) : phonePanel(focused, 8)));
+            card.setOnClickListener(view -> playMovie(movie, position));
+            ImageView art = new ImageView(this);
+            art.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            art.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            card.addView(art, new LinearLayout.LayoutParams(dp(68), -1));
+            LinearLayout copy = new LinearLayout(this);
+            copy.setOrientation(LinearLayout.VERTICAL);
+            copy.setPadding(dp(7), 0, dp(6), 0);
+            TextView title = text(movie.title, 13, true);
+            title.setMaxLines(1);
+            title.setEllipsize(TextUtils.TruncateAt.END);
+            copy.addView(title);
+            copy.addView(text("Resume at " + elapsedTime(position), 11, false));
+            card.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(phonePortrait ? 188 : 212), dp(55));
+            size.setMarginEnd(dp(7));
+            cards.addView(card, size);
+            if (!movie.poster.isEmpty() || !movie.fullPoster.isEmpty()) {
+                movieCoverLoader.execute(() -> updatePoster(moviePoster(movie), art));
+            }
         }
-        if (favorite != null) {
-            Channel channel = favorite;
-            homePersonalContent.addView(homeTile("★", channel.name, "Watch favorite live", () -> play(channel)));
-        }
+        addHorizontalStrip(homePersonalContent, cards);
     }
 
     private View homeSpotlight(Channel channel, JSONObject program, long now) {
         FrameLayout hero = new FrameLayout(this);
-        hero.setBackground(phonePanel(false, 9));
+        hero.setBackground(surface(new int[]{color("#0C1925"), color("#11162B")}, color("#24CFEF"), 1, 10));
         hero.setClipToOutline(true);
-        int minimumHeight = phonePortrait ? 195 : 180;
+        int displayHeight = getResources().getConfiguration().screenHeightDp;
+        int minimumHeight = tvTheme ? Math.max(144, Math.min(220, displayHeight * 35 / 100))
+                : phonePortrait ? 126 : phoneLayout ? 114 : 142;
         hero.setMinimumHeight(dp(minimumHeight));
         String art = channel == null ? "" : channelArtwork(channel, program);
         if (!art.isEmpty()) {
@@ -1630,62 +1679,101 @@ public class MainActivity extends Activity {
             artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
             artwork.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             int width = getResources().getConfiguration().screenWidthDp;
-            hero.addView(artwork, new FrameLayout.LayoutParams(phonePortrait ? -1 : dp(width / 2), dp(minimumHeight), Gravity.END | Gravity.CENTER_VERTICAL));
+            hero.addView(artwork, new FrameLayout.LayoutParams(phonePortrait ? -1
+                    : dp(tvTheme ? width * 64 / 100 : width / 2), -1, Gravity.END));
             posterLoader.execute(() -> loadPoster(art, artwork));
         }
         View shade = new View(this);
-        shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                new int[]{color("#FF080E1C"), color(phonePortrait ? "#DB080E1C" : "#D4080E1C"), color("#18080E1C")}));
+        shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, tvTheme
+                ? new int[]{color("#FF081320"), color("#D1081320"), color("#35081320"), color("#00081320")}
+                : new int[]{color("#FF080E1C"), color(phonePortrait ? "#DB080E1C" : "#D4080E1C"), color("#18080E1C")}));
         hero.addView(shade, new FrameLayout.LayoutParams(-1, -1));
         LinearLayout copy = panel();
+        copy.setBackground(null);
         copy.setGravity(Gravity.CENTER_VERTICAL);
         copy.setMinimumHeight(dp(minimumHeight));
-        copy.setPadding(dp(13), dp(9), dp(13), dp(9));
-        if (channel != null) copy.addView(sectionTitle("LIVE NOW", "#F352E8"));
-        TextView title = text(program != null ? program.optString("title", channel.name) : channel == null ? "Live TV" : channel.name,
-                phonePortrait ? 24 : 32, true);
+        copy.setPadding(dp(tvTheme ? 23 : 12), dp(6), dp(12), dp(6));
+        if (channel != null) {
+            TextView live = sectionTitle("LIVE NOW", "#F352E8");
+            if (tvTheme) {
+                live.setBackground(surface(new int[]{color("#492044"), color("#211426")}, color("#F03BDB"), 1, 5));
+                live.setPadding(dp(7), dp(2), dp(7), dp(2));
+                copy.addView(live, new LinearLayout.LayoutParams(-2, -2));
+                addGap(copy, 5);
+            } else {
+                live.setPadding(0, 0, 0, dp(3));
+                copy.addView(live);
+            }
+        }
+        String headline = program != null ? shortProgramTitle(program.optString("title", channel.name))
+                : channel == null ? "Live TV" : channel.name;
+        TextView title = text(headline, tvTheme ? (displayHeight < 460 ? 31 : 39) : phonePortrait ? 21 : 27, true);
         title.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD_ITALIC));
+        title.setPadding(0, 0, 0, 0);
         title.setMaxLines(2);
         title.setEllipsize(TextUtils.TruncateAt.END);
         copy.addView(title);
-        copy.addView(text(channel == null ? "No channels are online right now." : channel.name + "  •  CH " + channel.number, 14, true));
+        TextView caption = text(channel == null ? "No channels are online right now." : channel.name + "  •  CH " + channel.number,
+                tvTheme ? 15 : 13, true);
+        if (tvTheme) caption.setTextColor(color("#B7CBE4"));
+        caption.setPadding(0, dp(2), 0, 0);
+        copy.addView(caption);
         addHomeProgress(copy, program, now);
         LinearLayout actions = new LinearLayout(this);
-        if (channel != null) guideControl(actions, "▶ WATCH LIVE", "home-watch", () -> play(channel), null);
-        guideControl(actions, "OPEN GUIDE", "home-guide", () -> openPage(Page.LIVE), null);
+        if (channel != null) guideControl(actions, tvTheme ? "▶ Watch Live" : "▶ WATCH LIVE", "home-watch", () -> play(channel), null);
+        guideControl(actions, tvTheme ? "Open Guide" : "OPEN GUIDE", "home-guide", () -> openPage(Page.LIVE), null);
         copy.addView(actions);
-        hero.addView(copy, new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_VERTICAL));
+        int copyWidth = tvTheme ? dp(Math.min(465, Math.max(279, tvShelfWidth() * 57 / 100))) : -1;
+        hero.addView(copy, new FrameLayout.LayoutParams(copyWidth, -2, Gravity.CENTER_VERTICAL | Gravity.START));
+        if (tvTheme) {
+            View outline = new View(this);
+            outline.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            outline.setBackground(surface(new int[]{Color.TRANSPARENT, Color.TRANSPARENT}, color("#30DAEF"), 2, 10));
+            hero.addView(outline, new FrameLayout.LayoutParams(-1, -1));
+        }
         return hero;
+    }
+
+    private int tvShelfWidth() {
+        return getResources().getConfiguration().screenWidthDp
+                - Math.round(navigationWidth / getResources().getDisplayMetrics().density) - 35;
     }
 
     private View homeProgramCard(Channel channel, JSONObject program, long now) {
         LinearLayout card = new LinearLayout(this);
         card.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(phonePortrait ? -1 : dp(235), dp(phonePortrait ? 64 : 70));
+        int width = tvTheme ? Math.max(130, (tvShelfWidth() - 40) / 5) : 202;
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(phonePortrait ? -1 : dp(width),
+                dp(tvTheme ? 59 : phonePortrait ? 47 : 57));
         if (phonePortrait) layout.bottomMargin = dp(6);
         else layout.setMarginEnd(dp(8));
         card.setLayoutParams(layout);
         card.setFocusable(true);
         card.setContentDescription("Watch live: " + channel.name);
-        card.setBackground(phonePanel(false, 8));
+        card.setBackground(tvTheme ? tvSurface(false) : phonePanel(false, 8));
         card.setClipToOutline(true);
-        card.setOnFocusChangeListener((view, focused) -> card.setBackground(phonePanel(focused, 8)));
+        card.setOnFocusChangeListener((view, focused) -> card.setBackground(tvTheme ? tvSurface(focused) : phonePanel(focused, 8)));
         card.setOnClickListener(view -> play(channel));
         String art = channelArtwork(channel, program);
         ImageView artwork = new ImageView(this);
         artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
         artwork.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        card.addView(artwork, new LinearLayout.LayoutParams(dp(81), -1));
+        card.addView(artwork, new LinearLayout.LayoutParams(dp(tvTheme ? width * 43 / 100 : phonePortrait ? 70 : 81), -1));
         if (!art.isEmpty()) posterLoader.execute(() -> loadPoster(art, artwork));
         LinearLayout copy = panel();
+        copy.setBackground(null);
         copy.setPadding(dp(6), 0, dp(5), 0);
         TextView station = text(channel.name, 13, true);
         station.setMaxLines(1);
         station.setEllipsize(TextUtils.TruncateAt.END);
+        station.setPadding(0, 0, 0, 0);
         copy.addView(station);
-        TextView label = text(program == null ? "CH " + channel.number : program.optString("title", channel.name), 12, false);
+        String current = program == null ? "CH " + channel.number : program.optString("title", channel.name);
+        TextView label = text(tvTheme ? shortProgramTitle(current) : current, 12, false);
+        if (tvTheme) label.setTextColor(color("#BACBE1"));
         label.setMaxLines(1);
         label.setEllipsize(TextUtils.TruncateAt.END);
+        label.setPadding(0, 0, 0, 0);
         copy.addView(label);
         addHomeProgress(copy, program, now);
         card.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
@@ -1719,39 +1807,77 @@ public class MainActivity extends Activity {
 
     private void paintHomeCinema() {
         homeCinemaContent.removeAllViews();
-        homeCinemaContent.addView(sectionTitle("FROM REWIND CINEMA", "#F0A7FF"));
+        boolean recent = !homeCinemaMovies.isEmpty();
+        for (VaultItem item : homeCinemaMovies) recent &= item.addedAt > 0;
+        if (tvTheme) addTvShelfHeading(homeCinemaContent, recent ? "Recently Added to Rewind" : "From Rewind Cinema",
+                "home-cinema", () -> openPage(Page.CINEMA));
+        else homeCinemaContent.addView(sectionTitle(recent ? "RECENTLY ADDED TO REWIND" : "FROM REWIND CINEMA", "#F0A7FF"));
         LinearLayout row = new LinearLayout(this);
-        if (phonePortrait) row.setOrientation(LinearLayout.VERTICAL);
+        int available = getResources().getConfiguration().screenWidthDp - (phonePortrait ? 52
+                : (int) (navigationWidth / getResources().getDisplayMetrics().density) + 64);
+        int cardWidth = tvTheme ? Math.max(111, (tvShelfWidth() - 42) / 6)
+                : phonePortrait ? Math.max(120, (available - 7) / 2) : Math.max(122, (available - 35) / 6);
         for (VaultItem item : homeCinemaMovies) {
-            FrameLayout tape = new FrameLayout(this);
-            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(phonePortrait ? -1 : dp(237), dp(61));
-            if (phonePortrait) size.bottomMargin = dp(6);
-            else size.setMarginEnd(dp(8));
-            tape.setFocusable(true);
-            tape.setContentDescription("Select " + item.title);
-            tape.setBackground(phonePanel(false, 8));
-            tape.setClipToOutline(true);
-            ImageView shell = new ImageView(this);
-            shell.setScaleType(ImageView.ScaleType.FIT_XY);
-            shell.setImageResource(R.drawable.cinema_spine);
-            shell.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            tape.addView(shell, new FrameLayout.LayoutParams(-1, -1));
-            TextView title = text(item.title, 15, true);
-            title.setGravity(Gravity.CENTER_VERTICAL);
-            title.setTextColor(color("#211621"));
-            title.setBackgroundColor(color("#F0D2A7"));
-            title.setMaxLines(1);
+            FrameLayout card = new FrameLayout(this);
+            card.setFocusable(true);
+            card.setClipToOutline(true);
+            card.setBackground(surface(new int[]{color("#332343"), color("#141828")}, color("#D7A967"), 1, 7));
+            card.setPadding(dp(1), dp(1), dp(1), dp(1));
+            card.setContentDescription(item.year.isEmpty() ? item.title : item.title + ", " + item.year);
+            String initial = item.title.isEmpty() ? "" : new String(Character.toChars(item.title.codePointAt(0)));
+            TextView placeholder = text(initial, 20, true);
+            placeholder.setTextColor(color("#BEA5D5"));
+            placeholder.setGravity(Gravity.CENTER);
+            placeholder.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            card.addView(placeholder, new FrameLayout.LayoutParams(-1, -1));
+            ImageView poster = new ImageView(this);
+            poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            poster.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            card.addView(poster, new FrameLayout.LayoutParams(-1, -1));
+            LinearLayout label = new LinearLayout(this);
+            label.setGravity(Gravity.BOTTOM);
+            label.setPadding(dp(4), dp(5), dp(4), dp(3));
+            label.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            label.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                    new int[]{Color.TRANSPARENT, color("#CF080A14")}));
+            TextView title = text(item.title, 12, true);
+            title.setTypeface(Typeface.DEFAULT, Typeface.BOLD_ITALIC);
+            title.setTextColor(color("#17111D"));
+            title.setBackgroundColor(color("#F1D095"));
+            title.setPadding(dp(4), dp(2), dp(4), dp(2));
+            title.setSingleLine(true);
             title.setEllipsize(TextUtils.TruncateAt.END);
-            FrameLayout.LayoutParams label = new FrameLayout.LayoutParams(-1, dp(32), Gravity.CENTER_VERTICAL);
-            label.setMargins(dp(16), dp(8), dp(18), 0);
-            tape.addView(title, label);
-            tape.setOnFocusChangeListener((view, focused) -> title.setBackgroundColor(color(focused ? "#F1A9FD" : "#F0D2A7")));
-            tape.setOnClickListener(view -> showPhoneMovieDetails(item));
-            row.addView(tape, size);
+            label.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+            TextView format = text("VHS", 10, true);
+            format.setTextColor(color("#FFE1A8"));
+            format.setPadding(dp(3), dp(1), dp(3), dp(1));
+            format.setBackground(surface(new int[]{color("#17111D"), color("#17111D")}, color("#D7A967"), 1, 3));
+            LinearLayout.LayoutParams badge = new LinearLayout.LayoutParams(-2, -2);
+            badge.setMarginStart(dp(4));
+            label.addView(format, badge);
+            card.addView(label, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+            card.setOnFocusChangeListener((view, focused) -> {
+                title.setBackgroundColor(color(focused ? "#FFF2C6" : "#F1D095"));
+                if (tvTheme) card.setBackground(surface(new int[]{color("#251D25"), color("#141828")},
+                        color(focused ? "#65F0FF" : "#D7A967"), focused ? 2 : 1, 7));
+            });
+            card.setOnClickListener(view -> showPhoneMovieDetails(item));
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(cardWidth), dp(Math.max(62, cardWidth * 100 / 215)));
+            size.setMarginEnd(dp(7));
+            row.addView(card, size);
+            if (!item.poster.isEmpty() || !item.fullPoster.isEmpty() || !item.backdrop.isEmpty()) movieCoverLoader.execute(() -> {
+                Bitmap backdrop = posterBitmap(item.backdrop.isEmpty() ? item.fullPoster : item.backdrop);
+                Bitmap image = backdrop == null ? moviePoster(item) : backdrop;
+                if (image != null) runOnUiThread(() -> {
+                    if (poster.isAttachedToWindow()) {
+                        placeholder.setVisibility(View.GONE);
+                        poster.setImageBitmap(image);
+                    }
+                });
+            });
         }
-        guideControl(row, "BROWSE MOVIES", "home-cinema", () -> openPage(Page.CINEMA), null);
-        if (phonePortrait) homeCinemaContent.addView(row);
-        else addHorizontalStrip(homeCinemaContent, row);
+        if (row.getChildCount() > 0) addHorizontalStrip(homeCinemaContent, row);
+        if (!tvTheme) guideControl(homeCinemaContent, "BROWSE MOVIES", "home-cinema", () -> openPage(Page.CINEMA), null);
     }
 
     private View navigationGlyph(Page page, boolean purple) {
@@ -1832,37 +1958,91 @@ public class MainActivity extends Activity {
     }
 
     private void applyTileFocus(View tile, boolean focused) {
-        tile.setBackground(surface(new int[]{color(focused ? "#3D1C62" : "#0D324D"), color("#16132D")},
+        tile.setBackground(tvTheme ? tvSurface(focused)
+                : surface(new int[]{color(focused ? "#3D1C62" : "#0D324D"), color("#16132D")},
                 color(focused ? "#FA6FE7" : "#42DDF5"), focused ? 2 : 1, 9));
     }
 
     private void showContinueWatching() {
         JSONArray history = movieHistory();
-        int added = 0;
+        List<View> cards = new ArrayList<>();
         for (int index = 0; index < history.length(); index++) {
             JSONObject entry = history.optJSONObject(index);
             if (entry == null) continue;
             VaultItem movie = movieFromHistory(entry);
             long position = entry.optLong("position");
-            if (!movie.url.isEmpty() && position > 0) {
-                if (BuildConfig.TESTER_BUILD) {
-                    auxiliaryPage.addView(vaultBox(movie, "Resume at " + elapsedTime(position),
-                            view -> showResumeChoices(movie, position)));
-                } else {
-                    TextView resume = focusButton(movie.title + "  •  RESUME AT " + elapsedTime(position));
-                    resume.setOnClickListener(v -> playMovie(movie, position));
-                    auxiliaryPage.addView(resume);
-                }
-                added++;
+            if (!movie.url.isEmpty() && !movie.title.trim().isEmpty() && position > 0) {
+                String artwork = movie.backdrop.isEmpty() ? movie.fullPoster : movie.backdrop;
+                cards.add(collectionCard(movie.title, "Resume at " + elapsedTime(position), artwork,
+                        movie.poster, () -> showResumeChoices(movie, position)));
             }
         }
-        if (added == 0) auxiliaryPage.addView(text("No unfinished movies yet.", 13, false));
+        showCollection(cards, "No unfinished movies yet.");
+    }
+
+    private void showCollection(List<View> cards, String emptyMessage) {
+        if (cards.isEmpty()) {
+            auxiliaryPage.addView(text(emptyMessage, 13, false));
+            return;
+        }
+        if (!tvTheme) {
+            for (View card : cards) auxiliaryPage.addView(card);
+            return;
+        }
+        int columns = tvShelfWidth() >= 700 ? 3 : 2;
+        for (int index = 0; index < cards.size(); index += columns) {
+            LinearLayout row = new LinearLayout(this);
+            for (int slot = 0; slot < columns; slot++) {
+                LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, dp(70), 1f);
+                size.setMargins(0, 0, dp(7), dp(7));
+                row.addView(index + slot < cards.size() ? cards.get(index + slot) : new Space(this), size);
+            }
+            auxiliaryPage.addView(row);
+        }
+    }
+
+    private View collectionCard(String title, String caption, String artwork, String fallback, Runnable action) {
+        LinearLayout card = new LinearLayout(this);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setFocusable(true);
+        card.setContentDescription(title + ", " + caption);
+        card.setBackground(tvTheme ? tvSurface(false) : phonePanel(false, 8));
+        card.setClipToOutline(true);
+        card.setOnFocusChangeListener((view, focused) -> card.setBackground(tvTheme ? tvSurface(focused) : phonePanel(focused, 8)));
+        card.setOnClickListener(view -> action.run());
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, dp(tvTheme ? 70 : 57));
+        size.bottomMargin = dp(6);
+        card.setLayoutParams(size);
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        image.setBackgroundColor(color("#19283B"));
+        image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        card.addView(image, new LinearLayout.LayoutParams(dp(phonePortrait ? 93 : 110), -1));
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        copy.setPadding(dp(10), dp(3), dp(7), dp(3));
+        TextView primary = text(title, 15, true);
+        TextView secondary = text(caption, 12, false);
+        secondary.setTextColor(color("#A5C1DA"));
+        for (TextView line : new TextView[]{primary, secondary}) {
+            line.setPadding(0, 0, 0, 0);
+            line.setSingleLine(true);
+            line.setEllipsize(TextUtils.TruncateAt.END);
+            copy.addView(line);
+        }
+        card.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
+        if (!artwork.isEmpty() || !fallback.isEmpty()) movieCoverLoader.execute(() -> {
+            Bitmap loaded = posterBitmap(artwork);
+            updatePoster(loaded == null && !fallback.equals(artwork) ? posterBitmap(fallback) : loaded, image);
+        });
+        return card;
     }
 
     private VaultItem movieFromHistory(JSONObject entry) {
         VaultItem movie = new VaultItem(entry.optString("title"), entry.optString("year"), "",
                 entry.optString("poster"), entry.optString("fullPoster"), entry.optString("url"));
         movie.id = entry.optString("id");
+        movie.backdrop = entry.optString("backdrop");
         movie.studioId = entry.optString("studioId");
         return movie;
     }
@@ -1875,7 +2055,7 @@ public class MainActivity extends Activity {
                     auxiliaryPage.removeAllViews();
                     auxiliaryPage.addView(sectionTitle("CONTINUE WATCHING", "#63EFFF"));
                     showContinueWatching();
-                    if (auxiliaryPage.getChildCount() > 1) auxiliaryPage.getChildAt(1).requestFocus();
+                    if (!auxiliaryPage.requestFocus()) navButtons.get(Page.CONTINUE).requestFocus();
                 }).setNegativeButton("Cancel", null).show();
     }
 
@@ -1900,7 +2080,7 @@ public class MainActivity extends Activity {
                 entry = new JSONObject();
                 entry.put("title", activeMovie.title).put("id", activeMovie.id).put("year", activeMovie.year)
                         .put("studioId", activeMovie.studioId)
-                        .put("poster", activeMovie.poster).put("fullPoster", activeMovie.fullPoster)
+                        .put("poster", activeMovie.poster).put("fullPoster", activeMovie.fullPoster).put("backdrop", activeMovie.backdrop)
                         .put("url", activeMovie.url).put("position", position);
             }
             saveMovieHistory(activeMovie, entry);
@@ -2047,6 +2227,8 @@ public class MainActivity extends Activity {
             VaultItem movie = new VaultItem(item.optString("title", "Untitled"), item.optString("year"),
                     item.optString("summary"), thumbnail.isEmpty() ? cover : thumbnail, cover, item.getString("stream_url"));
             movie.id = item.optString("id");
+            movie.backdrop = item.optString("backdrop_url");
+            movie.addedAt = item.optLong("added_at");
             if (seen.add(movie.releaseKey())) result.add(movie);
         }
         return result;
@@ -2127,7 +2309,7 @@ public class MainActivity extends Activity {
         LinearLayout tools = new LinearLayout(this);
         tools.setGravity(Gravity.CENTER_VERTICAL);
         guideControl(tools, phoneLayout ? "↻ SCAN CHANNELS" : "↻ SCAN FOR CHANNELS", "scan", () -> loadDirectory(), previousFocus);
-        tools.addView(text(channels.size() + " channels", 11, true));
+        if (!tvTheme) tools.addView(text(channels.size() + " channels", 11, true));
         guideControl(tools, "‹ EARLIER", "earlier", () -> moveGuide(-1), previousFocus);
         guideControl(tools, "NOW", "now", () -> { guideOffset = 0; showLoadedChannels(); }, previousFocus);
         guideControl(tools, "LATER ›", "later", () -> moveGuide(1), previousFocus);
@@ -2135,13 +2317,8 @@ public class MainActivity extends Activity {
                 "search", () -> searchGuide(), previousFocus);
         guideControl(tools, guideSortByRating ? "SORT: RATING" : "SORT: CHANNEL", "guide-sort",
                 this::chooseGuideSort, previousFocus);
-        guideControl(tools, fullGuide ? "COMPACT GUIDE" : "FULL GUIDE", "guide-layout", () -> {
-            fullGuide = !fullGuide;
-            guideOffset = 0;
-            showLoadedChannels();
-        }, previousFocus);
         addGuideStrip(tools);
-        addGap(liveRail, 6);
+        addGap(liveRail, tvTheme ? 4 : 6);
         LinearLayout filters = new LinearLayout(this);
         guideControl(filters, "ALL STUDIOS", "studio:", () -> filterGuide(""), previousFocus);
         for (Creator studio : reachableCreators()) {
@@ -2149,69 +2326,23 @@ public class MainActivity extends Activity {
                     () -> filterGuide(studio.playlist), previousFocus);
         }
         addGuideStrip(filters);
-        addGap(liveRail, 8);
+        addGap(liveRail, tvTheme ? 5 : 8);
 
         if (channels.isEmpty()) {
             liveRail.addView(text(loadingGuides.isEmpty() ? "No live channels are reachable. Select Scan to check again."
                     : "Finding live channels…", 14, false));
             return;
         }
-        if (!fullGuide) {
-            renderCompactChannels(previousFocus);
-            return;
-        }
-        int viewport = getResources().getDisplayMetrics().widthPixels
-                - (menuCollapsed ? dp(phoneLayout ? 49 : 44) : navigationWidth) - dp(phoneLayout ? 35 : 63);
-        int stationWidth = dp(116);
-        int ticksCount = getResources().getConfiguration().screenWidthDp < 770 ? 6 : 8;
-        int tickWidth = Math.max(dp(48), (viewport - stationWidth - dp(34)) / ticksCount);
-        int timelineWidth = tickWidth * ticksCount;
-        long start = (System.currentTimeMillis() / HALF_HOUR + 2L * guideOffset) * HALF_HOUR;
-        long end = start + ticksCount * HALF_HOUR;
-
-        LinearLayout table = new LinearLayout(this);
-        table.setOrientation(LinearLayout.VERTICAL);
-        table.setBackground(surface(new int[]{color("#0D142C"), color("#090A20")}, color("#1EC6E3"), 1, 7));
-        if (neonTheme()) table.setBackground(phonePanel(false, 10));
-        LinearLayout ticks = new LinearLayout(this);
-        TextView station = sectionTitle("CH   CHANNEL", "#63EFFF");
-        station.setTextSize(11);
-        station.setSingleLine(true);
-        station.setPadding(dp(7), dp(4), dp(3), dp(4));
-        ticks.addView(station, new LinearLayout.LayoutParams(stationWidth, -2));
-        for (int tick = 0; tick < ticksCount; tick++) {
-            TextView label = text(guideTime(start + tick * HALF_HOUR), 11, true);
-            label.setTextColor(color("#7BFAFF"));
-            label.setPadding(dp(5), dp(7), dp(2), dp(7));
-            ticks.addView(label, new LinearLayout.LayoutParams(tickWidth, -2));
-        }
-        table.addView(ticks);
-        Channel initial = null;
-        for (int i : displayedGuideIndices()) {
-            Channel channel = channels.get(i);
-            if (initial == null) initial = channel;
-            addGuideRow(table, channel, i, start, end, stationWidth, timelineWidth, previousFocus);
-        }
-        if (initial != null && (previousFocus == null || getCurrentFocus() == focused)) showProgram(initial);
-        if (initial == null) table.addView(text("No channels match this search.", 13, false));
-        addGuideStrip(table);
-        if (phoneLayout) addPhoneBackdrop(liveRail, 58);
+        renderCompactChannels(previousFocus);
     }
 
     private void renderPhoneGuideControls() {
-        LinearLayout destinations = new LinearLayout(this);
-        addPhoneGuideDestination(destinations, "Live TV\nGuide", Page.LIVE);
-        addPhoneGuideDestination(destinations, "Rewind\nCinema", Page.CINEMA);
-        addPhoneGuideDestination(destinations, "Continue\nWatching", Page.CONTINUE);
-        addPhoneGuideDestination(destinations, "Favorites", Page.FAVORITES);
-        liveRail.addView(destinations);
-        addGap(liveRail, 9);
         LinearLayout actions = new LinearLayout(this);
         addPhoneAction(actions, guideSearch.isEmpty() ? "Search guide" : "Search: " + guideSearch,
                 this::searchGuide);
         addPhoneAction(actions, "↻  Scan channels", this::loadDirectory);
         liveRail.addView(actions);
-        addGap(liveRail, 8);
+        addGap(liveRail, 5);
 
         LinearLayout filters = new LinearLayout(this);
         String studioName = "All studios";
@@ -2223,13 +2354,13 @@ public class MainActivity extends Activity {
                 this::choosePhoneGuideTime);
         addPhoneAction(filters, guideSortByRating ? "Rating ▾" : "Sort ▾", this::chooseGuideSort);
         liveRail.addView(filters);
-        addGap(liveRail, 7);
+        addGap(liveRail, 5);
     }
 
     private List<JSONObject> upcomingPrograms(Channel channel, long now) {
         List<JSONObject> next = new ArrayList<>();
         if (channel.programs == null) return next;
-        for (int i = 0; i < channel.programs.length() && next.size() < 2; i++) {
+        for (int i = 0; i < channel.programs.length() && next.size() < 3; i++) {
             JSONObject entry = channel.programs.optJSONObject(i);
             if (entry != null && guideTimeMillis(entry, "start") > now) next.add(entry);
         }
@@ -2237,51 +2368,82 @@ public class MainActivity extends Activity {
     }
 
     private void renderCompactChannels(Object previousFocus) {
-        long now = System.currentTimeMillis();
+        long moment = phoneGuideTime();
         List<Integer> displayed = displayedGuideIndices();
         if (displayed.isEmpty()) {
             liveRail.addView(text("No channels match this search.", 13, false));
             return;
         }
+        int width = getResources().getConfiguration().screenWidthDp;
+        int upcomingSlots = width >= 910 ? 3 : width >= 730 ? 2 : 1;
+        if (tvTheme) addTvGuideHeadings(upcomingSlots);
         showProgram(channels.get(displayed.get(0)));
         for (int index : displayed) {
             Channel channel = channels.get(index);
-            JSONObject current = programAt(channel, now);
-            List<JSONObject> next = upcomingPrograms(channel, now);
+            JSONObject current = programAt(channel, moment);
+            List<JSONObject> next = upcomingPrograms(channel, moment);
             LinearLayout row = new LinearLayout(this);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(5), dp(4), dp(5), dp(4));
-            row.setBackground(phonePanel(false, 8));
+            row.setPadding(dp(5), dp(tvTheme ? 2 : 4), dp(5), dp(tvTheme ? 2 : 4));
+            row.setBackground(tvTheme ? tvSurface(false) : phonePanel(false, 8));
             String art = channelArtwork(channel, current);
-            if (!art.isEmpty()) {
+            if (!art.isEmpty() || tvTheme) {
                 ImageView artwork = new ImageView(this);
                 artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
                 artwork.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-                artwork.setBackground(phonePanel(false, 7));
+                artwork.setBackground(tvTheme ? tvSurface(false) : phonePanel(false, 7));
                 artwork.setClipToOutline(true);
-                row.addView(artwork, new LinearLayout.LayoutParams(dp(phoneLayout ? 73 : 110), dp(phoneLayout ? 47 : 59)));
-                posterLoader.execute(() -> loadPoster(art, artwork));
+                row.addView(artwork, new LinearLayout.LayoutParams(dp(phoneLayout ? 64 : 76), dp(phoneLayout || tvTheme ? 34 : 38)));
+                if (!art.isEmpty()) posterLoader.execute(() -> loadPoster(art, artwork));
             }
             addCompactCell(row, "CH " + displayNumber(channel, index) + guideRatingLabel(channel), channel.name, 1.2f);
-            addCompactCell(row, "On Now", current == null ? "Schedule unavailable" : current.optString("title"), 1f);
-            addCompactCell(row, "Up Next", next.isEmpty() ? "—" : next.get(0).optString("title"), 1f);
-            if (getResources().getConfiguration().screenWidthDp >= 850)
-                addCompactCell(row, "Later", next.size() < 2 ? "—" : next.get(1).optString("title"), 1f);
+            addGuideProgram(row, channel, current, guideOffset == 0, moment);
+            for (int slot = 0; slot < upcomingSlots; slot++) {
+                addGuideProgram(row, channel, slot < next.size() ? next.get(slot) : null, false, moment);
+            }
             boolean saved = isFavorite(channel);
             TextView star = navigationButton(saved ? "★" : "☆");
             star.setContentDescription("Favorite " + channel.name);
             star.setOnClickListener(view -> toggleFavorite(channel, star));
-            row.addView(star);
+            if (tvTheme) {
+                star.setPadding(0, 0, 0, 0);
+                star.setGravity(Gravity.CENTER);
+                row.addView(star, new LinearLayout.LayoutParams(dp(29), -2));
+            } else row.addView(star);
             String tag = "compact-watch:" + channel.url;
-            guideControl(row, "▶ WATCH LIVE", tag, () -> play(channel), previousFocus);
+            guideControl(row, tvTheme ? "▶ Watch Live" : phoneLayout ? "▶ WATCH" : "▶ WATCH LIVE", tag, () -> play(channel), previousFocus);
             View watch = row.findViewWithTag(tag);
             watch.setContentDescription("Watch live: " + channel.name);
+            if (tvTheme) watch.getLayoutParams().width = dp(91);
             watch.setOnFocusChangeListener((view, focused) -> {
+                if (tvTheme) {
+                    row.setBackground(tvSurface(focused));
+                    view.setBackground(tvSurface(focused));
+                }
                 if (focused) { playMenuSound(); showProgram(channel); }
             });
             liveRail.addView(row);
-            addGap(liveRail, 5);
+            addGap(liveRail, tvTheme ? 2 : 3);
         }
+    }
+
+    private void addTvGuideHeadings(int upcomingSlots) {
+        LinearLayout labels = new LinearLayout(this);
+        labels.setGravity(Gravity.CENTER_VERTICAL);
+        labels.setPadding(dp(5), 0, dp(5), 0);
+        labels.setBackground(surface(new int[]{color("#1B3046"), color("#132439")}, 0, 0, 6));
+        String[] titles = {"Channel", "On Now", "Up Next", "Later", "Later 2"};
+        labels.addView(new Space(this), new LinearLayout.LayoutParams(dp(76), 1));
+        for (int i = 0; i < upcomingSlots + 2; i++) {
+            TextView title = text(i == 1 && guideOffset != 0 ? guideTime(phoneGuideTime()) : titles[i], 13, true);
+            title.setTextColor(color("#C3DBF1"));
+            title.setPadding(dp(5), 0, 0, 0);
+            title.setSingleLine(true);
+            labels.addView(title, new LinearLayout.LayoutParams(0, -2, i == 0 ? 1.2f : 1f));
+        }
+        labels.addView(new Space(this), new LinearLayout.LayoutParams(dp(125), 1));
+        liveRail.addView(labels, new LinearLayout.LayoutParams(-1, dp(25)));
+        addGap(liveRail, 4);
     }
 
     private void addCompactCell(LinearLayout row, String label, String value, float weight) {
@@ -2291,7 +2453,9 @@ public class MainActivity extends Activity {
         TextView heading = text(label, 10, true);
         heading.setTextColor(color("#6BEAFF"));
         heading.setSingleLine(true);
+        heading.setPadding(0, 0, 0, 0);
         TextView title = text(value, 13, true);
+        title.setPadding(0, 0, 0, 0);
         title.setSingleLine(true);
         title.setEllipsize(TextUtils.TruncateAt.END);
         cell.addView(heading);
@@ -2299,25 +2463,44 @@ public class MainActivity extends Activity {
         row.addView(cell, new LinearLayout.LayoutParams(0, -2, weight));
     }
 
-    private void addPhoneGuideDestination(LinearLayout row, String label, Page page) {
-        boolean selected = page == Page.LIVE;
-        LinearLayout button = new LinearLayout(this);
-        button.setOrientation(LinearLayout.VERTICAL);
-        button.setGravity(Gravity.CENTER);
-        button.setMinimumHeight(dp(60));
-        button.setPadding(dp(3), dp(4), dp(3), dp(4));
-        button.setBackground(phonePanel(selected, 9));
-        button.setFocusable(true);
-        button.setContentDescription(label.replace('\n', ' '));
-        button.setOnClickListener(v -> openPage(page));
-        button.addView(navigationGlyph(page, selected), new LinearLayout.LayoutParams(dp(24), dp(24)));
-        TextView title = text(label, 12, true);
-        title.setGravity(Gravity.CENTER);
-        title.setPadding(0, dp(2), 0, 0);
-        button.addView(title);
-        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(0, -1, 1);
-        if (row.getChildCount() > 0) layout.setMarginStart(dp(6));
-        row.addView(button, layout);
+    private void addGuideProgram(LinearLayout row, Channel channel, JSONObject program, boolean airing, long moment) {
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setPadding(dp(5), dp(2), dp(4), dp(2));
+        cell.setGravity(Gravity.CENTER_VERTICAL);
+        String title = program == null ? "Schedule unavailable" : program.optString("title");
+        String displayTitle = shortProgramTitle(title);
+        TextView label = text(displayTitle, 13, true);
+        label.setPadding(0, 0, 0, 0);
+        label.setSingleLine(true);
+        label.setEllipsize(TextUtils.TruncateAt.END);
+        cell.addView(label);
+        if (program != null) {
+            if (airing) addHomeProgress(cell, program, moment);
+            else {
+                String detail = title.substring(displayTitle.length()).replaceFirst("^ · ", "");
+                if (detail.isEmpty()) detail = guideTime(guideTimeMillis(program, "start"));
+                TextView info = text(detail, 11, false);
+                info.setTextColor(color("#B3C9DE"));
+                info.setPadding(0, 0, 0, 0);
+                info.setSingleLine(true);
+                info.setEllipsize(TextUtils.TruncateAt.END);
+                cell.addView(info);
+            }
+            cell.setFocusable(true);
+            cell.setContentDescription(title);
+            cell.setOnFocusChangeListener((view, focused) -> cell.setBackground(focused
+                    ? tvTheme ? tvSurface(true) : phonePanel(false, 5) : null));
+            cell.setOnClickListener(view -> new AlertDialog.Builder(this).setTitle(title)
+                    .setMessage(guideTime(guideTimeMillis(program, "start")) + " – " + guideTime(guideTimeMillis(program, "stop")))
+                    .setPositiveButton("Watch live", (dialog, which) -> play(channel))
+                    .setNegativeButton("Close", null).show());
+        }
+        row.addView(cell, new LinearLayout.LayoutParams(0, -2, 1));
+    }
+
+    private String shortProgramTitle(String title) {
+        return title.split(" · S\\d+E\\d+", 2)[0];
     }
 
     private void addPhoneAction(LinearLayout row, String label, Runnable action) {
@@ -2333,7 +2516,7 @@ public class MainActivity extends Activity {
         button.setSingleLine(false);
         button.setMaxLines(2);
         button.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        button.setMinHeight(dp(48));
+        button.setMinHeight(dp(44));
         LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(0, -1, 1);
         if (row.getChildCount() > 0) layout.setMarginStart(dp(8));
         row.addView(button, layout);
@@ -2388,7 +2571,7 @@ public class MainActivity extends Activity {
             LinearLayout card = new LinearLayout(this);
             card.setGravity(Gravity.CENTER_VERTICAL);
             card.setBackground(phonePanel((i & 1) == 1, 9));
-            card.setPadding(dp(7), dp(6), dp(6), dp(6));
+            card.setPadding(dp(5), dp(4), dp(5), dp(4));
             FrameLayout mark = new FrameLayout(this);
             mark.setBackground(phonePanel((i & 1) == 1, 7));
             mark.setClipToOutline(true);
@@ -2405,7 +2588,7 @@ public class MainActivity extends Activity {
                 mark.addView(logo, new FrameLayout.LayoutParams(-1, -1));
                 posterLoader.execute(() -> loadPoster(art, logo));
             }
-            card.addView(mark, new LinearLayout.LayoutParams(dp(83), dp(68)));
+            card.addView(mark, new LinearLayout.LayoutParams(dp(60), dp(46)));
             LinearLayout identity = new LinearLayout(this);
             identity.setOrientation(LinearLayout.VERTICAL);
             identity.setPadding(dp(8), 0, 0, 0);
@@ -2415,19 +2598,21 @@ public class MainActivity extends Activity {
             station.setMaxLines(1);
             station.setEllipsize(TextUtils.TruncateAt.END);
             identity.addView(station);
-            TextView name = text(channel.name, 16, true);
+            TextView name = text(channel.name, 14, true);
             name.setPadding(0, dp(2), 0, 0);
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
             identity.addView(name);
             String program = scheduled == null ? "No program listed" : scheduled.optString("title", "No program listed");
-            TextView summary = text(program, 12, false);
+            TextView summary = text(shortProgramTitle(program), 12, false);
             summary.setTextColor(color("#BED3E8"));
             summary.setPadding(0, dp(2), 0, dp(2));
-            summary.setMaxLines(2);
+            summary.setMaxLines(1);
             summary.setEllipsize(TextUtils.TruncateAt.END);
             identity.addView(summary);
             List<JSONObject> upcoming = upcomingPrograms(channel, guideTime);
             if (!upcoming.isEmpty()) {
-                TextView next = text("Next: " + upcoming.get(0).optString("title"), 11, false);
+                TextView next = text("Next: " + shortProgramTitle(upcoming.get(0).optString("title")), 11, false);
                 next.setMaxLines(1);
                 next.setEllipsize(TextUtils.TruncateAt.END);
                 next.setPadding(0, dp(2), 0, 0);
@@ -2447,14 +2632,14 @@ public class MainActivity extends Activity {
             card.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
             LinearLayout controls = new LinearLayout(this);
             controls.setPadding(dp(5), 0, 0, 0);
-            controls.setOrientation(LinearLayout.VERTICAL);
+            controls.setGravity(Gravity.CENTER_VERTICAL);
             boolean saved = isFavorite(channel);
             TextView favorite = navigationButton(saved ? "★" : "☆");
             favorite.setContentDescription((saved ? "Remove from favorites: " : "Add to favorites: ") + channel.name);
             favorite.setGravity(Gravity.CENTER);
             favorite.setPadding(0, 0, 0, 0);
             favorite.setTextSize(19);
-            favorite.setMinHeight(dp(41));
+            favorite.setMinHeight(dp(44));
             favorite.setBackgroundColor(Color.TRANSPARENT);
             favorite.setOnClickListener(v -> toggleFavorite(channel, favorite));
             controls.addView(favorite, new LinearLayout.LayoutParams(dp(44), -2));
@@ -2463,13 +2648,13 @@ public class MainActivity extends Activity {
             watch.setGravity(Gravity.CENTER);
             watch.setPadding(0, 0, 0, 0);
             watch.setTextSize(17);
-            watch.setMinHeight(dp(42));
+            watch.setMinHeight(dp(44));
             watch.setBackground(phonePanel(false, 7));
             watch.setOnClickListener(v -> play(channel));
             controls.addView(watch, new LinearLayout.LayoutParams(dp(44), -2));
             card.addView(controls);
             liveRail.addView(card);
-            addGap(liveRail, 10);
+            addGap(liveRail, 5);
         }
         if (first == null) liveRail.addView(text("No channels match this search.", 13, false));
         else showProgram(first);
@@ -2496,6 +2681,17 @@ public class MainActivity extends Activity {
         if (id.equals("studio:" + guideStudio) || (guideOffset == 0 && "now".equals(id))) {
             button.setTextColor(color("#FFF088"));
         }
+        if (tvTheme && activePage == Page.LIVE) {
+            button.setMinHeight(dp(26));
+            button.setTextSize(12);
+        }
+        if (tvTheme && id.equals("home-watch")) {
+            button.setTextColor(color("#031823"));
+            button.setBackground(surface(new int[]{color("#1BF1FC"), color("#03CBE8")}, 0, 0, 8));
+            button.setOnFocusChangeListener((view, focused) -> view.setBackground(surface(
+                    new int[]{color(focused ? "#7AFAFF" : "#1BF1FC"), color("#03CBE8")},
+                    color("#FFFFFF"), focused ? 2 : 0, 8)));
+        }
         LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-2, -2);
         layout.setMargins(0, 0, dp(5), 0);
         row.addView(button, layout);
@@ -2503,7 +2699,6 @@ public class MainActivity extends Activity {
     }
 
     private void moveGuide(int direction) {
-        fullGuide = true;
         guideOffset = Math.max(-1, Math.min(GUIDE_HOURS_AHEAD, guideOffset + direction));
         showLoadedChannels();
     }
@@ -2574,7 +2769,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams screenLayout = new LinearLayout.LayoutParams(0, -1, .62f);
         screenLayout.setMargins(0, 0, dp(8), 0);
         landscapeProgramArtwork = null;
-        if (neonTheme() && !phonePortrait) {
+        if (phoneLayout && !phonePortrait) {
             FrameLayout cover = new FrameLayout(this);
             cover.setBackground(phonePanel(true, 9));
             cover.setClipToOutline(true);
@@ -2592,7 +2787,8 @@ public class MainActivity extends Activity {
         } else if (!phonePortrait) preview.addView(screen, screenLayout);
         FrameLayout card = new FrameLayout(this);
         card.setBackground(surface(new int[]{color("#10162C"), color("#2C1350")}, color("#26D6F2"), 1, 8));
-        if (neonTheme()) card.setBackground(phonePanel(phonePortrait, 11));
+        if (tvTheme) card.setBackground(tvSurface(false));
+        else if (phoneLayout) card.setBackground(phonePanel(phonePortrait, 11));
         if (programArtwork != null) programArtwork.removeCallbacks(previewClock);
         previewChannel = null;
         programArtwork = new ImageView(this);
@@ -2615,13 +2811,13 @@ public class MainActivity extends Activity {
         card.setClipToOutline(true);
         LinearLayout detail = new LinearLayout(this);
         detail.setOrientation(LinearLayout.VERTICAL);
-        detail.setPadding(dp(8), dp(phonePortrait ? 11 : 4), dp(8), dp(phonePortrait ? 9 : 2));
+        detail.setPadding(dp(8), dp(phonePortrait ? 6 : 4), dp(8), dp(phonePortrait ? 5 : 2));
         TextView now = sectionTitle("▶  NOW PLAYING", "#5EF4FF");
         now.setPadding(dp(6), dp(1), dp(6), dp(1));
         if (phonePortrait) now.setBackground(phonePanel(true, 5));
-        if (phonePortrait || !neonTheme()) detail.addView(now, new LinearLayout.LayoutParams(-2, -2));
-        programTitle = text("Select a channel from the guide", 17, true);
-        programTitle.setTextColor(color(neonTheme() ? "#F3F8FF" : "#FFF16B"));
+        if (phonePortrait || !phoneLayout) detail.addView(now, new LinearLayout.LayoutParams(-2, -2));
+        programTitle = text("Select a channel from the guide", tvTheme ? 20 : 17, true);
+        programTitle.setTextColor(color(phoneLayout ? "#F3F8FF" : "#FFF16B"));
         if (neonTheme()) programTitle.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD_ITALIC));
         if (phonePortrait) programTitle.setMaxLines(2);
         else programTitle.setSingleLine(true);
@@ -2644,17 +2840,18 @@ public class MainActivity extends Activity {
         timing.addView(programElapsed, new LinearLayout.LayoutParams(0, -2, 1));
         timing.addView(programDuration);
         detail.addView(timing);
-        card.addView(detail, new FrameLayout.LayoutParams(-1, -2));
+        card.addView(detail, new FrameLayout.LayoutParams(-1, -2, tvTheme ? Gravity.CENTER_VERTICAL : Gravity.TOP));
         if (phonePortrait) {
-            card.setMinimumHeight(dp(131));
+            card.setMinimumHeight(dp(92));
             preview.addView(card, new LinearLayout.LayoutParams(-1, -2));
             liveRail.addView(preview, new LinearLayout.LayoutParams(-1, -2));
         } else {
             preview.addView(card, new LinearLayout.LayoutParams(0, -1, 1));
-            int previewHeight = getResources().getConfiguration().screenHeightDp < 420 ? 87 : 106;
+            int previewHeight = phoneLayout ? 63 : tvTheme ? 77
+                    : getResources().getConfiguration().screenHeightDp < 420 ? 82 : 98;
             liveRail.addView(preview, new LinearLayout.LayoutParams(-1, dp(previewHeight)));
         }
-        addGap(liveRail, phonePortrait ? 12 : 8);
+        addGap(liveRail, tvTheme ? 5 : phoneLayout ? 6 : 8);
     }
 
     private String guideTime(long milliseconds) {
@@ -2664,7 +2861,7 @@ public class MainActivity extends Activity {
     private void showProgram(Channel channel) {
         previewChannel = channel;
         programArtwork.removeCallbacks(previewClock);
-        programArtwork.postDelayed(previewClock, 1000);
+        programArtwork.postDelayed(previewClock, 3000);
         updateProgram(channel);
     }
 
@@ -2720,83 +2917,6 @@ public class MainActivity extends Activity {
         return String.format(Locale.US, "%d:%02d", seconds / 60, seconds % 60);
     }
 
-    private void addGuideRow(LinearLayout table, Channel channel, int index, long start, long end,
-                             int stationWidth, int timelineWidth, Object previous) {
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout tune = new LinearLayout(this);
-        tune.setGravity(Gravity.CENTER_VERTICAL);
-        tune.setFocusable(true);
-        tune.setTag(channel.url);
-        tune.setContentDescription("CH " + displayNumber(channel, index) + " " + channel.name + ". Press OK to watch.");
-        tune.setBackground(surface(new int[]{color("#101831"), color("#0B0B23")}, color("#2B597F"), 1, 4));
-        String availability = channel.state;
-        Creator owner = studioFor(channel);
-        if (owner != null && !owner.state.equals("broadcasting") && !owner.state.equals("standby")) availability = owner.state;
-        TextView station = text("CH " + displayNumber(channel, index) + "  " + channel.name + "\n" + channel.studio + guideRatingLabel(channel)
-                + ("broadcasting".equals(availability) ? "" : " · " + availability), 11, true);
-        station.setPadding(dp(7), dp(4), dp(4), dp(4));
-        station.setMaxLines(3);
-        station.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        station.setTextColor(color("#77EFFF"));
-        tune.addView(station, new LinearLayout.LayoutParams(stationWidth, -1));
-        LinearLayout programs = new LinearLayout(this);
-        int cursor = 0;
-        long now = System.currentTimeMillis();
-        if (channel.programs != null) {
-            for (int i = 0; i < channel.programs.length(); i++) {
-                JSONObject entry = channel.programs.optJSONObject(i);
-                if (entry == null) continue;
-                long from = guideTimeMillis(entry, "start"), until = guideTimeMillis(entry, "stop");
-                if (from >= end || until <= start) continue;
-                int left = (int) ((Math.max(start, from) - start) * timelineWidth / (end - start));
-                int right = (int) ((Math.min(end, until) - start) * timelineWidth / (end - start));
-                if (right <= cursor) continue;
-                if (left > cursor) programs.addView(new Space(this), new LinearLayout.LayoutParams(left - cursor, 1));
-                LinearLayout cell = programCell(entry.optString("title", "Scheduled program"), from, until, from <= now && now < until);
-                programs.addView(cell, new LinearLayout.LayoutParams(right - Math.max(left, cursor), -1));
-                cursor = right;
-            }
-        }
-        if (cursor == 0) programs.addView(text("Schedule unavailable", 12, false), new LinearLayout.LayoutParams(timelineWidth, -1));
-        tune.addView(programs, new LinearLayout.LayoutParams(timelineWidth, -1));
-        tune.setOnFocusChangeListener((view, active) -> {
-            tune.setBackground(surface(new int[]{color(active ? "#2A2256" : "#101831"), color("#0B0B23")},
-                    color(active ? "#FF51C7" : "#2B597F"), active ? 2 : 1, 4));
-            if (active) showProgram(channel);
-        });
-        if (phoneLayout) tune.setContentDescription("Watch live: " + channel.name);
-        tune.setOnClickListener(view -> play(channel));
-        row.addView(tune, new LinearLayout.LayoutParams(stationWidth + timelineWidth, dp(45)));
-        TextView star = navigationButton(isFavorite(channel) ? "★" : "☆");
-        star.setContentDescription("Toggle favorite: " + channel.name);
-        star.setOnClickListener(view -> toggleFavorite(channel, star));
-        row.addView(star, new LinearLayout.LayoutParams(dp(34), dp(45)));
-        table.addView(row);
-        if (channel.url.equals(previous)) tune.requestFocus();
-    }
-
-    private LinearLayout programCell(String title, long start, long stop, boolean current) {
-        LinearLayout cell = new LinearLayout(this);
-        cell.setOrientation(LinearLayout.VERTICAL);
-        cell.setGravity(Gravity.CENTER_VERTICAL);
-        cell.setPadding(dp(4), 0, dp(3), 0);
-        cell.setBackground(surface(new int[]{color(current ? "#352C25" : "#111B34"), color("#101126")},
-                color(current ? "#F2CD37" : "#364D6C"), 1, 3));
-        TextView name = text(title, 11, true);
-        name.setTextColor(color(current ? "#FFF087" : "#E4E7F4"));
-        TextView time = text(guideTime(start) + " – " + guideTime(stop), 9, false);
-        time.setTextColor(color("#ABC3DF"));
-        for (TextView line : new TextView[]{name, time}) {
-            line.setSingleLine(true);
-            line.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            line.setPadding(0, 0, 0, 0);
-            cell.addView(line);
-        }
-        return cell;
-    }
-
-
     private String[] currentAndNext(Channel channel) {
         String[] titles = {"", ""};
         if (channel.programs == null) return titles;
@@ -2814,6 +2934,9 @@ public class MainActivity extends Activity {
     }
 
     private void updateStudioStatus(String creator) {
+        if (tvTheme || phoneLayout && !phonePortrait) {
+            status.setVisibility(directoryStale || !staleGuides.isEmpty() ? View.VISIBLE : View.GONE);
+        }
         if (phonePortrait) {
             String freshness = directoryStale || !staleGuides.isEmpty() ? "  •  Last known guide" : "";
             if (!cinemaScreen) {
@@ -3170,15 +3293,18 @@ public class MainActivity extends Activity {
 
             @Override protected void onDraw(android.graphics.Canvas canvas) {
                 super.onDraw(canvas);
-                if (requested || isDestroyed() || item.poster.isEmpty() || !getLocalVisibleRect(visible)) return;
+                if (requested || isDestroyed() || item.poster.isEmpty() && item.fullPoster.isEmpty()
+                        && (!thumbnail || item.backdrop.isEmpty()) || !getLocalVisibleRect(visible)) return;
                 requested = true;
-                Bitmap cached = posters.get(item.poster);
+                String art = thumbnail && !item.backdrop.isEmpty() ? item.backdrop : item.poster;
+                Bitmap cached = posters.get(art);
                 if (cached != null) {
                     post(() -> { if (isAttachedToWindow()) setImageBitmap(cached); });
-                } else if (thumbnail) {
-                    posterLoader.execute(() -> loadPoster(item.poster, this));
                 } else {
-                    movieCoverLoader.execute(() -> updatePoster(moviePoster(item), this));
+                    movieCoverLoader.execute(() -> {
+                        Bitmap loaded = posterBitmap(art);
+                        updatePoster(loaded == null ? moviePoster(item) : loaded, this);
+                    });
                 }
             }
         };
@@ -3321,7 +3447,6 @@ public class MainActivity extends Activity {
     private void checkUpdates(boolean requested) {
         if (updateBusy) return;
         updateBusy = true;
-        updateButton.setText("UPDATES  •  CHECKING…");
         updateLoader.execute(() -> {
             try {
                 StringBuilder notes = new StringBuilder();
@@ -3354,7 +3479,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     if (isDestroyed()) return;
                     updateBusy = false;
-                    updateButton.setText(BuildConfig.TESTER_BUILD ? testerVersionLabel() : "UPDATES  •  RETRY");
+                    updateButton.setText(installedVersionLabel());
                     if (requested) showBanner("Could not check for updates. Select Updates to try again.");
                 });
             }
@@ -3439,9 +3564,7 @@ public class MainActivity extends Activity {
         updateBusy = sessionCommitted = installerOpened = false;
         updateSession = -1;
         installConfirmation = null;
-        updateButton.setText(BuildConfig.TESTER_BUILD ? testerVersionLabel()
-                : pendingUpdate == null ? (phonePortrait ? "v" : "UP TO DATE ✓  v") + BuildConfig.VERSION_NAME
-                : (phonePortrait ? "UPDATE\nv" : "UPDATE TO v") + pendingUpdate.version);
+        updateButton.setText(installedVersionLabel());
         if (resumed && guideVisible && !message.isEmpty()) showBanner(message);
     }
 
@@ -3549,14 +3672,31 @@ public class MainActivity extends Activity {
     private void setBitrateCap(int value) {
         if (temporaryBitrateCap == value) return;
         temporaryBitrateCap = value;
+        refreshVideoQuality();
+    }
+
+    private void refreshVideoQuality() {
         player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
-                .setMaxVideoBitrate(value).build());
+                .setMaxVideoBitrate(Math.min(viewerBitrateCap, temporaryBitrateCap)).build());
+    }
+
+    private void choosePlaybackQuality() {
+        int[] caps = {Integer.MAX_VALUE, 1_000_000, 400_000};
+        int selected = viewerBitrateCap == caps[2] ? 2 : viewerBitrateCap == caps[1] ? 1 : 0;
+        new AlertDialog.Builder(this).setTitle("Playback quality")
+                .setSingleChoiceItems(new String[]{"Auto", "Balanced · up to 1 Mbps", "Data saver · up to 0.4 Mbps"},
+                        selected, (dialog, which) -> {
+                            viewerBitrateCap = caps[which];
+                            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("playback_quality_cap", viewerBitrateCap).apply();
+                            refreshVideoQuality();
+                            dialog.dismiss();
+                        }).setNegativeButton("Cancel", null).show();
     }
 
     private void lowerQualityDuringStall() {
         Format playing = player.getVideoFormat();
         if (playing == null || rebufferStarted == 0 || guideVisible || recovering || !player.getPlayWhenReady()) return;
-        int limit = Math.min(playing.bitrate, temporaryBitrateCap);
+        int limit = Math.min(playing.bitrate, Math.min(viewerBitrateCap, temporaryBitrateCap));
         int lower = 0;
         for (Tracks.Group group : player.getCurrentTracks().getGroups()) {
             if (group.getType() != C.TRACK_TYPE_VIDEO) continue;
@@ -4187,7 +4327,8 @@ public class MainActivity extends Activity {
     @Override public boolean onKeyDown(int key, KeyEvent event) {
         if (key == KeyEvent.KEYCODE_MENU) {
             if (event.getRepeatCount() == 0) {
-                if (BuildConfig.TESTER_BUILD) showTesterTools();
+                if (!guideVisible) choosePlaybackQuality();
+                else if (BuildConfig.TESTER_BUILD) showTesterTools();
                 else showDiagnostics();
             }
             return true;
@@ -4250,7 +4391,7 @@ public class MainActivity extends Activity {
 
     private void focusHomeNavigation() {
         TextView home = navButtons.get(Page.HOME);
-        if (home != null) home.requestFocusFromTouch();
+        if (home != null && guideVisible && activePage == Page.HOME) home.requestFocusFromTouch();
     }
 
     @Override public void onBackPressed() {
@@ -4454,7 +4595,8 @@ public class MainActivity extends Activity {
     }
     private static class VaultItem {
         final String title, year, summary, poster, fullPoster;
-        String url, id = "", studioId = "";
+        long addedAt;
+        String url, id = "", studioId = "", backdrop = "";
         VaultItem(String title, String year, String summary, String poster, String fullPoster, String url) {
             this.title = title;
             this.year = year;

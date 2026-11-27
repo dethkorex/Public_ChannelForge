@@ -106,7 +106,7 @@ class CoreTests(unittest.TestCase):
         variant = "/broadcast/demo/" + "b" * 24 + "/hd.m3u8?viewer=" + viewer_id
         manifest = ('#EXTM3U\n#EXT-X-MEDIA:URI="/hls-proxy/audio"\n' + variant + '\n').encode()
 
-        def respond(handler, channel_id, playlist, token, viewer=None):
+        def respond(handler, channel_id, playlist, token, viewer=None, max_bandwidth=0):
             self.assertEqual(channel_id, "demo")
             if playlist == "master":
                 handler.send_bytes(200, manifest, "application/vnd.apple.mpegurl")
@@ -1305,7 +1305,8 @@ class CoreTests(unittest.TestCase):
     def test_encoder_capacity_reserves_live_handoff_and_reuses_existing_stream(self):
         channel = {"id": "live", "items": [{"id": "one", "duration_ms": 60000}]}
         position = app.schedule_position(channel)
-        reuse_key = ("live", app.media_source_identity(position["item"]), position["start"].isoformat(), "standard")
+        reuse_key = ("live", app.media_source_identity(position["item"]), position["start"].isoformat(),
+                     "standard", app.BROADCAST_DEFAULT)
         key = "a" * 20
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(app, "STREAM_DIR", Path(temporary)), \
                 mock.patch.object(app, "FFMPEG_SESSIONS", {}), mock.patch.object(app, "ENCODER_STARTING", {}):

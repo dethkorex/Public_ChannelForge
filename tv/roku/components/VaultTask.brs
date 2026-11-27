@@ -8,6 +8,7 @@ sub load()
   joiner = "?"
   if Instr(1, m.top.url, "?") > 0 then joiner = "&"
   query = "limit=24&offset=" + m.top.offset.ToStr()
+  if m.top.recent then query = "limit=6&sort=added"
   if m.top.movieId <> "" then query = "limit=1&id=" + m.top.movieId
   transfer = CreateObject("roUrlTransfer") : transfer.SetCertificatesFile("common:/certs/ca-bundle.crt") : transfer.InitClientCertificates() : transfer.SetUrl(m.top.url + joiner + query)
   transfer.EnableEncodings(true)
@@ -46,6 +47,14 @@ sub appendMovie(root as object, seen as object, match as object, item as dynamic
   seen[key] = true
   node = root.CreateChild("ContentNode")
   node.AddFields({movieKey: key})
+  landscape = ""
+  if item.backdrop_url <> invalid then landscape = item.backdrop_url
+  node.AddFields({landscapeArtwork: landscape})
+  if m.top.recent
+    added = false
+    if item.added_at <> invalid then added = item.added_at > 0
+    node.AddFields({hasAddedDate: added})
+  end if
   node.title = item.title
   node.url = item.stream_url
   node.streamFormat = "hls"

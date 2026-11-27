@@ -13,74 +13,83 @@
       <Rectangle width="1920" height="1080" color="0x061125ff"/>
       <Rectangle width="1920" height="108" color="0x060b1bff"/>
       <Rectangle width="1920" height="2" translation="[0,106]" color="0x21edf6ff"/>
-      <Button id="homeMenu" text="☰" translation="[55,25]" width="72" height="60"/>
+      <Button id="homeMenu" text="☰" translation="[55,25]" width="64" height="54"/>
       <Poster uri="pkg:/images/channel-forge-tv.png" translation="[146,18]" width="67" height="67" loadDisplayMode="scaleToFit"/>
-      <Label text="CHANNELFORGE TV" translation="[230,20]" width="800" height="51" color="0xf6f8ffff" font="font:LargeBoldSystemFont"/>
-      <Label text="THE COMMUNITY DIAL" translation="[232,71]" width="600" height="26" color="0x59f5ffff" font="font:SmallSystemFont"/>
+      <Label text="ChannelForge TV" translation="[219,29]" width="625" height="48" color="0xf6f8ffff" font="font:MediumBoldSystemFont"/>
       <Button id="guideSchedule" text="SCHEDULE" translation="[865,28]" width="220" height="58"/>
       <Button id="guideSort" text="SORT: CHANNEL" translation="[1108,28]" width="320" height="58"/>
       <Button id="updates" text="SYSTEM" translation="[1450,28]" width="410" height="58"/>
       <Label id="status" text="Finding creator studios…" translation="[58,111]" width="590" height="35" color="0xa9b7c8ff"/>
-      <Group translation="[55,163]">
-        <Rectangle width="570" height="187" color="0x34e7f9ff"/>
-        <Rectangle width="566" height="183" translation="[2,2]" color="0x0b1325ff"/>
-        <Label text="Select a channel from the guide" translation="[24,68]" width="522" height="52" horizAlign="center" color="0xa9b7c8ff"/>
-      </Group>
       <MarkupList id="creators" translation="[55,363]" numRows="6" itemComponentName="CreatorCard" itemSize="[570,92]" itemSpacing="[0,10]"/>
-      <Group translation="[680,135]">
-        <Rectangle width="1180" height="215" color="0x34e7f9ff"/>
-        <Rectangle width="1176" height="211" translation="[2,2]" color="0x151735ff"/>
-        <Poster id="programArt" translation="[605,2]" width="573" height="211" loadDisplayMode="scaleToZoom"/>
-        <Rectangle width="237" height="211" translation="[602,2]" color="0x10163265"/>
-        <Label text="● NOW PLAYING" translation="[23,20]" width="580" height="34" color="0x48f6ffff" font="font:MediumBoldSystemFont"/>
-        <Label id="programTitle" text="Select a channel from the guide" translation="[23,64]" width="750" height="95" wrap="true" numLines="2" color="0xffee64ff" font="font:LargeBoldSystemFont"/>
-        <Label id="programChannel" translation="[24,157]" width="560" height="30" color="0xd8efffff" font="font:SmallSystemFont"/>
-        <Rectangle width="510" height="5" translation="[25,194]" color="0x37526cff"/>
-        <Rectangle id="programProgress" width="0" height="5" translation="[25,194]" color="0x31ecffff"/>
+      <Group id="livePresentation">
+        <Group translation="[55,163]">
+          <Rectangle width="570" height="187" color="0x34e7f9ff"/>
+          <Rectangle width="566" height="183" translation="[2,2]" color="0x0b1325ff"/>
+          <Label text="Select a channel from the guide" translation="[24,68]" width="522" height="52" horizAlign="center" color="0xa9b7c8ff"/>
+        </Group>
+        <Group translation="[680,135]">
+          <Rectangle width="1180" height="215" color="0x34e7f9ff"/>
+          <Rectangle width="1176" height="211" translation="[2,2]" color="0x151735ff"/>
+          <Poster id="programArt" translation="[605,2]" width="573" height="211" loadDisplayMode="scaleToZoom"/>
+          <Rectangle width="237" height="211" translation="[602,2]" color="0x10163265"/>
+          <Label text="● NOW PLAYING" translation="[23,20]" width="580" height="34" color="0x48f6ffff" font="font:MediumBoldSystemFont"/>
+          <Label id="programTitle" text="Select a channel from the guide" translation="[23,64]" width="750" height="95" wrap="true" numLines="2" color="0xffee64ff" font="font:LargeBoldSystemFont"/>
+          <Label id="programChannel" translation="[24,157]" width="560" height="30" color="0xd8efffff" font="font:SmallSystemFont"/>
+          <Rectangle width="510" height="5" translation="[25,194]" color="0x37526cff"/>
+          <Rectangle id="programProgress" width="0" height="5" translation="[25,194]" color="0x31ecffff"/>
+        </Group>
+        <Rectangle translation="[680,354]" width="1180" height="32" color="0x192d43ff"/>
+        <Label text="Channel" translation="[694,356]" width="270" height="27" color="0xc6d6eeff"/>
+        <Label text="On Now" translation="[975,356]" width="169" height="27" color="0xc6d6eeff"/>
+        <Label text="Up Next" translation="[1151,356]" width="171" height="27" color="0xc6d6eeff"/>
+        <Label text="Later" translation="[1331,356]" width="171" height="27" color="0xc6d6eeff"/>
+        <Label text="Later 2" translation="[1511,356]" width="171" height="27" color="0xc6d6eeff"/>
+        <MarkupList id="channels" translation="[680,391]" width="1180" numRows="8" itemComponentName="ChannelCard" itemSize="[1180,73]" itemSpacing="[0,5]"/>
       </Group>
-      <MarkupList id="channels" translation="[680,363]" width="1180" numRows="2" itemComponentName="ChannelCard" itemSize="[1180,88]" itemSpacing="[0,10]"/>
-      <Label text="REWIND CINEMA" translation="[680,565]" width="1120" height="38" color="0xff3eb8ff" font="font:MediumBoldSystemFont"/>
-      <MarkupList id="vault" translation="[680,615]" itemComponentName="VaultCard" itemSize="[555,74]" itemSpacing="[0,8]" numRows="4"/>
-      <Group id="movieDetails" translation="[1270,615]" visible="false">
-        <Rectangle width="590" height="312" color="0x28e3f4ff"/>
-        <Rectangle translation="[2,2]" width="586" height="308" color="0x171832ff"/>
-        <Poster id="moviePoster" translation="[18,18]" width="150" height="230" loadDisplayMode="scaleToFill"/>
-        <Label text="SELECTED CASSETTE" translation="[185,18]" width="390" height="36" color="0x66eaffff"/>
-        <Label id="movieTitle" translation="[185,65]" width="385" height="94" wrap="true" numLines="2" color="0xffe27dff" font="font:MediumBoldSystemFont"/>
-        <Button id="insertMovie" text="INSERT MOVIE" translation="[185,171]" width="359" height="64"/>
+      <Group id="libraryPresentation" visible="false">
+        <Label text="REWIND CINEMA" translation="[680,150]" width="1120" height="38" color="0xff3eb8ff" font="font:MediumBoldSystemFont"/>
+        <MarkupList id="vault" translation="[680,224]" itemComponentName="VaultCard" itemSize="[555,74]" itemSpacing="[0,8]" numRows="8"/>
+        <Group id="movieDetails" translation="[1270,224]" visible="false">
+          <Rectangle width="590" height="312" color="0x28e3f4ff"/>
+          <Rectangle translation="[2,2]" width="586" height="308" color="0x171832ff"/>
+          <Poster id="moviePoster" translation="[18,18]" width="150" height="230" loadDisplayMode="scaleToFill"/>
+          <Label text="SELECTED CASSETTE" translation="[185,18]" width="390" height="36" color="0x66eaffff"/>
+          <Label id="movieTitle" translation="[185,65]" width="385" height="94" wrap="true" numLines="2" color="0xffe27dff" font="font:MediumBoldSystemFont"/>
+          <Button id="insertMovie" text="INSERT MOVIE" translation="[185,171]" width="359" height="64"/>
+        </Group>
+        <Button id="moreMovies" text="MORE MOVIES" translation="[680,902]" width="300" height="52" visible="false"/>
       </Group>
-      <Button id="moreMovies" text="MORE MOVIES" translation="[680,948]" width="300" height="52" visible="false"/>
-      <Label text="LEFT studios  •  RIGHT live channels  •  DOWN Rewind Cinema  •  UP Sort or System" translation="[55,1015]" width="1750" height="35" color="0x718096ff"/>
       <Group id="home">
         <Rectangle width="1920" height="972" translation="[0,108]" color="0x071428ff"/>
-        <Rectangle width="1808" height="330" translation="[55,153]" color="0x28e1f2ff"/>
-        <Rectangle width="1804" height="326" translation="[57,155]" color="0x10152dff"/>
-        <Rectangle width="135" height="4" translation="[100,224]" color="0xe54dfaff"/>
-        <Poster id="homeArt" uri="pkg:/images/channel-forge-tv.png" translation="[1125,155]" width="736" height="326" loadDisplayMode="scaleToFit"/>
-        <Label id="homeEyebrow" text="WELCOME TO CHANNELFORGE TV" translation="[100,186]" width="900" height="36" color="0x55f5ffff" font="font:MediumBoldSystemFont"/>
-        <Label id="homeTitle" text="Live channels. One community dial." translation="[98,242]" width="1000" height="68" color="0xf6f8ffff" font="font:LargeBoldSystemFont"/>
-        <Label id="homeCaption" text="Watch community live channels and explore shared movies." translation="[100,313]" width="980" height="48" color="0xd9e9ffff"/>
-        <Button id="homeWatch" text="▶ WATCH LIVE" translation="[97,390]" width="310" height="63" visible="false"/>
-        <Button id="homeLive" text="OPEN GUIDE" translation="[425,390]" width="310" height="63"/>
-        <Label text="ON NOW" translation="[55,506]" width="1000" height="34" color="0x59f5ffff" font="font:MediumBoldSystemFont"/>
-        <MarkupList id="homeChannels" translation="[55,553]" width="1180" numRows="2" itemComponentName="ChannelCard" itemSize="[1180,88]" itemSpacing="[0,8]"/>
-        <Button id="homeContinue" text="CONTINUE WATCHING" translation="[1270,553]" width="590" height="77"/>
-        <Button id="homeUpdate" text="SYSTEM" translation="[1270,645]" width="590" height="77"/>
-        <Label text="FROM REWIND CINEMA" translation="[55,756]" width="1100" height="36" color="0xf68cffff" font="font:MediumBoldSystemFont"/>
-        <MarkupList id="homeMovies" translation="[55,806]" width="555" numRows="2" itemComponentName="VaultCard" itemSize="[555,74]" itemSpacing="[0,8]"/>
-        <Button id="homeCinema" text="BROWSE REWIND CINEMA" translation="[680,806]" width="550" height="77"/>
+        <Rectangle width="1808" height="256" translation="[55,132]" color="0x28e1f2ff"/>
+        <Rectangle width="1804" height="252" translation="[57,134]" color="0x10152dff"/>
+        <Rectangle width="135" height="4" translation="[85,190]" color="0xe54dfaff"/>
+        <Poster id="homeArt" uri="pkg:/images/channel-forge-tv.png" translation="[1125,134]" width="736" height="252" loadDisplayMode="scaleToFit"/>
+        <Label id="homeEyebrow" text="WELCOME TO CHANNELFORGE TV" translation="[85,154]" width="900" height="36" color="0x55f5ffff" font="font:MediumBoldSystemFont"/>
+        <Label id="homeTitle" text="Live channels. One community dial." translation="[85,200]" width="1000" height="60" color="0xf6f8ffff" font="font:LargeBoldSystemFont"/>
+        <Label id="homeCaption" text="Watch community live channels and explore shared movies." translation="[85,260]" width="980" height="38" color="0xd9e9ffff"/>
+        <Button id="homeWatch" text="▶ WATCH LIVE" translation="[85,313]" width="272" height="53" visible="false"/>
+        <Button id="homeLive" text="OPEN GUIDE" translation="[374,313]" width="272" height="53"/>
+        <Label text="ON NOW" translation="[55,404]" width="1000" height="34" color="0x59f5ffff" font="font:MediumBoldSystemFont"/>
+        <MarkupGrid id="homeChannels" translation="[55,451]" numColumns="5" numRows="1" itemComponentName="HomePreviewCard" itemSize="[344,104]" itemSpacing="[15,0]"/>
+        <Label id="homeRewindHeading" text="FROM REWIND CINEMA" translation="[55,574]" width="1100" height="36" color="0xf68cffff" font="font:MediumBoldSystemFont"/>
+        <MarkupGrid id="homeMovies" translation="[55,619]" numColumns="6" numRows="1" itemComponentName="HomePosterCard" itemSize="[285,132]" itemSpacing="[14,0]"/>
+        <Button id="homeCinema" text="BROWSE REWIND CINEMA" translation="[1450,565]" width="410" height="46"/>
+        <Label id="homeResumeHeading" text="CONTINUE WATCHING" translation="[55,772]" width="1100" height="36" color="0xf68cffff" font="font:MediumBoldSystemFont"/>
+        <MarkupGrid id="homeResumes" translation="[55,823]" numColumns="4" numRows="1" itemComponentName="HomePreviewCard" itemSize="[428,104]" itemSpacing="[16,0]"/>
+        <Button id="homeContinue" text="CONTINUE WATCHING" translation="[1450,763]" width="410" height="46"/>
       </Group>
       <Group id="continuePage" visible="false">
         <Rectangle width="1920" height="972" translation="[0,108]" color="0x071428ff"/>
         <Label text="CONTINUE WATCHING" translation="[74,155]" width="1650" height="66" color="0x55f5ffff" font="font:LargeBoldSystemFont"/>
         <Label id="continueStatus" translation="[78,235]" width="1660" height="42" color="0xd9e9ffff"/>
-        <MarkupList id="continueMovies" translation="[77,300]" itemComponentName="VaultCard" itemSize="[555,74]" itemSpacing="[0,8]" numRows="8"/>
+        <MarkupGrid id="continueMovies" translation="[77,300]" itemComponentName="HomePreviewCard" itemSize="[420,104]" itemSpacing="[16,14]" numColumns="4" numRows="3"/>
       </Group>
       <Group id="navigationDrawer" visible="false">
         <Rectangle width="1920" height="972" translation="[0,108]" color="0x030713a6"/>
-        <Rectangle width="470" height="522" translation="[55,106]" color="0x28e1f2ff"/>
-        <Rectangle width="466" height="518" translation="[57,108]" color="0x10152dff"/>
-        <LabelList id="navigationItems" translation="[80,138]" itemSize="[414,67]" numRows="5" color="0xf4fbffff" focusedColor="0x63f0ffff"/>
+        <Rectangle width="340" height="343" translation="[55,106]" color="0x28e1f2ff"/>
+        <Rectangle width="336" height="339" translation="[57,108]" color="0x10152dff"/>
+        <LabelList id="navigationItems" translation="[70,124]" itemSize="[310,58]" numRows="5" color="0xf4fbffff" focusedColor="0x63f0ffff"/>
       </Group>
     </Group>
     <Group id="buffering" visible="false">

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="HomePreviewCard" extends="Group">
+  <interface>
+    <field id="width" type="float" onChange="paint"/>
+    <field id="itemContent" type="node" onChange="paint"/>
+    <field id="itemHasFocus" type="boolean" onChange="paint"/>
+  </interface>
+  <script type="text/brightscript" uri="HomePreviewCard.brs"/>
+  <children>
+    <Rectangle id="outline" height="104" color="0x455b78ff"/>
+    <Rectangle id="card" translation="[2,2]" height="100" color="0x0d1927ff"/>
+    <Poster id="art" translation="[2,2]" width="135" height="100" loadDisplayMode="scaleToZoom"/>
+    <Label id="title" translation="[150,16]" height="31" font="font:SmallBoldSystemFont"/>
+    <Label id="caption" translation="[150,49]" height="25" color="0xa4bad3ff" font="font:SmallSystemFont"/>
+    <Rectangle id="track" translation="[150,82]" height="5" color="0x465a75ff"/>
+    <Rectangle id="progress" translation="[150,82]" height="5" color="0xf338deff"/>
+  </children>
+</component>

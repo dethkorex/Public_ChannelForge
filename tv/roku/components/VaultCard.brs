@@ -1,6 +1,18 @@
+sub init()
+  m.poster = m.top.findNode("poster")
+  m.poster.observeField("loadStatus", "posterChanged")
+end sub
 sub changed()
-  m.top.findNode("poster").uri = m.top.itemContent.hdPosterUrl
-  m.top.findNode("title").text = m.top.itemContent.title + "  " + m.top.itemContent.shortDescriptionLine1
+  item = m.top.itemContent
+  if item = invalid then return
+  m.fallback = item.hdPosterUrl
+  art = m.fallback
+  if item.landscapeArtwork <> invalid and item.landscapeArtwork <> "" then art = item.landscapeArtwork
+  m.poster.uri = art
+  m.top.findNode("title").text = item.title + "  " + item.shortDescriptionLine1
+end sub
+sub posterChanged()
+  if m.poster.loadStatus = "failed" and m.fallback <> invalid and m.poster.uri <> m.fallback then m.poster.uri = m.fallback
 end sub
 sub focused()
   amount = m.top.focusPercent

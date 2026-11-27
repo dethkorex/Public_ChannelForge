@@ -38,7 +38,7 @@ def verify_build(root):
         assert module in modules, module
     for relative in ("hls.min.js", "cinema.css", "playback-diagnostics.js"):
         assert tv.extract("web\\" + relative) == (root / "web" / relative).read_bytes(), relative
-    for relative in ("cinema-cassette-case.png", "cinema-vhs-spines.png"):
+    for relative in ("cinema-cassette-case.png",):
         assert tv.extract("assets\\" + relative) == (root / "assets" / relative).read_bytes(), relative
     creator = CArchiveReader(str(root / "dist" / "ChannelForge_Creator.exe"))
     for tool in ("ffmpeg.exe", "ffprobe.exe", "openssh\\ssh.exe", "openssh\\ssh-keygen.exe"):

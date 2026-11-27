@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="HomePosterCard" extends="Group">
+  <interface><field id="itemContent" type="node" onChange="changed"/><field id="itemHasFocus" type="boolean" onChange="focused"/></interface>
+  <script type="text/brightscript" uri="HomePosterCard.brs"/>
+  <children>
+    <Rectangle id="outline" width="285" height="132" color="0xd7a967ff"/>
+    <Rectangle translation="[2,2]" width="281" height="128" color="0x30203dff"/>
+    <Label id="initial" translation="[2,2]" width="281" height="128" horizAlign="center" vertAlign="center" color="0xc9aedcff"/>
+    <Poster id="poster" translation="[2,2]" width="281" height="128" loadDisplayMode="scaleToZoom"/>
+    <Rectangle translation="[9,94]" width="215" height="29" color="0xf1d095ff"/>
+    <Label id="title" translation="[15,94]" width="205" height="29" font="font:SmallBoldSystemFont" color="0x17111dff"/>
+    <Rectangle translation="[229,96]" width="47" height="26" color="0x161018ff"/>
+    <Label text="VHS" translation="[229,96]" width="47" height="26" horizAlign="center" color="0xffe1a8ff" font="font:SmallBoldSystemFont"/>
+  </children>
+</component>

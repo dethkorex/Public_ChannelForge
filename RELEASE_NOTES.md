@@ -1,11 +1,12 @@
-# ChannelForge Alpha 4.2.0
+# ChannelForge Alpha 4.5
 
-- **A new TV Home.** See what’s on now, tune in from the featured program, or pick a title from the Rewind Cinema shelf. Use the hamburger menu on the left to switch sections.
-- **Shortcuts to what you watch.** Home can show an unfinished movie and an available favorite channel when you have saved viewing activity.
-- **A compact live guide.** Browse current and upcoming programs with artwork beside each channel. Updated Studios provide up to 12 hours of upcoming listings. Windows, Linux and widescreen Android viewers can switch back to the full timeline.
-- **Cleaner phone and TV navigation.** Portrait phones use full-width cards with readable titles. Check for Update and Diagnostics are together in System on Android and Fire TV.
-- **Fewer stalled movie starts.** Studio publishes complete video segments and waits for a small startup buffer. An interrupted encoder returns a retryable error so players can reconnect without treating a partial movie as finished.
-- **A cleaner channel list.** Viewers hide channels the Studio reports as offline. Playback diagnostics record more detail about startup, transfers and relay recovery.
-- **Large Studio lineups.** Studio accepts channel saves up to 32 MiB, so a single lineup can include thousands of movies and episodes.
-
-Available for Windows, Linux, Fire TV, Android phones, Android TV and onn. A Roku sideload build is included. Roku Store availability is on hold for device testing and signing.
+- One compact navigation layout across Home, Live TV, Rewind Cinema, Continue Watching, Favorites, and System.
+- A refreshed Home with a live spotlight, smaller On Now cards, and wide artwork cards for recently added movies. Select a card to open its details.
+- Favorites and Continue Watching show artwork with what’s on now or where you left off.
+- One denser live guide with the current program preview, channel artwork, and up to four visible programs per row. Use the time controls to browse up to 12 hours ahead.
+- Android phones show more at once with a shorter header, smaller cards and guide rows, and controls sized for touch in portrait and landscape.
+- Fire TV, Android TV and onn use a larger live spotlight, clearer remote focus, and more compact guide rows.
+- Rewind Cinema uses each movie’s own artwork when available and falls back to the poster when there’s no widescreen image.
+- Alpha Version 4.5 stays visible across the viewer pages. Updates and diagnostics remain under System.
+- Studio defaults to 720p with a 2.5 Mbps broadcast limit. Creators can select a lower quality or bitrate for each channel.
+- Viewers can keep quality on Auto or select Balanced or Data saver to use a lighter stream when one is available.

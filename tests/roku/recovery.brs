@@ -179,7 +179,6 @@ sub main()
   m.channels.itemFocused = 0
   m.creators = focusTarget(false)
   m.updates = focusTarget(false)
-  m.homeUpdate = focusTarget(false)
   m.selectedMovie = {title: "QA"}
   verify(onKeyEvent("right", true) and m.insertMovie.focused, "Right from a selected tape reaches Insert Movie")
   m.vault.focused = false
@@ -193,8 +192,9 @@ sub main()
   m.guideSort.focused = true
   verify(onKeyEvent("left", true) and m.guideSchedule.focused, "Left from guide sorting reaches channel schedule")
   m.home.visible = true
+  m.updates.focused = false
   focusSystemButton()
-  verify(m.homeUpdate.focused, "Closing System on Home restores focus to its entry")
+  verify(m.updates.focused, "Closing System on Home restores focus to the shared header control")
   print "PASS Roku discovery and recovery"
 end sub
 

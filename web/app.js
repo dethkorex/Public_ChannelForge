@@ -680,6 +680,8 @@ async function openChannel(channel = null) {
   $("#channel-name").value = channel?.name || "";
   $("#channel-number").value = channel?.number || nextChannelNumber();
   $("#channel-rating").value = channel?.channel_rating || "";
+  $("#broadcast-height").value = String(channel?.broadcast_height ?? 720);
+  $("#broadcast-kbps").value = String(channel?.broadcast_kbps ?? 2500);
   $("#playback-mode").value = channel?.playback_mode || "ordered";
   updatePresetDescription();
   for (const [control, kind, fallback, selected] of [
@@ -766,9 +768,12 @@ $("#channel-form").addEventListener("submit", async event => {
   const items = [...selectedLineup.values()].flatMap(choice => choice.items);
   if (!items.length) return;
   const id = $("#channel-id").value;
+  if (!$("#broadcast-kbps").reportValidity()) return;
   const payload = {
     name: $("#channel-name").value.trim(), number: $("#channel-number").value.trim(), section: items[0].section,
     channel_rating: $("#channel-rating").value,
+    broadcast_height: Number($("#broadcast-height").value),
+    broadcast_kbps: Number($("#broadcast-kbps").value || 2500),
     playback_mode: $("#playback-mode").value, logo_asset_id: $("#channel-logo").value,
     background_asset_id: $("#channel-background").value, corner_bug_asset_id: $("#channel-corner-bug").value, items
   };
@@ -945,7 +950,7 @@ $("#builder-next").onclick = () => {
     return;
   }
   if (builderStep === 2) {
-    for (const input of [$("#channel-name"), $("#channel-number")]) {
+    for (const input of [$("#channel-name"), $("#channel-number"), $("#broadcast-kbps")]) {
       input.value = input.value.trim();
       if (!input.reportValidity()) return;
     }
