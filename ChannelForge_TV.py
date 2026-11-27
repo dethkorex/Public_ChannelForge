@@ -543,7 +543,7 @@ function renderCompactGuide(channels,now,moment,tuned){
         row.dataset.channel=channel.stream_url;
         const favorite=favoriteChannels.has(channel.stream_url);
         row.innerHTML='<div class="compact-station"><span class="compact-channel-image">'+(art?'<img src="'+esc(art)+'" alt="" loading="lazy">':'')
-            +'</span><span class="compact-station-copy"><b>CH '+esc(channel.number||'—')+'</b><small>'+esc(channel.name)+'</small></span>'
+            +'</span><span class="compact-station-copy" title="'+esc(channel.name)+'"><b>CH '+esc(channel.number||'—')+'</b><small>'+esc(channel.name)+'</small></span>'
             +'<button type="button" class="compact-favorite" aria-label="Favorite '+esc(channel.name)+'" aria-pressed="'+favorite+'">'+(favorite?'★':'☆')+'</button></div>'
             +columnLabels.map((label,index)=>{const program=programs[index];return program?'<button type="button" class="compact-program" data-program="'+index+'" title="'+esc(program.title)+'"><small>'
                 +label+'</small><b>'+esc(programSeries(program))+'</b>'
@@ -2441,7 +2441,7 @@ body.viewer-shell main.wrap{margin-left:var(--viewer-sidebar);min-width:0;max-wi
 #guide-board{border:0;background:transparent;box-shadow:none}
 #guide-board{overflow-x:auto;scrollbar-color:#397991 #101b2b}
 #guide-board>.compact-guide-head,#guide-board>.tv-guide{min-width:1250px}
-.compact-guide-head,.compact-guide-row{display:grid;grid-template-columns:minmax(185px,1.45fr) repeat(8,minmax(0,1fr)) auto;gap:5px}
+.compact-guide-head,.compact-guide-row{display:grid;grid-template-columns:minmax(210px,1.6fr) repeat(8,minmax(0,1fr)) auto;gap:5px}
 .compact-guide-head{align-items:center;margin:0 0 7px;padding:8px 9px;border-radius:12px;background:#1b2a40;color:#c6d6ee;font-size:clamp(13px,1.1vw,17px);font-weight:750}
 .compact-guide-head span:first-child{padding-left:22px}
 #guide-board #tv-guide{display:grid;gap:3px;border-radius:0;background:transparent;padding:2px;max-height:max(220px,calc(100dvh - var(--viewer-header) - 244px));overflow-y:auto;scroll-snap-type:none;scrollbar-width:thin;scrollbar-color:#20d7ee #0b1524}
@@ -2450,7 +2450,7 @@ body.viewer-shell main.wrap{margin-left:var(--viewer-sidebar);min-width:0;max-wi
 .compact-guide-row.tuned .compact-station-copy{border-left-color:#00e9f6}
 .compact-station,.compact-actions{display:flex;align-items:center;gap:clamp(5px,1vw,17px);min-width:0}
 .compact-station{position:relative;gap:7px;border-right:1px solid #667893;padding-right:4px}
-.compact-channel-image{display:block;flex:0 0 min(42%,135px);height:clamp(36px,4.8vh,49px);overflow:hidden;border-radius:8px;background:linear-gradient(130deg,#1f364f,#1d1735)}
+.compact-channel-image{display:block;flex:0 0 min(34%,135px);height:clamp(36px,4.8vh,49px);overflow:hidden;border-radius:8px;background:linear-gradient(130deg,#1f364f,#1d1735)}
 .compact-channel-image img{width:100%;height:100%;object-fit:cover}
 .compact-station-copy{display:grid;gap:3px;min-width:0;border-left:5px solid #ec4ad7;border-radius:4px;padding-left:clamp(4px,.75vw,10px)}
 .compact-station b,.compact-program b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:clamp(13px,1.15vw,18px)}
