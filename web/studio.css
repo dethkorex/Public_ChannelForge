@@ -202,4 +202,12 @@ main .view .cards > .empty { grid-column: 1/-1; }
 .studio-activity-metrics dt{color:#a9c2d9;margin-bottom:4px;font-size:.82rem}
 .studio-activity-metrics dd{margin:0;color:#73eaf1;font-size:1.25rem;font-weight:700;font-variant-numeric:tabular-nums}
 .studio-activity-notes{font-size:.8rem;margin:11px 0 0}
+.studio-activity-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.studio-activity-heading h3{margin:0}
+.studio-activity-sections{display:grid;gap:12px;margin:18px 0 0}
+.studio-activity-sections .broadcast-monitor-row{grid-template-columns:minmax(16ch,2fr) repeat(3,minmax(0,1fr))}
+.studio-activity-row-title{display:grid;gap:3px;min-width:0}
+.studio-activity-row-title small{overflow-wrap:anywhere}
+.studio-activity-empty{margin:8px 0 0}
 @media(max-width:900px){.studio-activity-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:880px){.studio-activity-sections .broadcast-monitor-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}

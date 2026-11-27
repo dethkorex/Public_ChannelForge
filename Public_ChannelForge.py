@@ -70,6 +70,7 @@ CHANNEL_RATING_LEVELS = {
 LIVE_VIEWER_TTL = 25
 LIVE_VIEWER_GRACE = 15
 LIVE_LEGACY_IDLE = 45
+MOVIE_VIEWER_TTL = 45
 CHANNEL_SAVE_BODY_BYTES = 32 * 1024 * 1024
 STUDIO_START = time.monotonic()
 STUDIO_TRAFFIC = {}
@@ -3066,7 +3067,7 @@ def creator_broadcast_diagnostics():
     return report
 
 
-def channel_activity():
+def channel_activity(include_program=False):
     with LOCK:
         feeds = list(LIVE_PLAYOUT.values())
         encoder_counts = {}
@@ -3078,6 +3079,9 @@ def channel_activity():
     activity = {}
     for feed in feeds:
         detail = feed.activity()
+        if include_program:
+            with feed.condition:
+                detail["program"] = (feed.source or {}).get("title", "")
         if TESTER_BUILD:
             with feed.condition:
                 now = time.monotonic()
@@ -3129,24 +3133,57 @@ def studio_process_usage():
     return tuple(round(min(100, number), 2) if number is not None else None for number in (cpu, ram))
 
 
-def studio_system_activity():
+def record_movie_viewer(session, viewer, now):
+    # Call under LOCK. A playback ID is temporary and stays inside Studio.
+    viewers = session.setdefault("movie_viewers", {})
+    viewers.pop(viewer, None)
+    if len(viewers) >= 2048:
+        viewers.pop(next(iter(viewers)))
+    viewers[viewer] = now
+
+
+def movie_activity():
+    now = time.monotonic()
+    movies = {}
+    with LOCK:
+        for session in FFMPEG_SESSIONS.values():
+            if not session.get("on_demand"):
+                continue
+            status = session["process"].poll()
+            if status not in (None, 0):
+                continue
+            viewers = {viewer for viewer, seen in session.get("movie_viewers", {}).items() if now - seen < MOVIE_VIEWER_TTL}
+            if not viewers and now - session.get("movie_media_at", float("-inf")) >= MOVIE_VIEWER_TTL:
+                continue
+            row = movies.setdefault(session["channel_id"], {"title": session.get("program") or "Untitled movie",
+                                                           "viewers": set(), "encoder_count": 0})
+            row["viewers"].update(viewers)
+            row["encoder_count"] += status is None
+    return sorted(({**row, "viewers": len(row["viewers"])} for row in movies.values()),
+                  key=lambda row: (-row["viewers"], row["title"].casefold()))
+
+
+def studio_system_activity(include_playback=False):
     try:
         cpu, ram = studio_process_usage()
     except (OSError, ValueError, IndexError):
         cpu = ram = None
-    broadcasts = channel_activity()
+    broadcasts = channel_activity(include_program=include_playback)
     now = time.monotonic()
     with LOCK:
         active_encoders = sum(session["process"].poll() is None for session in FFMPEG_SESSIONS.values())
         starting_encoders = len(ENCODER_STARTING)
     with STUDIO_TRAFFIC_LOCK:
         bandwidth = sum(size for second, size in STUDIO_TRAFFIC.items() if int(now) - second < 10)
-    return {"sharing": SHARING_STATUS, "registered": bool(REGISTERED_ORIGIN),
+    result = {"sharing": SHARING_STATUS, "registered": bool(REGISTERED_ORIGIN),
             "uptime_seconds": int(now - STUDIO_START), "cpu_percent": cpu, "ram_percent": ram,
             "live_channels": sum(row["state"] == "live" for row in broadcasts.values()),
             "viewer_sessions": sum(row["viewers"] for row in broadcasts.values()),
             "encoder_count": active_encoders, "encoder_starting": starting_encoders,
             "video_bps": bandwidth * 8 // 10, "heartbeat": HEARTBEAT_STATUS.copy()}
+    if include_playback:
+        result.update(broadcasts=broadcasts, movies=movie_activity())
+    return result
 
 
 def plex_part_key(item: dict) -> str:
@@ -4553,7 +4590,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.end_headers()
             self.wfile.write(body)
-            if TESTER_BUILD and status == 200 and content_type == "video/mp2t":
+            if status == 200 and content_type == "video/mp2t":
                 second = int(time.monotonic())
                 with STUDIO_TRAFFIC_LOCK:
                     STUDIO_TRAFFIC[second] = STUDIO_TRAFFIC.get(second, 0) + len(body)
@@ -4684,11 +4721,15 @@ class Handler(BaseHTTPRequestHandler):
                                            "error": public_playback_message(reason) if feed.error else "The studio is preparing video."})
         self.send_bytes(200, limit_hls_master(manifest.encode(), max_bandwidth), "application/vnd.apple.mpegurl")
 
-    def send_playback_manifest(self, route: str, *, constrained_live: bool = False, max_bandwidth=0) -> None:
+    def send_playback_manifest(self, route: str, *, constrained_live: bool = False, max_bandwidth=0, viewer="") -> None:
         match = re.fullmatch(r"(/ffmpeg-stream/([a-zA-Z0-9_-]+)/)index\.m3u8", route)
         if match:
             with LOCK:
                 session = FFMPEG_SESSIONS.get(match[2])
+                if session and session.get("on_demand"):
+                    session["movie_media_at"] = now = time.monotonic()
+                    if LIVE_VIEWER_ID.fullmatch(viewer):
+                        record_movie_viewer(session, viewer, now)
             if session:
                 try:
                     manifest = viewer_encoder_playlist(session, "index.m3u8")
@@ -4760,7 +4801,7 @@ class Handler(BaseHTTPRequestHandler):
                 from tester_updates import local_update
                 return self.send_json(*local_update("GET", parsed.path, self.headers, self.server.server_port, component="studio"))
             elif parsed.path == "/api/studio/activity" or (TESTER_BUILD and parsed.path == "/api/tester/activity"):
-                return self.send_json(200, studio_system_activity())
+                return self.send_json(200, studio_system_activity(include_playback=True))
             elif TESTER_BUILD and parsed.path == "/studio-tester.css":
                 return self.send_bytes(200, (WEB_DIR / "studio-tester.css").read_bytes(), "text/css")
             elif parsed.path == "/api/diagnostics":
@@ -4883,7 +4924,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, public_channel_catalog(self.catalog_base(), extended=guide == ["extended"],
                                                            brief=guide == ["brief"], continuous=True))
             elif parsed.path == "/api/public/origin":
-                challenge = urllib.parse.parse_qs(parsed.query).get("sample", [""])[0]
+                query = urllib.parse.parse_qs(parsed.query)
+                if "viewing" in query:
+                    item_id, viewer = query["viewing"][0], query.get("viewer", [""])[0]
+                    if not re.fullmatch(r"[a-f0-9]{24}", item_id) or not LIVE_VIEWER_ID.fullmatch(viewer):
+                        return self.send_json(400, {"error": "Invalid movie playback ID."})
+                    with LOCK:
+                        for session in FFMPEG_SESSIONS.values():
+                            if (session.get("on_demand") and session["channel_id"] == f"vault-{item_id}"
+                                    and viewer in session.get("movie_viewers", {}) and session["process"].poll() in (None, 0)):
+                                record_movie_viewer(session, viewer, time.monotonic())
+                    return self.send_bytes(204, b"", "text/plain")
+                challenge = query.get("sample", [""])[0]
                 with LOCK:
                     sample_size = RELAY_MEDIA_CHALLENGES.pop(challenge, 0)
                 if sample_size:
@@ -4928,7 +4980,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise FileNotFoundError
                 public_delivery, _ = self.delivery_profile()
                 self.send_playback_manifest(start_vault_session(item_id, public_delivery=public_delivery),
-                                            max_bandwidth=requested_playback_bandwidth(parsed.query))
+                                            max_bandwidth=requested_playback_bandwidth(parsed.query), viewer=viewer)
             elif parsed.path.startswith("/ffmpeg-stream/"):
                 parts = parsed.path.strip("/").split("/")
                 if len(parts) != 3 or not re.fullmatch(ENCODER_FILE, parts[2]):
@@ -4945,9 +4997,16 @@ class Handler(BaseHTTPRequestHandler):
                     raise FileNotFoundError
                 path = session["directory"] / parts[2]
                 if path.suffix == ".m3u8":
-                    self.send_bytes(200, viewer_encoder_playlist(session, parts[2]), "application/vnd.apple.mpegurl")
+                    body = viewer_encoder_playlist(session, parts[2])
+                    if session.get("on_demand"):
+                        with LOCK:
+                            session["movie_media_at"] = time.monotonic()
+                    self.send_bytes(200, body, "application/vnd.apple.mpegurl")
                 else:
                     body = path.read_bytes()
+                    if session.get("on_demand"):
+                        with LOCK:
+                            session["movie_media_at"] = time.monotonic()
                     headers = {"Cache-Control": "public, max-age=60, immutable"} if isinstance(self, PublicMediaHandler) else None
                     self.send_bytes(200, body, "video/mp2t", headers)
                     if feed := session.get("feed"):

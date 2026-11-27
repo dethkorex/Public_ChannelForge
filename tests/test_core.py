@@ -140,6 +140,42 @@ class CoreTests(unittest.TestCase):
                 server.shutdown()
                 worker.join(timeout=5)
 
+    def test_movie_activity_counts_playback_sessions_until_their_lease_expires(self):
+        item_id, viewer, other_viewer = "a" * 24, "b" * 32, "c" * 32
+        scope = "/studio/" + "d" * 16
+        route = "/ffmpeg-stream/session/index.m3u8"
+        manifest = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=270000\nindex_economy.m3u8\n"
+        shared = {"on_demand": True, "channel_id": "vault-" + item_id, "program": "Active movie",
+                  "process": mock.Mock(poll=mock.Mock(return_value=None))}
+        other = {**shared, "process": mock.Mock(poll=mock.Mock(return_value=0)), "movie_viewers": {viewer: 100}}
+        idle = {**shared, "channel_id": "vault-unused", "program": "Idle library title"}
+        sessions = {"session": shared, "alternate": other, "idle": idle}
+        with (app.open_public_media_server(0) as server,
+              mock.patch.object(app, "FFMPEG_SESSIONS", sessions),
+              mock.patch.object(app, "start_vault_session", return_value=route) as start,
+              mock.patch.object(app, "viewer_encoder_playlist", return_value=manifest),
+              mock.patch.object(app.time, "monotonic", return_value=100) as clock):
+            client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            try:
+                for playing in (viewer, other_viewer, other_viewer):
+                    client.request("GET", f"{scope}/vault/{item_id}.m3u8?viewer={playing}")
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertIn((scope + "/ffmpeg-stream/session/index_economy.m3u8").encode(), response.read())
+                self.assertEqual(app.movie_activity(), [{"title": "Active movie", "viewers": 2, "encoder_count": 1}])
+                clock.return_value = 130
+                client.request("GET", f"{scope}/api/public/origin?viewing={item_id}&viewer={other_viewer}")
+                response = client.getresponse()
+                self.assertEqual((response.status, response.read()), (204, b""))
+                self.assertEqual(start.call_count, 3)
+                clock.return_value = 150
+                self.assertEqual(app.movie_activity(), [{"title": "Active movie", "viewers": 1, "encoder_count": 1}])
+                clock.return_value = 175
+                self.assertEqual(app.movie_activity(), [])
+            finally:
+                client.close()
+                server.shutdown()
+
     def test_automatic_media_origin_does_not_take_over_a_busy_port(self):
         with app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler) as occupied:
             with mock.patch.object(app, "PUBLIC_MEDIA_PORT", occupied.server_port), mock.patch.object(app, "PUBLIC_MEDIA_SERVER", None):

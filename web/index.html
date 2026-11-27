@@ -46,7 +46,7 @@
         </div>
       </section>
       <section class="panel broadcast-monitor studio-spaced" aria-labelledby="broadcast-monitor-title">
-        <h3 id="broadcast-monitor-title">Broadcast activity</h3>
+        <div class="studio-activity-heading"><h3 id="broadcast-monitor-title">Broadcast activity</h3><button data-view="studio-activity">View playback activity</button></div>
         <div id="studio-broadcast-list"></div>
       </section>
       <section class="creator-workbench">
@@ -212,7 +212,18 @@
       <div class="page-heading"><div><h2 id="studio-activity-title">Studio activity</h2><p>Current server activity and resource usage.</p></div><button data-view="system">Back to System</button></div>
       <p id="studio-activity-status">Loading Studio activity…</p>
       <dl id="studio-activity-metrics" class="studio-activity-metrics"></dl>
-      <p class="muted studio-activity-notes">CPU and RAM show Studio, its encoders, and its managed relay as a share of machine capacity. Video traffic includes live and movie segments served over the last 10 seconds.</p>
+      <p class="muted studio-activity-notes">CPU and RAM include Studio and its child processes. Studio upload averages the last 10 seconds.</p>
+      <div class="studio-activity-sections">
+        <section class="panel" aria-labelledby="live-activity-title">
+          <h3 id="live-activity-title">Live channels</h3>
+          <div id="studio-live-activity"></div>
+        </section>
+        <section class="panel" aria-labelledby="movie-activity-title">
+          <h3 id="movie-activity-title">Active movies</h3>
+          <div id="studio-movie-activity"></div>
+        </section>
+      </div>
+      <p class="muted studio-activity-notes">Counts show recent playback sessions. Older players may show playback activity without a count. Peak counts reset when a broadcast ends.</p>
     </section>
   <section id="channel-builder" class="view" aria-labelledby="dialog-title"><form id="channel-form" novalidate>
     <div class="builder-heading"><span class="channel-number">Channel builder</span><h2 id="dialog-title" tabindex="-1">Create channel</h2><p id="builder-description">Build a custom channel from your Plex, Jellyfin, or local libraries.</p></div>

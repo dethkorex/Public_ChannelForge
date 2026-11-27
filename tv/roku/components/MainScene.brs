@@ -917,6 +917,7 @@ sub startCinemaMovie(item as object, position as float, studioId as string, dire
   m.moviePosition = position
   m.bookmarkCheckpoint = CreateObject("roTimespan")
   m.bookmarkCheckpoint.Mark()
+  m.movieActivityClock = invalid
   m.movieCompleted = false
   m.movieStudioId = studioId
   refreshMovieAddress(item, studioId)
@@ -1191,6 +1192,7 @@ sub trackPlaybackPosition()
   m.stableSeconds += delta
   if m.activeMovie <> invalid
     m.moviePosition = position
+    if m.movieActivityClock = invalid or m.movieActivityClock.TotalSeconds() >= 15 then refreshMovieActivity()
     if m.bookmarkCheckpoint <> invalid and m.bookmarkCheckpoint.TotalSeconds() >= 60
       saveMoviePosition(false)
       m.bookmarkCheckpoint.Mark()
@@ -1213,6 +1215,21 @@ sub trackPlaybackPosition()
       m.tapeTimer.control = "start"
     end if
   end if
+end sub
+sub refreshMovieActivity()
+  content = m.video.content
+  if content <> invalid and content.url <> invalid then sendMovieActivity(content.url)
+end sub
+sub sendMovieActivity(address as string)
+  path = Instr(9, address, "/vault/")
+  if path <= 0 then return
+  id = Mid(address, path + 7, 24)
+  if Len(id) <> 24 or Mid(address, path + 31, 6) <> ".m3u8?" then return
+  if m.movieActivityClock = invalid then m.movieActivityClock = CreateObject("roTimespan")
+  m.movieActivityClock.Mark()
+  m.movieActivityTask = CreateObject("roSGNode", "MovieActivityTask")
+  m.movieActivityTask.url = Left(address, path - 1) + "/api/public/origin?viewing=" + id + "&viewer=" + m.viewerLease
+  m.movieActivityTask.control = "RUN"
 end sub
 function scheduleMovieRetry() as boolean
   if m.activeMovie = invalid or m.guide.visible or m.ejectingMovie then return false

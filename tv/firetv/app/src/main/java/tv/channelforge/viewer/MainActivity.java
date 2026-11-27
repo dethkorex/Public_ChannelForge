@@ -175,6 +175,8 @@ public class MainActivity extends Activity {
         setBitrateCap(Integer.MAX_VALUE);
     };
     private VaultItem activeMovie;
+    private String movieActivityUrl = "";
+    private long movieActivityAt;
     private boolean movieFinished;
     private int movieRetries, playGeneration;
     private long resumePosition, lastFrameChange, firstFrameMs = -1, tuneStarted;
@@ -215,6 +217,13 @@ public class MainActivity extends Activity {
                 if (counters.renderedOutputBufferCount != lastFrameCount) {
                     lastFrameCount = counters.renderedOutputBufferCount;
                     lastFrameChange = now;
+                    if (activeMovie != null && !movieActivityUrl.isEmpty() && now >= movieActivityAt) {
+                        movieActivityAt = now + 15_000;
+                        String address = movieActivityUrl;
+                        studioLoader.execute(() -> {
+                            try { get(address); } catch (Exception ignored) { /* Playback is independent of activity. */ }
+                        });
+                    }
                 } else if (now - lastFrameChange >= 12_000) {
                     recover("Video decoder stalled");
                     return;
@@ -2281,6 +2290,7 @@ public class MainActivity extends Activity {
     private static final java.util.regex.Pattern M3U_CHANNEL_RATING = java.util.regex.Pattern.compile("tvg-rating=\"([A-Z0-9-]+)\"");
     private static final java.util.regex.Pattern M3U_CHANNEL_RANK = java.util.regex.Pattern.compile("tvg-rating-rank=\"([1-9])\"");
     private static final java.util.regex.Pattern STUDIO_SLOT_PATH = java.util.regex.Pattern.compile("^/studio/[a-f0-9]{16}(?=/)");
+    private static final java.util.regex.Pattern MOVIE_ACTIVITY_PATH = java.util.regex.Pattern.compile("^(/studio/[a-f0-9]{16})?/vault/([a-f0-9]{24})\\.m3u8$");
     private static final java.util.regex.Pattern CHANNEL_PLAYLIST_PATH = java.util.regex.Pattern.compile("/(?:broadcast|live)/[a-zA-Z0-9_-]+(?:/[^/]+)?\\.m3u8");
 
     private String studioMediaAddress(String raw, String guideAddress) {
@@ -3968,7 +3978,18 @@ public class MainActivity extends Activity {
                 host.equals("localhost") || host.equals("127.0.0.1") || host.equals("[::1]") ? "local" : "direct";
         usingPreferredRelay = !input.equals(fallback);
         if (usingPreferredRelay) android.util.Log.i("ChannelForgePlayback", "Using preferred media relay");
+        movieActivityUrl = "";
+        movieActivityAt = 0;
         String path = input.getPath();
+        if (!live && path != null) {
+            java.util.regex.Matcher movie = MOVIE_ACTIVITY_PATH.matcher(path);
+            if (movie.matches()) {
+                String scope = movie.group(1) == null ? "" : movie.group(1);
+                movieActivityUrl = input.buildUpon().path(scope + "/api/public/origin").clearQuery().fragment(null)
+                        .appendQueryParameter("viewing", movie.group(2)).appendQueryParameter("viewer", viewerLease)
+                        .build().toString();
+            }
+        }
         if (path != null) path = STUDIO_SLOT_PATH.matcher(path).replaceFirst("");
         if (path != null && (path.startsWith("/broadcast/") || path.startsWith("/live/") || path.startsWith("/vault/"))) {
             input = input.buildUpon().appendQueryParameter("viewer", viewerLease).build();

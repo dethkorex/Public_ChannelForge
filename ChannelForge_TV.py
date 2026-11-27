@@ -1567,6 +1567,10 @@ function play(url,media=null,continuing=false){
     activeStreamUrl=url;activeMedia=media||{kind:/\/live\//.test(url)?'live':'movie',title:'ChannelForge'};
     activeMedia.traceId=traceId;
     liveMode=activeMedia.kind==='live';
+    const moviePath=!liveMode&&streamUrl.pathname.match(/^(\/studio\/[a-f0-9]{16})?\/vault\/([a-f0-9]{24})\.m3u8$/);
+    activeMedia.activityUrl=moviePath?'/proxy?url='+encodeURIComponent(streamUrl.origin+(moviePath[1]||'')
+        +'/api/public/origin?viewing='+moviePath[2]+'&viewer='+traceId):'';
+    activeMedia.activityAt=0;
     if(liveMode){
         const current=programAt(activeMedia.channel,Date.now());
         activeMedia.programStart=current?.start;
@@ -1751,6 +1755,10 @@ function stopPlayer(){
         if(!liveMode){
             activeMedia.resumeAt=video.currentTime;
             if(activeMedia.cinema)rememberMovie();
+            if(activeMedia.activityUrl&&now>=activeMedia.activityAt){
+                activeMedia.activityAt=now+15000;
+                fetch(activeMedia.activityUrl).catch(()=>{});
+            }
         }
         if(liveMode&&progressed){
             const channel=liveChannels.find(channel=>channel.stream_url===activeStreamUrl)||activeMedia.channel;

@@ -60,13 +60,16 @@ async function refreshStudioActivity() {
     const minutes = Math.floor(current.uptime_seconds / 60);
     const heartbeat = current.heartbeat.last_success;
     const sharing = {live:"Online", retrying:"Reconnecting", connecting:"Connecting", private:"Private"};
+    const movies = current.movies || [];
     const metrics = [
       ["Studio CPU", percent(current.cpu_percent)],
       ["Studio RAM", percent(current.ram_percent)],
-      ["Video served", (current.video_bps / 1_000_000).toFixed(2) + " Mbps"],
+      ["Studio upload", (current.video_bps / 1_000_000).toFixed(2) + " Mbps"],
       ["Studio sharing", sharing[current.sharing] || "Standby"],
       ["Active live channels", current.live_channels],
-      ["Current viewer sessions", current.viewer_sessions],
+      ["Live TV viewer sessions", current.viewer_sessions],
+      ["Active movies", movies.length],
+      ["Movie viewer sessions", movies.reduce((sum, movie) => sum + movie.viewers, 0)],
       ["Running encoders", current.encoder_count],
       ["Encoders starting", current.encoder_starting],
       ["Studio uptime", Math.floor(minutes / 60) + " h " + (minutes % 60) + " min"],
@@ -81,6 +84,8 @@ async function refreshStudioActivity() {
       tile.append(name, number);
       return tile;
     }));
+    renderBroadcasts(current.broadcasts, $("#studio-live-activity"));
+    renderMovieActivity(movies);
     status.textContent = "Updated " + new Date().toLocaleTimeString();
   } catch {
     status.textContent = "Could not read the latest Studio activity. Retrying…";
@@ -358,9 +363,9 @@ async function refresh() {
   if ($("#watch.active")) loadGuide();
   if (sources.length && $("#plex-onboarding").open) $("#plex-onboarding").close();
 }
-function renderBroadcasts(broadcasts) {
-  if (window.ChannelForgeTesterBroadcasts) return window.ChannelForgeTesterBroadcasts(broadcasts);
-  const container=$("#studio-broadcast-list");
+function renderBroadcasts(broadcasts, activityPanel = null) {
+  if (!activityPanel && window.ChannelForgeTesterBroadcasts) return window.ChannelForgeTesterBroadcasts(broadcasts);
+  const container = activityPanel || $("#studio-broadcast-list");
   if(!container||!state.channels)return;
   const statusLabels={idle:"Idle",starting:"Starting",live:"Live",cooldown:"Cooling down"};
   const fragment=document.createDocumentFragment();
@@ -369,13 +374,22 @@ function renderBroadcasts(broadcasts) {
     const row=document.createElement("div");
     row.className="broadcast-monitor-row";
     row.dataset.status=current.state||"idle";
-    const title=document.createElement("strong");
-    title.textContent=channel.name;
+    const title=document.createElement("div");
+    title.className = "studio-activity-row-title";
+    const name = document.createElement("strong");
+    name.textContent = (activityPanel && channel.number ? "CH " + channel.number + " · " : "") + channel.name;
+    title.append(name);
+    if (activityPanel && current.program && row.dataset.status !== "idle") {
+      const program = document.createElement("small");
+      program.textContent = current.program;
+      title.append(program);
+    }
     const status=document.createElement("span");
     status.textContent=statusLabels[row.dataset.status]||"Idle";
     const viewers=document.createElement("span");
     const count=current.viewers||0;
-    viewers.textContent=count+" "+(count===1?"viewer":"viewers")+(current.legacy_activity?" · legacy activity":"");
+    viewers.textContent = current.legacy_activity && !count ? "Count unavailable" :
+      count + (count === 1 ? " viewer" : " viewers") + (current.legacy_activity ? " + uncounted" : "");
     const details=document.createElement("small");
     details.textContent="Peak "+(current.peak_viewers||0)+" · "+((current.upload_bps||0)/1000000).toFixed(2)+" Mbps served";
     row.append(title,status,viewers,details);
@@ -383,6 +397,31 @@ function renderBroadcasts(broadcasts) {
   }
   if(fragment.childNodes.length)container.replaceChildren(fragment);
   else container.textContent="Create a channel to monitor its broadcast.";
+}
+function renderMovieActivity(movies) {
+  const container = $("#studio-movie-activity");
+  if (!movies.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted studio-activity-empty";
+    empty.textContent = "No movies are playing right now.";
+    container.replaceChildren(empty);
+    return;
+  }
+  container.replaceChildren(...movies.map(movie => {
+    const row = document.createElement("div");
+    row.className = "broadcast-monitor-row";
+    row.dataset.status = "live";
+    const title = document.createElement("strong");
+    const status = document.createElement("span");
+    const viewers = document.createElement("span");
+    const encoder = document.createElement("small");
+    title.textContent = movie.title;
+    status.textContent = movie.viewers ? "Playing" : "Recent playback";
+    viewers.textContent = movie.viewers ? movie.viewers + (movie.viewers === 1 ? " viewer" : " viewers") : "Count unavailable";
+    encoder.textContent = movie.encoder_count ? movie.encoder_count + (movie.encoder_count === 1 ? " encoder" : " encoders") : "Cached video";
+    row.append(title, status, viewers, encoder);
+    return row;
+  }));
 }
 function resetBuilderFilters() {
   $("#media-filter").value = "";
