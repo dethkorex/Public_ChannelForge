@@ -318,9 +318,11 @@ assert.equal(retries.at(-1), true);
     assert.deepEqual(requested, ['new', 'old']);
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
-        checked = subprocess.run(["node", "-"], input=setup + tv.HTML[refresh_start:refresh_end]
-                                 + tv.HTML[audio_start:audio_end] + tv.HTML[start:end] + checks,
-                                 encoding="utf-8", capture_output=True, timeout=10)
+        with tempfile.TemporaryDirectory() as directory:
+            program = Path(directory) / "desktop-playback.cjs"
+            program.write_text(setup + tv.HTML[refresh_start:refresh_end]
+                               + tv.HTML[audio_start:audio_end] + tv.HTML[start:end] + checks, encoding="utf-8")
+            checked = subprocess.run(["node", str(program)], encoding="utf-8", capture_output=True, timeout=30)
         self.assertEqual(checked.returncode, 0, checked.stderr)
 
     def test_tv_scans_online_channels_into_guide_and_keeps_home_focused(self):

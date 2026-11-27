@@ -1,0 +1,44 @@
+{
+  "version": "4.0.0",
+  "revisions": {"desktop": 18, "android": 414, "roku": 6},
+  "releases": {
+    "4.0.0": {
+      "common": ["Private tester builds now display Alpha V4.0 in the app and update screens."],
+      "desktop": ["TV moves keyboard focus to the newly opened screen so you can keep navigating without reaching for the mouse."],
+      "android": ["Back returns from the guide to ChannelForge Home. On TV, focus returns to Home so you can keep using the remote."],
+      "roku": ["Use Right to reach Insert Movie after choosing a title. Back from System returns focus to the appropriate place."]
+    },
+    "4.1.7": {
+      "desktop": ["The TV player can try the IPv6 media relay and fall back to the Studio’s registered route. The System page keeps update checks and Developer tools together."],
+      "android": ["The relay pilot prefers the VPS for playback and retries the Studio's registered route if the VPS is unavailable. The public TV guide continues to use the directory.", "Tester reports identify which route the player used without including network addresses.", "Fire TV and Android TV have a cleaner neon home screen and grouped navigation with distinct remote focus."],
+      "roku": ["The developer build can try the IPv6 relay, fall back to the registered stream, and open updates, diagnostics, and pairing from System."]
+    },
+    "4.1.6": {
+      "android": ["Android phone has a redesigned home screen, sliding navigation and a portrait Live TV guide with artwork and quick actions.", "Turn your phone sideways for the full Live TV timeline and a compact navigation rail. Fire TV uses the same neon theme, with controls tuned for the remote.", "System brings update checks, Developer tools and Studio pairing together.", "Rewind Cinema loads visible posters first and gives the selected movie cover its own loading queue.", "The phone screen stays on while watching or buffering video and returns to the normal screen timeout when you pause or leave."]
+    },
+    "4.1.5": {
+      "common": ["The private Tester build can tune channels shared through a Studio's public Tailscale Funnel."],
+      "desktop": ["Automatic Studio sharing uses a verified Tailscale Funnel instead of localhost.run.", "Studio keeps the current listener during an unsuccessful switch and can still use a custom HTTPS relay."]
+    },
+    "4.1.4": {
+      "desktop": ["Studio checks that a replacement route can transfer a 720p-sized test payload before publishing it.", "The verification step leaves the current Studio route available when a new relay is too slow."],
+      "android": ["Private Tester build for checking guide discovery, Live TV and Rewind Cinema on the new delivery route."],
+      "roku": ["Private Tester build for checking guide discovery and playback on the new delivery route."]
+    },
+    "4.1.3": {
+      "desktop": ["Studio can switch to a verified backup relay while keeping the same shared broadcast.", "TV checks for a backup route after its normal playback retries and preserves Rewind playback position.", "The running TV and Studio builds can be verified together before wider testing."],
+      "android": ["Live TV and Rewind check for a replacement Studio route after their usual playback retries."]
+    },
+    "4.1.2": {
+      "common": ["The corner badge identifies the installed Tester version.", "Read version-specific patch notes in the app and on the private download page."],
+      "desktop": ["Manual update checks show the incoming version as the package downloads and verifies."],
+      "android": ["Live TV checks for a new Studio route on the first startup timeout when no video segments have arrived."],
+      "roku": ["The manual update check shows what changed in the available Roku developer ZIP."]
+    },
+    "4.1.0": {
+      "desktop": ["The Tester suite includes TV and Studio with separate shortcuts and shared manual updates.", "Studio shows per-channel analytics and its own resource use. Live TV keeps movie controls out of the player."],
+      "android": ["Fire TV, Android TV and Android phone have private Tester builds. Playback reports include tune and buffering timings.", "The phone layout adapts to portrait and landscape."],
+      "roku": ["The Roku developer build can check the private Tester channel for a newer sideload ZIP."]
+    }
+  }
+}
