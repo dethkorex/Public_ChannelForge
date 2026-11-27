@@ -12,6 +12,7 @@ sub Main(args as dynamic)
     message = wait(0, port)
     if type(message) = "roSGScreenEvent"
       if message.IsScreenClosed()
+        sendLiveDeparture(scene.liveDepartureUrl)
         sendAlphaShutdown(scene.alphaHealth)
         return
       end if
@@ -24,6 +25,18 @@ sub Main(args as dynamic)
       end if
     end if
   end while
+end sub
+
+sub sendLiveDeparture(address as dynamic)
+  if address = invalid or address = "" then return
+  transfer = CreateObject("roUrlTransfer")
+  transfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
+  transfer.SetUrl(address)
+  port = CreateObject("roMessagePort")
+  transfer.SetMessagePort(port)
+  if transfer.AsyncGetToString()
+    if wait(800, port) = invalid then transfer.AsyncCancel()
+  end if
 end sub
 
 sub sendAlphaShutdown(snapshot as dynamic)

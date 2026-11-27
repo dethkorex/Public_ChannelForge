@@ -2,6 +2,15 @@
 (() => {
     const creator = Boolean(document.getElementById('tv-player'));
     const video = document.querySelector(creator ? '#tv-player' : '#player');
+    window.ChannelForgeLiveDeparture = (address, viewer) => {
+        if (!address || !/^[a-f0-9]{32}$/.test(viewer || '')) return;
+        const stream = new URL(address, location.href);
+        const match = stream.pathname.match(/^(\/studio\/[a-f0-9]{16})?\/(?:live\/([a-zA-Z0-9_-]+)\.m3u8|broadcast\/([a-zA-Z0-9_-]+)\/(?:master|firetv)\.m3u8)$/);
+        if (!match) return;
+        const path = (match[1] || '') + '/api/public/origin?' + new URLSearchParams({leaving:match[2] || match[3],viewer});
+        const request = creator ? path : '/proxy?url=' + encodeURIComponent(stream.origin + path);
+        fetch(request, {cache:'no-store',keepalive:true}).catch(()=>{});
+    };
     let transport, started, stallStarted, lastPlayback, segmentBytes, segmentDuration;
     if (!creator && video) {
         const endStall = () => {
@@ -78,6 +87,7 @@
         };
         addEventListener('pywebviewready', rememberHealth);
         addEventListener('pagehide', rememberHealth);
+        addEventListener('cf-playback-stop', rememberHealth);
         video.addEventListener('playing', rememberHealth);
         setInterval(rememberHealth, 5000);
     }

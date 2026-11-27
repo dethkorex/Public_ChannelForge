@@ -259,6 +259,7 @@ sub livePlaybackControlSelected()
   if choice = 3 then returnFromLivePlayback()
 end sub
 sub returnFromLivePlayback()
+  releaseLiveViewer()
   finishDiagnosticStall()
   m.liveItem = invalid
   m.retryPending = false
@@ -595,6 +596,7 @@ sub clearStudio()
   m.moreMovies.visible = false
 end sub
 sub closeRemovedStudio()
+  releaseLiveViewer()
   finishDiagnosticStall()
   m.liveItem = invalid
   m.resolvingLive = false
@@ -857,6 +859,7 @@ sub refreshMovieAddress(item as object, studioId as string)
   end for
 end sub
 sub startCinemaMovie(item as object, position as float, studioId as string, direct as boolean)
+  releaseLiveViewer()
   resetPlaybackDiagnostics("movie")
   m.activeMovie = item
   m.moviePosition = position
@@ -992,6 +995,7 @@ sub playChannel(index as integer)
     return
   end if
   m.liveRetryTimer.control = "stop"
+  releaseLiveViewer()
   resetPlaybackDiagnostics("live")
   m.liveItem = item
   m.checkingOffline = false
@@ -1167,6 +1171,14 @@ end sub
 sub refreshMovieActivity()
   content = m.video.content
   if content <> invalid and content.url <> invalid then sendMovieActivity(content.url)
+end sub
+sub releaseLiveViewer()
+  address = m.top.liveDepartureUrl
+  if address = "" then return
+  m.top.liveDepartureUrl = ""
+  m.departureTask = CreateObject("roSGNode", "MovieActivityTask")
+  m.departureTask.url = address
+  m.departureTask.control = "RUN"
 end sub
 sub sendMovieActivity(address as string)
   path = Instr(9, address, "/vault/")
@@ -1420,6 +1432,15 @@ end function
 sub configureHls(item as object, recovering as boolean, live as boolean)
   item.HttpCertificatesFile = "common:/certs/ca-bundle.crt"
   item.live = live
+  if m.diagnosticKind = "live" and m.viewerLease <> invalid
+    route = CreateObject("roRegex", "^(https?://[^/?]+(?:/studio/[a-f0-9]{16})?)/(?:live/([a-zA-Z0-9_-]+)\.m3u8|broadcast/([a-zA-Z0-9_-]+)/(?:master|firetv)\.m3u8)(?:\?|$)", "")
+    match = route.Match(item.url)
+    if match.Count() = 4
+      id = match[2]
+      if id = "" then id = match[3]
+      m.top.liveDepartureUrl = match[1] + "/api/public/origin?leaving=" + id + "&viewer=" + m.viewerLease
+    end if
+  end if
   if m.viewerLease <> invalid and (Instr(1, item.url, "/broadcast/") > 0 or Instr(1, item.url, "/live/") > 0 or Instr(1, item.url, "/vault/") > 0)
     if Instr(1, item.url, "viewer=") = 0
       separator = "?"

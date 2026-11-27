@@ -20,14 +20,20 @@ class PublicDiagnostics:
         self.version = version
         self.lock = threading.Lock()
         self.sent_exit = False
+        self.sent_crash = False
         if self.pending.is_file():
             threading.Thread(target=self.flush, daemon=True, name="alpha-health-retry").start()
 
     def submit(self, metrics=None, *, failure=None):
         with self.lock:
-            if self.sent_exit:
-                return
-            self.sent_exit = True
+            if failure is None:
+                if self.sent_exit or self.sent_crash:
+                    return
+                self.sent_exit = True
+            else:
+                if self.sent_crash:
+                    return
+                self.sent_crash = True
         platform = "windows" if sys.platform == "win32" else "linux"
         report = clean_report({**(metrics or {}), "platform": platform, "app": self.version, "component": self.component})
         for field in ("model", "trace_id", "stream_traces", "timeline", "position_seconds", "positionMs", "at_ms", "crash_line"):
@@ -51,6 +57,18 @@ class PublicDiagnostics:
         except OSError:
             return
         self.flush()
+
+    def install_crash_handler(self):
+        previous = sys.excepthook
+
+        def report(error_type, error, trace):
+            try:
+                if not issubclass(error_type, (KeyboardInterrupt, SystemExit)):
+                    self.submit(failure=error)
+            finally:
+                previous(error_type, error, trace)
+
+        sys.excepthook = report
 
     def flush(self):
         try:

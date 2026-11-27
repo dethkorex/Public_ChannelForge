@@ -69,6 +69,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 @UnstableApi
 public class MainActivity extends Activity {
@@ -175,6 +178,7 @@ public class MainActivity extends Activity {
     };
     private VaultItem activeMovie;
     private String movieActivityUrl = "";
+    private String liveDepartureUrl = "";
     private long movieActivityAt;
     private boolean movieFinished;
     private int movieRetries, playGeneration;
@@ -249,6 +253,8 @@ public class MainActivity extends Activity {
     private final ExecutorService studioLoader = Executors.newFixedThreadPool(4);
     private final ExecutorService recoveryLoader = Executors.newSingleThreadExecutor();
     private final ExecutorService updateLoader = Executors.newSingleThreadExecutor();
+    private final ExecutorService departureLoader = new ThreadPoolExecutor(0, 1, 10, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(8), new ThreadPoolExecutor.DiscardOldestPolicy());
     private static final String UPDATE_RESULT = BuildConfig.APPLICATION_ID + ".UPDATE_RESULT";
     private static final String UPDATE_PERMISSION = BuildConfig.APPLICATION_ID + ".permission.UPDATE_RESULT";
     private static final int INSTALL_SETTINGS_REQUEST = 21;
@@ -2253,6 +2259,8 @@ public class MainActivity extends Activity {
     private static final java.util.regex.Pattern M3U_CHANNEL_RANK = java.util.regex.Pattern.compile("tvg-rating-rank=\"([1-9])\"");
     private static final java.util.regex.Pattern STUDIO_SLOT_PATH = java.util.regex.Pattern.compile("^/studio/[a-f0-9]{16}(?=/)");
     private static final java.util.regex.Pattern MOVIE_ACTIVITY_PATH = java.util.regex.Pattern.compile("^(/studio/[a-f0-9]{16})?/vault/([a-f0-9]{24})\\.m3u8$");
+    private static final java.util.regex.Pattern LIVE_DEPARTURE_PATH = java.util.regex.Pattern.compile(
+            "^(/studio/[a-f0-9]{16})?/(?:live/([a-zA-Z0-9_-]+)\\.m3u8|broadcast/([a-zA-Z0-9_-]+)/(?:master|firetv)\\.m3u8)$");
     private static final java.util.regex.Pattern CHANNEL_PLAYLIST_PATH = java.util.regex.Pattern.compile("/(?:broadcast|live)/[a-zA-Z0-9_-]+(?:/[^/]+)?\\.m3u8");
 
     private String studioMediaAddress(String raw, String guideAddress) {
@@ -3904,8 +3912,18 @@ public class MainActivity extends Activity {
         usingPreferredRelay = !input.equals(fallback);
         if (usingPreferredRelay) android.util.Log.i("ChannelForgePlayback", "Using preferred media relay");
         movieActivityUrl = "";
+        liveDepartureUrl = "";
         movieActivityAt = 0;
         String path = input.getPath();
+        if (live && path != null) {
+            java.util.regex.Matcher tune = LIVE_DEPARTURE_PATH.matcher(path);
+            if (tune.matches()) {
+                String scope = tune.group(1) == null ? "" : tune.group(1);
+                liveDepartureUrl = input.buildUpon().path(scope + "/api/public/origin").clearQuery().fragment(null)
+                        .appendQueryParameter("leaving", tune.group(2) == null ? tune.group(3) : tune.group(2))
+                        .appendQueryParameter("viewer", viewerLease).build().toString();
+            }
+        }
         if (!live && path != null) {
             java.util.regex.Matcher movie = MOVIE_ACTIVITY_PATH.matcher(path);
             if (movie.matches()) {
@@ -3931,6 +3949,7 @@ public class MainActivity extends Activity {
     }
 
     private void beginTune() {
+        releaseLiveViewer();
         ++playGeneration;
         viewerLease = UUID.randomUUID().toString().replace("-", "");
         recentEvents.clear();
@@ -4548,6 +4567,7 @@ public class MainActivity extends Activity {
     }
 
     private void returnToGuide() {
+        releaseLiveViewer();
         boolean refreshAfterStall = !guideVisible && resumed
                 && (playbackFailed || playbackWaiting || liveRetries > 0 || movieRetries > 0);
         if (tunedChannel != null || activeMovie != null) {
@@ -4585,7 +4605,17 @@ public class MainActivity extends Activity {
         if (activePage == Page.CONTINUE) syncStudioScreen();
         if (refreshAfterStall) loadDirectory();
     }
+    private void releaseLiveViewer() {
+        String address = liveDepartureUrl;
+        liveDepartureUrl = "";
+        if (!address.isEmpty() && !departureLoader.isShutdown()) departureLoader.execute(() -> {
+            try { get(address); } catch (Exception ignored) { /* A lost connection times out at Studio. */ }
+        });
+    }
+
     @Override protected void onDestroy() {
+        releaseLiveViewer();
+        departureLoader.shutdown();
         if (menuSounds != null) {
             menuSounds.release();
             menuSoundReady = false;

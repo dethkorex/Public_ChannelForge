@@ -1524,7 +1524,14 @@ function fallbackFromPreferredRelay(){
     play(activeStreamUrl,activeMedia,true);
     return true;
 }
+function releaseLivePlayback(){
+    if(!activeMedia?.liveDeparture)return;
+    window.ChannelForgeLiveDeparture?.(activeMedia.liveDeparture,activeMedia.traceId);
+    activeMedia.liveDeparture='';
+}
+addEventListener('pagehide',releaseLivePlayback);
 function play(url,media=null,continuing=false){
+    if(!continuing)releaseLivePlayback();
     clearTimeout(liveRetryTimer);liveRetryTimer=null;
     clearTimeout(liveBoundaryTimer);
     clearTimeout(playbackTimer);playbackTimer=null;
@@ -1548,6 +1555,7 @@ function play(url,media=null,continuing=false){
     activeStreamUrl=url;activeMedia=media||{kind:/\/live\//.test(url)?'live':'movie',title:'ChannelForge'};
     activeMedia.traceId=traceId;
     liveMode=activeMedia.kind==='live';
+    activeMedia.liveDeparture=liveMode?streamUrl.href:'';
     const moviePath=!liveMode&&streamUrl.pathname.match(/^(\/studio\/[a-f0-9]{16})?\/vault\/([a-f0-9]{24})\.m3u8$/);
     activeMedia.activityUrl=moviePath?'/proxy?url='+encodeURIComponent(streamUrl.origin+(moviePath[1]||'')
         +'/api/public/origin?viewing='+moviePath[2]+'&viewer='+traceId):'';
@@ -1691,6 +1699,9 @@ function minimizePlayer(){
     showScreen('live');dockMiniPlayer();setPlayerState('MINI PLAYER · BROWSE THE GUIDE');
 }
 function stopPlayer(){
+    window.dispatchEvent(new Event('cf-playback-stop'));
+    releaseLivePlayback();
+    saveCurrentMovie();
     playbackGeneration++;
     clearTimeout(liveRetryTimer);liveRetryTimer=null;
     clearTimeout(liveBoundaryTimer);
@@ -2470,7 +2481,6 @@ HTML = HTML.replace("</body>", '<script src="/playback-diagnostics.js"></script>
 HTML = HTML.replace('<span class="menu-label">Updates</span>', '<span class="menu-label">System</span>', 1)
 HTML = HTML.replace('<strong>Updates</strong>', '<strong>System</strong>', 1)
 HTML = HTML.replace('><h2>Updates</h2>', '><h2>System</h2>', 1)
-HTML = HTML.replace("function stopPlayer(){++playbackGeneration;", "function stopPlayer(){window.dispatchEvent(new Event('cf-playback-stop'));saveCurrentMovie();++playbackGeneration;", 1)
 
 
 
@@ -2690,6 +2700,7 @@ def main():
     controls = DesktopControls(server.server_port, fullscreen=fullscreen)
     from public_diagnostics import PublicDiagnostics
     reports = PublicDiagnostics(UPDATE_DIR.parent, "tv", VERSION)
+    reports.install_crash_handler()
     APP_WINDOW = webview.create_window(APP_TITLE, url=url, js_api=controls, fullscreen=fullscreen,
                                       width=1500, height=900, min_size=minimum, background_color="#080414")
     failure = None

@@ -1,9 +1,34 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import diagnostic_metrics as diagnostics
+from public_diagnostics import PublicDiagnostics
 
 
 class DiagnosticMetricsTests(unittest.TestCase):
+    def test_uncaught_desktop_crash_can_report_after_a_shutdown_sample(self):
+        import json
+        import sys
+        with TemporaryDirectory() as directory:
+            public = PublicDiagnostics(Path(directory), "studio", "4.5.5")
+            original = sys.excepthook
+            with patch.object(public, "flush"):
+                try:
+                    public.submit({"live_channels": 1})
+                    with patch.object(sys, "excepthook") as previous:
+                        public.install_crash_handler()
+                        failure = RuntimeError("private library path")
+                        sys.excepthook(RuntimeError, failure, None)
+                        previous.assert_called_once_with(RuntimeError, failure, None)
+                    payload = json.loads(public.pending.read_text())
+                    self.assertEqual(payload["report_type"], "crash")
+                    self.assertEqual(payload["crash_kind"], "RuntimeError")
+                    self.assertNotIn("private library path", str(payload))
+                finally:
+                    sys.excepthook = original
+
     def test_crash_report_keeps_class_and_code_but_excludes_sensitive_fields(self):
         report = {"report_type": "crash", "platform": "linux", "app": "4.0.0", "crash_area": "studio",
                   "crash_kind": "RuntimeError", "crash_line": 221, "url": "https://private.example", "message": "private",

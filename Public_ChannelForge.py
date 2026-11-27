@@ -67,7 +67,7 @@ CHANNEL_RATING_LEVELS = {
     "PG-13": 5, "TV-14": 6, "R": 7, "TV-MA": 8, "NC-17": 9,
 }
 LIVE_VIEWER_TTL = 25
-LIVE_VIEWER_GRACE = 15
+LIVE_VIEWER_GRACE = 3
 LIVE_LEGACY_IDLE = 45
 MOVIE_VIEWER_TTL = 45
 CHANNEL_SAVE_BODY_BYTES = 32 * 1024 * 1024
@@ -3879,6 +3879,8 @@ class LivePlayout:
         self.condition = threading.Condition()
         self.started_at = self.last_request = time.monotonic()
         self.viewers = {}
+        self.departed_viewers = {}
+        self.leave_deadline = None
         self.peak_viewers = 0
         self.media_bytes = {}
         self.last_anonymous_request = float("-inf")
@@ -3922,8 +3924,12 @@ class LivePlayout:
         with self.condition:
             if self.stopped:
                 return
-            self.last_request = now = time.monotonic()
+            now = time.monotonic()
             if viewer:
+                if now - self.departed_viewers.get(viewer, float("-inf")) < LIVE_VIEWER_TTL:
+                    return  # A late manifest request must not renew a closed player.
+                self.departed_viewers.pop(viewer, None)
+                self.leave_deadline = None
                 self.expire_viewers(now)
                 self.viewers.pop(viewer, None)
                 if len(self.viewers) >= 2048:
@@ -3932,6 +3938,19 @@ class LivePlayout:
                 self.peak_viewers = max(self.peak_viewers, len(self.viewers))
             else:
                 self.last_anonymous_request = now
+            self.last_request = now
+
+    def release_viewer(self, viewer):
+        with self.condition:
+            now = time.monotonic()
+            self.expire_viewers(now)
+            if self.viewers.pop(viewer, None) is None:
+                return
+            if len(self.departed_viewers) >= 2048:
+                self.departed_viewers.pop(next(iter(self.departed_viewers)))
+            self.departed_viewers[viewer] = now
+            if not self.viewers:
+                self.leave_deadline = now + LIVE_VIEWER_GRACE
 
     def activity(self):
         with self.condition:
@@ -3965,9 +3984,15 @@ class LivePlayout:
                 self.media_bytes.pop(next(iter(self.media_bytes)))
 
     def active(self):
-        elapsed = time.monotonic() - self.last_request
-        timeout = LIVE_LEGACY_IDLE if self.last_anonymous_request == self.last_request else LIVE_VIEWER_TTL + LIVE_VIEWER_GRACE
-        return not self.stopped and self.error is None and elapsed < timeout
+        if self.stopped or self.error is not None:
+            return False
+        now = time.monotonic()
+        if now - self.last_anonymous_request < LIVE_LEGACY_IDLE:
+            return True
+        deadline = self.leave_deadline
+        if deadline is None:
+            deadline = self.last_request + LIVE_VIEWER_TTL + LIVE_VIEWER_GRACE
+        return now < deadline
 
     def session_keys(self):
         with self.condition:
@@ -5085,6 +5110,15 @@ class Handler(BaseHTTPRequestHandler):
                                                            brief=guide == ["brief"], continuous=True))
             elif parsed.path == "/api/public/origin":
                 query = urllib.parse.parse_qs(parsed.query)
+                if "leaving" in query:
+                    channel_id, viewer = query["leaving"][0], query.get("viewer", [""])[0]
+                    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", channel_id) or not LIVE_VIEWER_ID.fullmatch(viewer):
+                        return self.send_json(400, {"error": "Invalid live playback ID."})
+                    with LOCK:
+                        feed = next((feed for feed in LIVE_PLAYOUT.values() if feed.channel_id == channel_id), None)
+                    if feed:
+                        feed.release_viewer(viewer)
+                    return self.send_bytes(204, b"", "text/plain")
                 if "viewing" in query:
                     item_id, viewer = query["viewing"][0], query.get("viewer", [""])[0]
                     if not re.fullmatch(r"[a-f0-9]{24}", item_id) or not LIVE_VIEWER_ID.fullmatch(viewer):
@@ -5960,6 +5994,7 @@ def main() -> None:
     print(f"Data directory: {DATA_DIR}")
     from public_diagnostics import PublicDiagnostics
     ALPHA_REPORTS = PublicDiagnostics(DATA_DIR / "diagnostics", "studio", VERSION)
+    ALPHA_REPORTS.install_crash_handler()
     if args.public_media_port:
         PUBLIC_MEDIA_PORT = args.public_media_port
         start_public_media_server()

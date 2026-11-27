@@ -3,6 +3,7 @@
   <interface>
     <field id="deepLinkRequest" type="assocarray" alwaysNotify="true"/>
     <field id="alphaHealth" type="assocarray"/>
+    <field id="liveDepartureUrl" type="string"/>
   </interface>
   <script type="text/brightscript" uri="MainScene.brs"/>
   <script type="text/brightscript" uri="CatalogState.brs"/>

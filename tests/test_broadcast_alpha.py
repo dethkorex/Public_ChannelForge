@@ -149,6 +149,49 @@ class BroadcastTests(unittest.TestCase):
             self.assertEqual(feed.activity()["state"], "idle")
             self.assertEqual(feed.activity()["upload_bps"], 0)
 
+    def test_last_explicit_departure_reaps_the_encoder_and_ignores_late_playlist_requests(self):
+        feed = app.LivePlayout(lambda _: None, channel_id="sample")
+        first, second = "1" * 32, "2" * 32
+        with patch.object(app.time, "monotonic", return_value=100) as clock:
+            feed.heartbeat(first)
+            feed.heartbeat(second)
+            feed.release_viewer(first)
+            feed.heartbeat(first)
+            self.assertEqual(feed.activity()["viewers"], 1)
+            clock.return_value += 6
+            self.assertTrue(feed.active())
+            feed.release_viewer(second)
+            self.assertEqual(feed.activity()["state"], "cooldown")
+            clock.return_value += 2
+            feed.heartbeat(second)
+            self.assertTrue(feed.active())
+            clock.return_value += 1
+            session = {"process": Mock(poll=Mock(return_value=None)), "feed": feed, "last_access": 200}
+            with (patch.object(app, "LIVE_PLAYOUT", {("sample", True, False): feed}),
+                  patch.object(app, "FFMPEG_SESSIONS", {"sample": session}),
+                  patch.object(app, "stop_encoder") as stop):
+                app.reap_idle_sessions_once(now=200)
+                self.assertFalse(app.LIVE_PLAYOUT)
+                stop.assert_called_once_with(session)
+
+    def test_new_and_legacy_viewers_keep_the_feed_after_another_viewer_leaves(self):
+        with patch.object(app.time, "monotonic", return_value=100) as clock:
+            feed = app.LivePlayout(lambda _: None)
+            feed.heartbeat()
+            feed.heartbeat("a" * 32)
+            feed.release_viewer("a" * 32)
+            clock.return_value += 8
+            self.assertTrue(feed.active())
+            clock.return_value += app.LIVE_LEGACY_IDLE
+            self.assertFalse(feed.active())
+            feed = app.LivePlayout(lambda _: None)
+            feed.heartbeat("a" * 32)
+            feed.release_viewer("a" * 32)
+            clock.return_value += 1
+            feed.heartbeat("b" * 32)
+            clock.return_value += 8
+            self.assertTrue(feed.active())
+
     def test_public_hd_live_has_separate_bitrate_from_the_relay_and_movie_profiles(self):
         direct = app.relay_renditions()
         constrained = app.relay_renditions(constrained=True)
@@ -177,7 +220,7 @@ class BroadcastTests(unittest.TestCase):
 
     def test_active_playlist_leases_segments_until_last_viewer_leaves(self):
         feed = app.LivePlayout(lambda _: None)
-        feed.last_request = time.monotonic() - 35
+        feed.last_request = time.monotonic() - (app.LIVE_VIEWER_TTL + app.LIVE_VIEWER_GRACE - 1)
         feed.segments.append((0, 0, {"economy": ("#EXTINF:2,", "/ffmpeg-stream/shared/segment000001.ts")}))
         now = time.time()
         session = {"feed": feed, "last_access": now - 100, "process": Mock()}
