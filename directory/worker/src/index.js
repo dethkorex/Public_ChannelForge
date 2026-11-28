@@ -266,9 +266,14 @@ async function enrollRelay(request, env, id = "") {
   const owner = current ? {registered_origin:mediaBase(new URL(current.profile.guide_url), "/exports/guide.xml")} : {provisional:true};
   if (!env.RELAY_ENROLL_URL || !env.RELAY_ENROLL_TOKEN)
     return json({error:"ChannelForge relay enrollment is unavailable."}, 503);
-  const {public_key, kind, nonce} = await readBody(request);
+  const {public_key, kind, nonce, instance} = await readBody(request);
   const probe = (kind === "identity" && typeof nonce === "string" && /^[a-f0-9]{12}$/.test(nonce)) ||
     (kind === "sample" && typeof nonce === "string" && /^[A-Za-z0-9_-]{32}$/.test(nonce));
+  const replacing = kind === "stage_key" || kind === "commit_key";
+  if (replacing && (first || !current))
+    return json({error:"Relay key recovery requires the existing Studio registration."}, 403);
+  if (kind === "commit_key" && (typeof instance !== "string" || !/^[a-f0-9]{40}$/.test(instance)))
+    return json({error:"Invalid Studio instance proof."}, 400);
   if (!probe && (typeof public_key !== "string" || !/^ssh-ed25519 [A-Za-z0-9+/]{68}$/.test(public_key)))
     return json({error:"Invalid relay enrollment or health check request."}, 400);
   const endpoint = safeUrl(env.RELAY_ENROLL_URL);
@@ -276,7 +281,8 @@ async function enrollRelay(request, env, id = "") {
     const result = await fetch(endpoint, {
       method:"POST", redirect:"manual", signal:AbortSignal.timeout(8500),
       headers:{"authorization":`Bearer ${env.RELAY_ENROLL_TOKEN}`, "content-type":"application/json"},
-      body:JSON.stringify(probe ? {studio:id, kind, nonce, ...owner} : {studio:id, public_key, ...owner}),
+      body:JSON.stringify(probe ? {studio:id, kind, nonce, ...owner}
+        : {studio:id, public_key, ...(replacing ? {kind, instance} : {}), ...owner}),
     });
     if (result.ok) {
       const data = await readBody(result);
@@ -284,6 +290,8 @@ async function enrollRelay(request, env, id = "") {
       return json({[field]:data[field]});
     }
     await result.body?.cancel();
+    if (replacing && result.status === 403) return json({error:"Key recovery requires this Studio's registered relay slot."}, 403);
+    if (replacing && result.status === 412) return json({error:"The replacement did not reach this Studio."}, 412);
     if (result.status === 409) return json({error:"This Studio already has a relay key."}, 409);
     if (result.status === 429) return json({error:"Studio relay setup is busy. Studio will retry shortly."}, 429);
   } catch {

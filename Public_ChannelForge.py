@@ -54,7 +54,7 @@ from windows_distribution import clean_windows_update_cache, published_hash, rel
 
 APP_NAME = "Public_ChannelForge"
 APP_TITLE = "ChannelForge Studio"
-VERSION = "4.6.3"
+VERSION = "4.6.4"
 DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -191,6 +191,7 @@ class CommunityRelayConnection(NamedTuple):
 
 
 COMMUNITY_RELAY: CommunityRelayConnection | None = None
+REPLACEMENT_RELAY_KEY = "community-relay-identity.pending"
 SHUTTING_DOWN = threading.Event()
 PUBLISH_CHANGED = threading.Event()
 PUBLISH_RETRY = threading.Event()
@@ -2790,7 +2791,7 @@ def relay_tls_bytes(local: socket.socket, encrypted: ssl.SSLSocket) -> None:
             buffer.extend(data)
 
 
-def connect_community_relay(profile: CommunityRelayProfile) -> CommunityRelayConnection:
+def connect_community_relay(profile: CommunityRelayProfile, *, replacement_key: Path | None = None) -> CommunityRelayConnection:
     """Start a candidate forward and prove it reaches this Studio over HTTPS."""
     global RELAY_JOB
     with TUNNEL_LOCK:
@@ -2798,11 +2799,11 @@ def connect_community_relay(profile: CommunityRelayProfile) -> CommunityRelayCon
             raise InterruptedError("The read-only media server is unavailable.")
         local_port = PUBLIC_MEDIA_SERVER.server_port
         existing = COMMUNITY_RELAY
-        if (existing and existing.profile == profile and existing.local_port == local_port
+        if (replacement_key is None and existing and existing.profile == profile and existing.local_port == local_port
                 and existing.process.poll() is None):
             return existing
         ssh = openssh_tool("ssh")
-        identity = DATA_DIR / "community-relay-identity"
+        identity = replacement_key or DATA_DIR / "community-relay-identity"
         if not ssh or not identity.is_file():
             raise ValueError("Install OpenSSH and provision this Studio's community relay key.")
         retire_orphaned_relay(identity, profile.remote_port)
@@ -2859,6 +2860,64 @@ def connect_community_relay(profile: CommunityRelayProfile) -> CommunityRelayCon
                     if bridge:
                         bridge.close()
         raise ValueError("The community relay did not reach this Studio. Check its SSH key, assigned port, and HTTPS route.")
+
+
+def recover_managed_relay_key(settings: dict, profile: CommunityRelayProfile) -> CommunityRelayConnection | None:
+    """Replace an unusable key through the existing registration and assigned slot."""
+    if (not settings.get("managed_relay") or settings.get("directory_url") != DEFAULT_DIRECTORY_URL
+            or settings.get("public_url") != profile.origin or not settings.get("creator_id")
+            or not settings.get("creator_key")):
+        return None
+    if COMMUNITY_RELAY is not None and COMMUNITY_RELAY.process.poll() is None:
+        return None
+    keygen = openssh_tool("ssh-keygen")
+    if not keygen:
+        return None
+    _, secret, route = relay_registration(settings)
+    identity = DATA_DIR / "community-relay-identity"
+    staged = DATA_DIR / REPLACEMENT_RELAY_KEY
+    options = {"stdin": subprocess.DEVNULL, "capture_output": True, "timeout": 8, "check": True,
+               "creationflags": subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0}
+
+    def public_key(path):
+        result = subprocess.run([keygen, "-y", "-P", "", "-f", str(path)], **options)
+        return " ".join(result.stdout.decode("ascii").split()[:2])
+
+    if not staged.is_file() and identity.is_file():
+        try:
+            saved = public_key(identity)
+        except subprocess.CalledProcessError as error:
+            raise ValueError("Studio could not read its saved relay key.") from error
+        if saved:
+            try:
+                directory_request("POST", route, {"public_key": saved}, secret)
+            except ValueError as error:
+                if "already has a relay key" not in str(error):
+                    raise
+            else:
+                return None
+
+    if not staged.is_file():
+        subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-C", "ChannelForge Relay", "-f", str(staged)], **options)
+    proposed = public_key(staged)
+    replacement = directory_request("POST", route, {"kind": "stage_key", "public_key": proposed}, secret)
+    if not isinstance(replacement.get("profile"), dict) or parse_community_relay_profile(replacement["profile"]) != profile:
+        raise ValueError("The directory did not return this Studio's enrolled relay slot.")
+    connection = connect_community_relay(profile, replacement_key=staged)
+    try:
+        committed = directory_request("POST", route, {"kind": "commit_key", "public_key": proposed, "instance": RELAY_INSTANCE}, secret)
+        if not isinstance(committed.get("profile"), dict) or parse_community_relay_profile(committed["profile"]) != profile:
+            raise ValueError("The directory could not confirm the relay key replacement.")
+        staged.replace(identity)
+    except Exception:
+        stop_relay_process(connection.process)
+        raise
+    try:
+        staged.with_name(staged.name + ".pub").replace(identity.with_suffix(".pub"))
+    except OSError:
+        pass
+    set_community_relay(connection)
+    return connection
 
 
 def accept_community_relay(candidates: tuple[CommunityRelayProfile, ...], preferred: str,
@@ -5805,7 +5864,8 @@ def restore_public_sharing() -> None:
         if SHUTTING_DOWN.is_set():
             return
         with PUBLISH_LOCK:
-            if PUBLISH_RETRY.is_set():
+            requested_retry = PUBLISH_RETRY.is_set()
+            if requested_retry:
                 PUBLISH_RETRY.clear()
                 failures = 0
                 next_relay_check = next_heartbeat = 0
@@ -5852,7 +5912,14 @@ def restore_public_sharing() -> None:
                     origin = start_public_tunnel() if automatic else settings["public_url"]
                     if relays:
                         previous = COMMUNITY_RELAY
-                        connection = accept_community_relay(relays, origin, profile)
+                        try:
+                            connection = accept_community_relay(relays, origin, profile)
+                        except (OSError, ValueError):
+                            if not (requested_retry or (DATA_DIR / REPLACEMENT_RELAY_KEY).is_file()):
+                                raise
+                            connection = recover_managed_relay_key(settings, relays[0])
+                            if connection is None:
+                                raise
                         origin = connection.profile.origin
                         if connection is not previous:
                             relay_misses = 0

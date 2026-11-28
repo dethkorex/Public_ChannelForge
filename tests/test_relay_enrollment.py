@@ -25,6 +25,89 @@ def public_key(value):
 
 
 class RelayEnrollmentTests(unittest.TestCase):
+    def test_key_replacement_checks_connection_before_removing_only_the_old_key(self):
+        mine, other = "a" * 32, "b" * 32
+        slots = [{"origin": f"https://studio{i}.example.com", "remote_port": 18100 + i} for i in range(2)]
+        old_key, new_key, other_key = (public_key(i) for i in (1, 2, 3))
+        instance = "f" * 40
+        with tempfile.TemporaryDirectory() as root:
+            keys = Path(root) / "relay-keys"
+            enrollment = Enrollment(slots, Path(root) / "slots.sqlite", keys)
+            enrollment.enroll(mine, old_key)
+            enrollment.enroll(other, other_key)
+            self.assertEqual(enrollment.replace_key(mine, new_key, registered_origin=slots[1]["origin"])[0], 403)
+            self.assertEqual(enrollment.replace_key(mine, new_key, registered_origin=slots[0]["origin"]), (200, {"profile": slots[0]}))
+            for key in (old_key, new_key, other_key):
+                self.assertIn(key, keys.read_text())
+            self.assertIn('expiry-time="', keys.read_text())
+            with mock.patch.object(enrollment, "probe", return_value=(200, {"instance": "e" * 40})):
+                self.assertEqual(enrollment.replace_key(mine, new_key, registered_origin=slots[0]["origin"], instance=instance)[0], 412)
+            self.assertIn(old_key, keys.read_text())
+            with mock.patch.object(enrollment, "probe", return_value=(200, {"instance": instance})):
+                self.assertEqual(enrollment.replace_key(mine, new_key, registered_origin=slots[0]["origin"], instance=instance),
+                                 (200, {"profile": slots[0]}))
+            self.assertNotIn(old_key, keys.read_text())
+            self.assertIn(new_key, keys.read_text())
+            self.assertIn(other_key, keys.read_text())
+            self.assertNotIn("expiry-time", keys.read_text())
+            self.assertEqual(enrollment.enroll(mine, new_key), (200, {"profile": slots[0]}))
+
+    def test_creator_retries_a_network_failure_without_creating_another_key(self):
+        profile = app.CommunityRelayProfile("https://relay.example.com", "relay.example.com", "studio", 22, 18091,
+                                            public_key(1))
+        settings = {"managed_relay": True, "directory_url": app.DEFAULT_DIRECTORY_URL,
+                    "public_url": profile.origin, "creator_id": "a" * 32, "creator_key": "fixture-directory-key"}
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+            identity = folder / "community-relay-identity"
+            identity.write_text("existing")
+            with (mock.patch.multiple(app, DATA_DIR=folder, COMMUNITY_RELAY=None),
+                  mock.patch.object(app, "openssh_tool", return_value="ssh-keygen"),
+                  mock.patch.object(app.subprocess, "run", return_value=mock.Mock(stdout=public_key(2).encode())) as keygen,
+                  mock.patch.object(app, "directory_request", return_value={"profile": profile._asdict()}) as directory,
+                  mock.patch.object(app, "connect_community_relay") as connect):
+                self.assertIsNone(app.recover_managed_relay_key(settings, profile))
+            self.assertEqual(identity.read_text(), "existing")
+            self.assertFalse((folder / app.REPLACEMENT_RELAY_KEY).exists())
+            self.assertEqual(keygen.call_count, 1)
+            self.assertEqual(directory.call_args.args[2], {"public_key": public_key(2)})
+            connect.assert_not_called()
+
+    def test_creator_swaps_the_private_key_after_connect_and_directory_confirmation(self):
+        profile = app.CommunityRelayProfile("https://relay.example.com", "relay.example.com", "studio", 22, 18091,
+                                            public_key(1))
+        settings = {"managed_relay": True, "directory_url": app.DEFAULT_DIRECTORY_URL,
+                    "public_url": profile.origin, "creator_id": "a" * 32, "creator_key": "fixture-directory-key"}
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+            active = folder / "community-relay-identity"
+            staged = folder / app.REPLACEMENT_RELAY_KEY
+            active.write_text("old")
+            staged.write_text("new")
+            staged.with_name(staged.name + ".pub").write_text(public_key(2))
+            connection = mock.Mock()
+
+            def request(method, route, body, key):
+                self.assertEqual((method, route, key), ("POST", f"/v1/creators/{'a' * 32}/relay", settings["creator_key"]))
+                self.assertEqual(active.read_text(), "old")
+                if body["kind"] == "commit_key":
+                    connect.assert_called_once_with(profile, replacement_key=staged)
+                    self.assertEqual(body["instance"], app.RELAY_INSTANCE)
+                return {"profile": profile._asdict()}
+
+            with (mock.patch.multiple(app, DATA_DIR=folder, COMMUNITY_RELAY=None),
+                  mock.patch.object(app, "openssh_tool", return_value="ssh-keygen"),
+                  mock.patch.object(app.subprocess, "run", return_value=mock.Mock(stdout=public_key(2).encode())),
+                  mock.patch.object(app, "directory_request", side_effect=request) as directory,
+                  mock.patch.object(app, "connect_community_relay", return_value=connection) as connect,
+                  mock.patch.object(app, "set_community_relay") as activate):
+                self.assertIs(app.recover_managed_relay_key(settings, profile), connection)
+            self.assertEqual([call.args[2]["kind"] for call in directory.call_args_list], ["stage_key", "commit_key"])
+            self.assertEqual(active.read_text(), "new")
+            self.assertEqual(active.with_suffix(".pub").read_text(), public_key(2))
+            self.assertFalse(staged.exists())
+            activate.assert_called_once_with(connection)
+
     def test_unconfirmed_first_publish_cannot_take_every_slot(self):
         slots = [{"origin": f"https://studio{index}.example.com", "remote_port": 18090 + index}
                  for index in range(4)]

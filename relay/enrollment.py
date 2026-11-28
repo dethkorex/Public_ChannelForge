@@ -4,6 +4,7 @@ import argparse
 import base64
 import binascii
 from contextlib import closing
+from datetime import datetime, timezone
 from hashlib import sha256
 import hmac
 import json
@@ -11,6 +12,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import tempfile
 from threading import BoundedSemaphore
@@ -48,11 +50,17 @@ class Enrollment:
         with closing(sqlite3.connect(database)) as db, db:
             db.execute("CREATE TABLE IF NOT EXISTS enrollment (studio TEXT PRIMARY KEY, port INTEGER UNIQUE, key TEXT UNIQUE)")
             db.execute("CREATE TABLE IF NOT EXISTS pending_enrollment (studio TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE IF NOT EXISTS pending_key_replacement (studio TEXT PRIMARY KEY, key TEXT UNIQUE, expires INTEGER)")
             self.write_keys(db)
 
     def write_keys(self, db):
         # A dedicated AuthorizedKeysFile. Never overwrite the VPS admin's keys.
         rows = db.execute("SELECT port, key FROM enrollment ORDER BY port").fetchall()
+        db.execute("DELETE FROM pending_key_replacement WHERE expires<=?", (int(time.time()),))
+        replacements = db.execute(
+            "SELECT enrollment.port, replacement.key, replacement.expires FROM pending_key_replacement replacement "
+            "JOIN enrollment USING (studio) ORDER BY enrollment.port"
+        ).fetchall()
         if any(port not in self.slots for port, _ in rows):
             raise RuntimeError("Configured relay slots must retain enrolled loopback ports.")
         directory = self.authorized_keys.parent
@@ -61,6 +69,9 @@ class Enrollment:
             try:
                 for port, key in rows:
                     draft.write(f'command="/usr/sbin/nologin",restrict,port-forwarding,permitlisten="127.0.0.1:{port}" {studio_key(key)}\n')
+                for port, key, expires in replacements:
+                    deadline = datetime.fromtimestamp(expires, timezone.utc).strftime("%Y%m%d%H%M%SZ")
+                    draft.write(f'command="/usr/sbin/nologin",restrict,port-forwarding,permitlisten="127.0.0.1:{port}",expiry-time="{deadline}" {studio_key(key)}\n')
                 draft.flush()
                 os.fsync(draft.fileno())
                 draft.close()
@@ -80,7 +91,8 @@ class Enrollment:
                 if current_key != key:
                     return 409, {"error": "This Studio already has a relay key."}
             else:
-                if db.execute("SELECT 1 FROM enrollment WHERE key=?", (key,)).fetchone():
+                if db.execute("SELECT 1 FROM enrollment WHERE key=? UNION ALL SELECT 1 FROM pending_key_replacement WHERE key=? AND expires>?",
+                              (key, key, int(time.time()))).fetchone():
                     return 409, {"error": "This relay key already belongs to a Studio."}
                 if provisional:
                     count = db.execute("SELECT count(*) FROM pending_enrollment").fetchone()[0]
@@ -96,6 +108,43 @@ class Enrollment:
                 db.execute("DELETE FROM pending_enrollment WHERE studio=?", (studio,))
             # Persist the assignment before enabling its key. Retrying repairs a
             # failed projection, and a second transaction serializes key writes.
+            db.commit()
+            db.execute("BEGIN IMMEDIATE")
+            self.write_keys(db)
+        return 200, {"profile": self.slots[port]}
+
+    def replace_key(self, studio, key, *, registered_origin, instance=None):
+        key = studio_key(key)
+        with closing(sqlite3.connect(self.database)) as db:
+            active = db.execute("SELECT port, key FROM enrollment WHERE studio=?", (studio,)).fetchone()
+        if not active or self.slots[active[0]]["origin"] != registered_origin:
+            return 403, {"error": "Key recovery requires the Studio's registered relay slot."}
+        port, current_key = active
+        if instance is not None and key != current_key:
+            status, proof = self.probe(studio, "identity", secrets.token_hex(6), registered_origin=registered_origin)
+            if status != 200 or proof.get("instance") != instance:
+                return 412, {"error": "The replacement did not reach this Studio."}
+        with closing(sqlite3.connect(self.database, isolation_level=None)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT port, key FROM enrollment WHERE studio=?", (studio,)).fetchone() != active:
+                return 409, {"error": "This Studio's relay key changed during recovery."}
+            now = int(time.time())
+            db.execute("DELETE FROM pending_key_replacement WHERE expires<=?", (now,))
+            pending = db.execute("SELECT key FROM pending_key_replacement WHERE studio=?", (studio,)).fetchone()
+            if key != current_key:
+                if pending and pending[0] != key:
+                    return 409, {"error": "A replacement is already pending for this Studio."}
+                if instance is not None:
+                    if not pending:
+                        return 409, {"error": "The replacement has expired. Retry from Studio."}
+                    db.execute("UPDATE enrollment SET key=? WHERE studio=?", (key, studio))
+                    db.execute("DELETE FROM pending_key_replacement WHERE studio=?", (studio,))
+                elif not pending:
+                    taken = db.execute("SELECT 1 FROM enrollment WHERE key=? UNION ALL SELECT 1 FROM pending_key_replacement WHERE key=?",
+                                       (key, key)).fetchone()
+                    if taken:
+                        return 409, {"error": "That key is assigned to another Studio."}
+                    db.execute("INSERT INTO pending_key_replacement VALUES (?,?,?)", (studio, key, now + 300))
             db.commit()
             db.execute("BEGIN IMMEDIATE")
             self.write_keys(db)
@@ -206,7 +255,15 @@ def handler(enrollment, token: str):
                 studio = request.get("studio")
                 if not isinstance(studio, str) or not re.fullmatch(r"[a-f0-9-]{8,64}", studio):
                     raise ValueError("Invalid directory Studio identity.")
-                if "kind" in request:
+                kind = request.get("kind")
+                if kind in ("stage_key", "commit_key"):
+                    instance = request.get("instance") if kind == "commit_key" else None
+                    if kind == "commit_key" and (not isinstance(instance, str) or not re.fullmatch(r"[a-f0-9]{40}", instance)):
+                        raise ValueError("Invalid Studio instance proof.")
+                    status, result = enrollment.replace_key(studio, request.get("public_key"),
+                                                            registered_origin=request.get("registered_origin", ""),
+                                                            instance=instance)
+                elif "kind" in request:
                     status, result = enrollment.probe(studio, request.get("kind"), request.get("nonce"),
                                                       registered_origin=request.get("registered_origin", ""))
                 else:

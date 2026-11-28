@@ -127,6 +127,17 @@ test("registration survives origin outages, missing heartbeats and directory res
   assert.equal(enrollmentCalls,1);
   assert.equal((await read(path+"/relay","POST",{kind:"identity",nonce:"ef".repeat(6)},owner)).instance,"da".repeat(20));
   assert.equal(enrollmentCalls,2);
+  await read(path+"/relay","POST",{...relayRequest,kind:"stage_key"},"not-the-owner",403);
+  await read("/v1/creators/relay","POST",{...relayRequest,kind:"stage_key"},owner,403);
+  await read(path+"/relay","POST",{...relayRequest,kind:"commit_key",instance:"invalid"},owner,400);
+  assert.equal(enrollmentCalls,2);
+  await read(path+"/relay","POST",{...relayRequest,kind:"stage_key"},owner);
+  assert.equal(lastEnrollment.kind,"stage_key");
+  assert.equal(lastEnrollment.studio,first.creator.id);
+  assert.equal(lastEnrollment.registered_origin,"https://studio.example.com");
+  await read(path+"/relay","POST",{...relayRequest,kind:"commit_key",instance:"da".repeat(20)},owner);
+  assert.equal(lastEnrollment.kind,"commit_key");
+  assert.equal(lastEnrollment.instance,"da".repeat(20));
   const bootstrapKey = "cafe".repeat(16);
   await read("/v1/creators/relay","POST",relayRequest,"invalid",403);
   await read("/v1/creators/relay","POST",relayRequest,bootstrapKey);
