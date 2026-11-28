@@ -28,7 +28,7 @@ from linux_runtime import (
 from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "4.6.4"
+VERSION = "4.6.5"
 VERSION_LABEL = f"Alpha Version {VERSION.removesuffix('.0')}"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
@@ -693,7 +693,7 @@ function creatorArtwork(url, creator){
 function supportsCinema(creator){
     return Boolean(creator?.vault_url&&creator.cinema_supported===true&&!unreachableStudioOrigins.has(creator.playlist_url));
 }
-function adoptCreators(creators){
+function adoptCreators(creators,renderGuide=true){
     creators=creators.filter(creator=>creator.state!=='offline'&&(creator.state||creator.online!==false));
     allCreators=creators;
     const cinemaCreators=creators.filter(supportsCinema);
@@ -718,7 +718,7 @@ function adoptCreators(creators){
         $('#vault').innerHTML='<span class="empty">No movie libraries are online right now.</span>';
         $('#selection').textContent='';
     }else if(!document.querySelector('.vault-layout').hidden&&!vaultItems.length)studio(selectedCreator);
-    refreshGuideFromStudios();
+    if(renderGuide)refreshGuideFromStudios();
 }
 function updateCinemaStudios(){
     const select=$('#cinema-studio-select');
@@ -794,7 +794,7 @@ function studioGuideRows(creator,value){
                 backdrop_url:creatorArtwork(program.backdrop_url,creator)}))
         })).filter(channel=>channel.stream_url);
 }
-async function scanStudio(creator){
+async function scanStudio(creator,renderGuide=true){
     let channels;
     if(creator.status_url){
         try{
@@ -825,34 +825,35 @@ async function scanStudio(creator){
     channels??=[];
     if(allCreators.some(c=>c.playlist_url===creator.playlist_url)){
         channelsByStudio.set(creator.playlist_url,channels);
-        refreshGuideFromStudios();
+        if(renderGuide)refreshGuideFromStudios();
     }
     return channels;
 }
 async function refreshDirectory(){
     const button=$('#scan-channels'), status=$('#scan-status');
-    button.disabled=true;
-    button.textContent='⌛ SCANNING…';
+    const renderAsDiscovered=!liveChannels.length;
+    button.setAttribute('aria-busy','true');
     status.textContent='Checking worldwide channels…';
     const checked=new Map();
     const check=creator=>{
-        if(!checked.has(creator.playlist_url))checked.set(creator.playlist_url,scanStudio(creator));
+        if(!checked.has(creator.playlist_url))checked.set(creator.playlist_url,scanStudio(creator,renderAsDiscovered));
         return checked.get(creator.playlist_url);
     };
     let local;
-    const localLookup=localJson('/api/local-creator').then(value=>{
+    const localController=new AbortController();
+    const localDeadline=setTimeout(()=>localController.abort(),4500);
+    const localLookup=localJson('/api/local-creator',{signal:localController.signal}).then(value=>{
         local=value.available?value.creator:null;
         if(local){
-            adoptCreators([local,...allCreators.filter(c=>!c.local&&!sameStudio(local,c))]);
+            adoptCreators([local,...allCreators.filter(c=>!c.local&&!sameStudio(local,c))],renderAsDiscovered);
             check(local);
         }
-    }).catch(()=>{});
+    }).catch(()=>{}).finally(()=>clearTimeout(localDeadline));
     let unavailable=false;
     try{
         const remotePromise=publicDirectory().catch(()=>{unavailable=true;return allCreators.filter(c=>!c.local)});
         const remote=await remotePromise;
-        adoptCreators([...(local?[local]:[]),...remote.filter(c=>c.playlist_url&&(!local||!sameStudio(local,c)))]);
-        refreshGuideFromStudios();
+        adoptCreators([...(local?[local]:[]),...remote.filter(c=>c.playlist_url&&(!local||!sameStudio(local,c)))],renderAsDiscovered);
         const pending=allCreators.filter(c=>!c.local);
         let next=0;
         await Promise.all(Array.from({length:Math.min(8,pending.length)},async()=>{
@@ -861,14 +862,15 @@ async function refreshDirectory(){
         await localLookup;
         if(local)await check(local);
         adoptCreators(allCreators);
-        refreshGuideFromStudios();
         if(selectedCreator&&!document.querySelector('.vault-layout').hidden&&Date.now()-vaultLoadedAt>60_000)studio(selectedCreator,true);
         const count=liveChannels.length;
         status.textContent=(count+' online channel'+(count===1?'':'s'))+(unavailable?' • directory unavailable':' • scanned '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}));
         return liveChannels;
+    }catch(_error){
+        status.textContent='Scan could not finish. Try again.';
+        return liveChannels;
     }finally{
-        button.disabled=false;
-        button.textContent='↻ SCAN FOR CHANNELS';
+        button.removeAttribute('aria-busy');
     }
 }
 async function scanChannels(){
@@ -2132,7 +2134,7 @@ CONTROLLER_JS = r'''
 function tvFocusTargets(){let dialog=document.querySelector('dialog[open]'),scope=dialog||document;return[...scope.querySelectorAll('button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(element=>!element.hidden&&element.offsetParent!==null&&getComputedStyle(element).visibility!=='hidden')}
 function tvMoveFocus(direction){if(liveMode&&$('#player').classList.contains('playing')&&!playerMini&&(direction==='up'||direction==='down')){surfChannel(direction==='up'?-1:1);return}let targets=tvFocusTargets(),current=targets.includes(document.activeElement)?document.activeElement:null;if(!targets.length)return;if(!current){targets[0].focus();return}let origin=current.getBoundingClientRect(),ox=origin.left+origin.width/2,oy=origin.top+origin.height/2,best=null,score=Infinity;for(let target of targets){if(target===current)continue;let rect=target.getBoundingClientRect(),dx=rect.left+rect.width/2-ox,dy=rect.top+rect.height/2-oy,primary=direction==='left'?-dx:direction==='right'?dx:direction==='up'?-dy:dy,secondary=direction==='left'||direction==='right'?Math.abs(dy):Math.abs(dx);if(primary<=4)continue;let candidate=primary+secondary*2.25;if(candidate<score){score=candidate;best=target}}if(best){best.focus({preventScroll:true});best.scrollIntoView({behavior:'smooth',block:'nearest',inline:'nearest'})}}
 function tvBack(){let dialog=document.querySelector('dialog[open]');if(dialog){dialog.close();return}if($('#player').classList.contains('playing')){closeVideoView();return}if(!$('#viewer-dismiss').hidden){setNavigation(false);$('#menu-toggle').focus();return}showScreen('home');document.querySelector('[data-screen="home"]')?.focus()}
-document.addEventListener('keydown',event=>{let editable=event.target.matches?.('input,textarea,select,[contenteditable="true"]');if(editable&&event.key!=='Escape')return;let direction={ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down'}[event.key];if(direction){event.preventDefault();tvMoveFocus(direction)}else if(event.key==='Escape'||(event.key.toLowerCase()==='b'&&activeMedia?.cinema)){event.preventDefault();tvBack()}});
+document.addEventListener('keydown',event=>{let editable=event.target.matches?.('input,textarea,[contenteditable="true"]');if(event.target.matches?.('select')||(editable&&event.key!=='Escape'))return;let direction={ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down'}[event.key];if(direction){event.preventDefault();tvMoveFocus(direction)}else if(event.key==='Escape'||(event.key.toLowerCase()==='b'&&activeMedia?.cinema)){event.preventDefault();tvBack()}});
 let tvGamepadState={},tvGamepadRepeat=0,tvGamepadFrame=0;function pollTvGamepads(now){tvGamepadFrame=0;let pad=[...(navigator.getGamepads?.()||[])].find(Boolean);if(pad){let state={up:pad.buttons[12]?.pressed||pad.axes[1]<-.55,down:pad.buttons[13]?.pressed||pad.axes[1]>.55,left:pad.buttons[14]?.pressed||pad.axes[0]<-.55,right:pad.buttons[15]?.pressed||pad.axes[0]>.55,activate:pad.buttons[0]?.pressed,back:pad.buttons[1]?.pressed};for(let action of Object.keys(state)){let repeatable=['up','down','left','right'].includes(action),repeat=repeatable&&state[action]&&tvGamepadState[action]&&now-tvGamepadRepeat>190;if(state[action]&&(!tvGamepadState[action]||repeat)){showPlayerControls();if(repeatable){tvMoveFocus(action);tvGamepadRepeat=now}else if(action==='activate')document.activeElement?.click();else tvBack()}}tvGamepadState=state}else tvGamepadState={};startTvGamepads()}
 function startTvGamepads(){
     if(!tvGamepadFrame&&!document.hidden&&Array.from(navigator.getGamepads?.()||[]).some(Boolean)){
@@ -2351,7 +2353,7 @@ HTML = HTML.replace('</section><div class="section-heading"><h2>CREATOR STUDIOS'
 HTML = HTML.replace('<div class="section-heading"><h2>CREATOR STUDIOS', '<div class="section-heading" data-section-block="cinema" hidden><h2>CREATOR STUDIOS', 1)
 HTML = HTML.replace('<div id="creators" class="creators">', '<div id="creators" class="creators" data-section-block="cinema" hidden>', 1)
 HTML = HTML.replace('<div class="section-heading"><h2 class="cyan">LIVE CHANNELS', '<div class="section-heading" data-section-block="live" hidden><h2 class="cyan">LIVE CHANNELS', 1)
-HTML = HTML.replace('<div id="live" class="live"></div>', '<section id="live-stage" class="live-stage" data-section-block="live" hidden><div id="mini-player-slot" class="mini-player-slot"><div id="mini-player-poster" class="mini-player-poster"><span>SELECT A CHANNEL FROM THE GUIDE</span></div></div><div id="live" class="live"></div></section><div class="guide-toolbar" data-section-block="live" hidden><button id="scan-channels">↻ SCAN CHANNELS</button><span id="scan-status">Channels scan automatically.</span><div class="guide-window-controls"><button id="guide-earlier">‹ EARLIER</button><button id="guide-now">NOW</button><button id="guide-later">LATER ›</button><b id="guide-window-label">ON NOW</b></div><label>⌕ <input id="guide-search" type="search" placeholder="Search guide"></label></div><div id="studio-filters" class="studio-filters" data-section-block="live" hidden></div><div id="guide-board" data-section-block="live" hidden><div id="tv-guide" class="tv-guide"></div></div>', 1)
+HTML = HTML.replace('<div id="live" class="live"></div>', '<section id="live-stage" class="live-stage" data-section-block="live" hidden><div id="mini-player-slot" class="mini-player-slot"><div id="mini-player-poster" class="mini-player-poster"><span>SELECT A CHANNEL FROM THE GUIDE</span></div></div><div id="live" class="live"></div></section><div class="guide-toolbar" data-section-block="live" hidden><button id="scan-channels" type="button">↻ Scan for Channels</button><span id="scan-status" role="status">Channels scan automatically.</span><div class="guide-window-controls"><button id="guide-earlier">‹ EARLIER</button><button id="guide-now">NOW</button><button id="guide-later">LATER ›</button><b id="guide-window-label">ON NOW</b></div><label>⌕ <input id="guide-search" type="search" placeholder="Search guide"></label></div><div id="studio-filters" class="studio-filters" data-section-block="live" hidden></div><div id="guide-board" data-section-block="live" hidden><div id="tv-guide" class="tv-guide"></div></div>', 1)
 HTML = HTML.replace('placeholder="Search guide"></label></div>', 'placeholder="Search guide"></label><select id="guide-sort" aria-label="Sort live channels"><option value="channel">Channel order</option><option value="rating">Rating · lowest first</option></select></div>', 1)
 HTML = HTML.replace('<div id="tv-guide"', '<div id="compact-guide-head" class="compact-guide-head"><span>Channel</span><span>On Now</span><span>Up Next</span><span>Later</span><span>Later 2</span><span>Later 3</span><span>Later 4</span><span>Later 5</span><span>Later 6</span><span></span></div><div id="tv-guide"', 1)
 HTML = HTML.replace('</head>', '<style>#guide-sort{max-width:100%;padding:8px 10px;color:#eaf7ff;background:#0a1024;border:1px solid #22e7ff;border-radius:8px;font:inherit}.guide-toolbar{flex-wrap:wrap}</style></head>', 1)

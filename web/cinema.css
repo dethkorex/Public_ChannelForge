@@ -775,7 +775,24 @@ main.wrap .home-panels { grid-template-columns: minmax(0,1.13fr) minmax(0,1fr); 
 .viewer-shell :is(button,[data-screen]):focus-visible{outline:2px solid #78f6ff;outline-offset:2px}
 .viewer-shell :is(button,[data-screen]):active{filter:brightness(1.22)}
 .viewer-shell .player-quality{display:grid;gap:3px;font-size:12px;color:#c6e3f2}
-.viewer-shell .player-quality select{min-height:34px;padding:4px 8px;color:#f5faff;background:#11233a;border:1px solid #40cce8;border-radius:6px}
+.viewer-shell :is(.player-quality select, #guide-sort){
+    -webkit-appearance:none;
+    appearance:none;
+    color-scheme:dark;
+    min-height:34px;
+    padding:4px 27px 4px 8px;
+    color:#f5faff;
+    background:#11233a no-repeat;
+    background-image:linear-gradient(45deg,transparent 50%,#d5effb 50%),linear-gradient(135deg,#d5effb 50%,transparent 50%);
+    background-position:right 13px center,right 8px center;
+    background-size:5px 5px;
+    border:1px solid #40cce8;
+    border-radius:6px;
+}
+.viewer-shell :is(.player-quality select, #guide-sort):focus-visible{outline:2px solid #78f6ff;outline-offset:2px}
+.viewer-shell :is(.player-quality select, #guide-sort) option{color:#f5faff;background-color:#11233a}
+.viewer-shell #scan-channels[aria-busy="true"]{cursor:progress}
+.viewer-shell #scan-status{inline-size:clamp(142px,14vw,226px);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .viewer-shell .player-hud-actions{flex-wrap:wrap}
 .viewer-shell .player-volume{min-width:90px}
 .viewer-shell .player-volume output{color:#eaf6ff}
