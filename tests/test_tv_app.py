@@ -206,7 +206,11 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("session.commit(result.getIntentSender())", activity)
         self.assertNotIn("Intent.ACTION_VIEW", activity)
         self.assertIn("MessageDigest.isEqual(checksum, digest.digest())", updater)
-        self.assertIn("Arrays.equals(expected, signatures(candidate))", updater)
+        self.assertIn("int flags = PackageManager.GET_SIGNATURES", updater)
+        self.assertIn("flags |= PackageManager.GET_SIGNING_CERTIFICATES", updater)
+        self.assertIn("Signature[] expected = signatures(installed)", updater)
+        self.assertIn("Signature[] actual = signatures(candidate)", updater)
+        self.assertIn("Arrays.equals(expected, actual)", updater)
         self.assertLess(updater.index("verifyPackage(context, apk)"), updater.index("return stagePackage("))
 
     def test_roku_is_viewer_only_with_fallback_pairing_and_branding(self):
