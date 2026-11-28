@@ -108,7 +108,14 @@ class WindowsInstallerTests(unittest.TestCase):
         launch.assert_called_once_with([str(target)], cwd=str(folder))
 
     def test_silent_update_replaces_both_installed_apps(self):
-        folder = Path(tempfile.mkdtemp(prefix="channel-forge-suite-update-"))
+        folder = self.root / "ChannelForge"
+        folder.mkdir()
+        studio_data = Path(os.environ["LOCALAPPDATA"]) / "Public_ChannelForge"
+        studio_data.mkdir(parents=True)
+        identity = studio_data / "community-relay-identity"
+        enrollment = studio_data / "managed-community-relay.json"
+        identity.write_bytes(b"fixture-key")
+        enrollment.write_bytes(b'{"creator_id":"ab0123456789abcd"}')
         creator = folder / "ChannelForge_Creator.exe"
         tv = folder / "ChannelForge_TV.exe"
         creator.write_bytes(b"old-creator")
@@ -122,6 +129,8 @@ class WindowsInstallerTests(unittest.TestCase):
             windows_installer.apply_silent_update(tv, 44, "tv")
         self.assertEqual(creator.read_bytes(), b"new-creator")
         self.assertEqual(tv.read_bytes(), b"new-tv")
+        self.assertEqual(identity.read_bytes(), b"fixture-key")
+        self.assertEqual(enrollment.read_bytes(), b'{"creator_id":"ab0123456789abcd"}')
 
     def test_failed_suite_update_rolls_back_both_apps_and_cleans_temporary_files(self):
         folder = self.root / "installed"

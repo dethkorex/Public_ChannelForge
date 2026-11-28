@@ -1183,6 +1183,69 @@ class CoreTests(unittest.TestCase):
         self.assertEqual([call.args[:2] for call in publish.call_args_list],
                          [("PUT", f"/v1/creators/{studio_id}")] * 2)
 
+    def test_studio_restart_reuses_saved_vps_identity_when_funnel_is_needed(self):
+        studio_id = "ab0123456789abcd"
+        origin = f"https://relay.example.ts.net/studio/{studio_id}"
+        secret = "fixture-directory-key"
+        host_key = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + bytes(32)
+        relay = {"origin": origin, "ssh_host": "vps.example.net", "ssh_user": "studio", "ssh_port": 18088,
+                 "remote_port": 18101, "host_key": "ssh-ed25519 " + app.base64.b64encode(host_key).decode("ascii"),
+                 "funnel_host": "relay.example.ts.net", "funnel_port": 8443}
+        enrollment = app.DATA_DIR / "managed-community-relay.json"
+        identity = app.DATA_DIR / "community-relay-identity"
+        for path in (enrollment, identity):
+            self.addCleanup(path.unlink, missing_ok=True)
+        app.atomic_json(enrollment, {"creator_id": studio_id, "profile": relay})
+        identity.write_bytes(b"fixture-existing-ssh-key")
+        app.atomic_json(app.CONFIG_FILE, {"public_url": origin, "community_relay_origin": origin,
+                                         "creator_id": studio_id, "creator_key": secret,
+                                         "creator_profile": {"name": "Existing Studio"}, "managed_relay": True})
+        saved_enrollment = enrollment.read_bytes()
+        fallback = mock.Mock()
+        fallback.getsockname.return_value = (app.HOST, 19000)
+        process = mock.Mock(poll=mock.Mock(return_value=None))
+        media_proof = app.hashlib.sha256(app.RELAY_MEDIA_SAMPLE).hexdigest()
+        with (
+            mock.patch.object(app, "REGISTERED_ORIGIN", ""),
+            mock.patch.object(app, "SHARING_STATUS", "idle"),
+            mock.patch.object(app, "COMMUNITY_RELAY", None),
+            mock.patch.object(app, "PUBLIC_MEDIA_SERVER", mock.Mock(server_port=8790)),
+            mock.patch.object(app, "RELAY_JOB", mock.Mock()),
+            mock.patch.object(app, "HEARTBEAT_STATUS", {"failures": 0}),
+            mock.patch.object(app, "retire_orphaned_relay"),
+            mock.patch.object(app, "install_default_assets"),
+            mock.patch.object(app, "generate_exports"),
+            mock.patch.object(app, "start_public_media_server"),
+            mock.patch.object(app, "stop_legacy_relay"),
+            mock.patch.object(app, "openssh_tool", return_value="ssh") as openssh,
+            mock.patch.object(app, "start_relay_tls_bridge", return_value=fallback) as bridge,
+            mock.patch.object(app, "set_community_relay") as activate,
+            mock.patch.object(app.subprocess, "Popen", side_effect=[mock.Mock(poll=mock.Mock(return_value=1)), process]) as ssh,
+            mock.patch.object(app, "directory_request", side_effect=[{"instance": app.RELAY_INSTANCE},
+                               {"sha256": media_proof}, {"creator": {"id": studio_id}}]) as directory,
+            mock.patch.object(app.PUBLISH_CHANGED, "wait", side_effect=InterruptedError),
+        ):
+            app.ensure_files()
+            with self.assertRaises(InterruptedError):
+                app.restore_public_sharing()
+            self.assertEqual(app.SHARING_STATUS, "live")
+            self.assertEqual(app.REGISTERED_ORIGIN, origin)
+        openssh.assert_called_once_with("ssh")
+        bridge.assert_called_once_with(relay["funnel_host"], relay["funnel_port"])
+        self.assertEqual(ssh.call_args_list[0].args[0][-3:], ["-p", "18088", "vps.example.net"])
+        self.assertEqual(ssh.call_args_list[1].args[0][-3:], ["-o", "HostKeyAlias=[vps.example.net]:18088", app.HOST])
+        for launch in ssh.call_args_list:
+            command = launch.args[0]
+            self.assertEqual(command[command.index("-i") + 1], str(identity))
+            self.assertEqual(command[command.index("-R") + 1], "127.0.0.1:18101:127.0.0.1:8790")
+        self.assertIs(activate.call_args.args[0].process, process)
+        self.assertEqual([call.args[:2] for call in directory.call_args_list],
+                         [("POST", f"/v1/creators/{studio_id}/relay")] * 2 + [("PUT", f"/v1/creators/{studio_id}")])
+        self.assertTrue(all(call.args[3] == secret for call in directory.call_args_list))
+        self.assertEqual(enrollment.read_bytes(), saved_enrollment)
+        self.assertEqual(identity.read_bytes(), b"fixture-existing-ssh-key")
+        self.assertEqual(app.config()["public_url"], origin)
+
     def test_published_studio_migrates_automatically_and_keeps_its_live_route_on_failure(self):
         origin = "https://old.app.lhr.life"
         profile = {"name": "Test Studio"}

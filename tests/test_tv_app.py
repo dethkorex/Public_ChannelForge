@@ -72,6 +72,12 @@ class TvAppTests(unittest.TestCase):
             installed = root / "my ChannelForge"
             source.mkdir()
             installed.mkdir()
+            studio_data = root / ".config" / "public-channelforge"
+            studio_data.mkdir(parents=True)
+            identity = studio_data / "community-relay-identity"
+            enrollment = studio_data / "managed-community-relay.json"
+            identity.write_bytes(b"fixture-key")
+            enrollment.write_bytes(b'{"creator_id":"ab0123456789abcd"}')
             for name in linux_runtime.LINUX_APP_FILES:
                 if name in ("web", "plugins", "assets"):
                     (source / name).mkdir()
@@ -86,13 +92,17 @@ class TvAppTests(unittest.TestCase):
             cache.mkdir()
             (cache / "linux_runtime.cpython-311.pyc").touch()
             (cache / "personal.cpython-311.pyc").touch()
-            linux_runtime.install_linux_files(source, installed)
+            with mock.patch.dict("os.environ", {"XDG_CONFIG_HOME": str(studio_data.parent),
+                                                "PUBLIC_CHANNELFORGE_HOME": str(studio_data)}):
+                linux_runtime.install_linux_files(source, installed)
             self.assertEqual((installed / "ChannelForge_TV.py").read_text(), "new")
             self.assertEqual((installed / "Public_ChannelForge.py").read_text(), "new")
             self.assertEqual((installed / "personal.txt").read_text(), "keep")
             self.assertFalse((installed / "web" / "obsolete.txt").exists())
             self.assertEqual([entry.name for entry in cache.iterdir()], ["personal.cpython-311.pyc"])
-            self.assertEqual(sorted(path.name for path in root.iterdir()), ["my ChannelForge", "new"])
+            self.assertEqual(sorted(path.name for path in root.iterdir()), [".config", "my ChannelForge", "new"])
+            self.assertEqual(identity.read_bytes(), b"fixture-key")
+            self.assertEqual(enrollment.read_bytes(), b'{"creator_id":"ab0123456789abcd"}')
             command = linux_runtime.linux_install_command(root / "update.tar.gz", installed)
             self.assertIn("--replace", command)
             self.assertIn("trap", command)
