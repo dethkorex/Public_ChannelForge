@@ -208,8 +208,9 @@ final class FireTvUpdate {
     @SuppressWarnings("deprecation")
     private void verifyPackage(Context context, File apk) throws Exception {
         PackageManager manager = context.getPackageManager();
-        int flags = Build.VERSION.SDK_INT >= 28
-                ? PackageManager.GET_SIGNING_CERTIFICATES : PackageManager.GET_SIGNATURES;
+        // Some Fire OS versions only collect archive certificates when GET_SIGNATURES is set.
+        int flags = PackageManager.GET_SIGNATURES;
+        if (Build.VERSION.SDK_INT >= 28) flags |= PackageManager.GET_SIGNING_CERTIFICATES;
         PackageInfo candidate = manager.getPackageArchiveInfo(apk.getAbsolutePath(), flags);
         if (candidate == null || !context.getPackageName().equals(candidate.packageName)
                 || !version.equals(candidate.versionName)) {
@@ -219,15 +220,22 @@ final class FireTvUpdate {
         if (versionCode <= BuildConfig.VERSION_CODE) throw new IOException("The APK is not newer than the installed build.");
         PackageInfo installed = manager.getPackageInfo(context.getPackageName(), flags);
         Signature[] expected = signatures(installed);
-        if (expected == null || expected.length == 0 || !Arrays.equals(expected, signatures(candidate))) {
+        Signature[] actual = signatures(candidate);
+        if (expected == null || expected.length == 0 || actual == null || actual.length == 0) {
+            throw new IOException("Could not read the update signing certificate. Install the official Fire TV APK to update.");
+        }
+        if (!Arrays.equals(expected, actual)) {
             throw new IOException("This copy has a different signing key. Install the official Fire TV APK to enable updates.");
         }
     }
 
     @SuppressWarnings("deprecation")
     private static Signature[] signatures(PackageInfo info) {
-        if (Build.VERSION.SDK_INT < 28) return info.signatures;
-        return info.signingInfo == null ? null : info.signingInfo.getApkContentsSigners();
+        if (Build.VERSION.SDK_INT >= 28 && info.signingInfo != null) {
+            Signature[] signers = info.signingInfo.getApkContentsSigners();
+            if (signers != null && signers.length > 0) return signers;
+        }
+        return info.signatures;
     }
 
     private static int stagePackage(PackageInstaller installer, String packageName, File apk) throws IOException {

@@ -37,6 +37,7 @@ import android.util.LruCache;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.*;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
@@ -4121,6 +4122,7 @@ public class MainActivity extends Activity {
     private void failRecovery(String reason) {
         recovering = false;
         playbackFailed = true;
+        updatePlaybackScreenAwake();
         showBuffering(phoneLayout ? reason + "." : reason + ". Press OK to retry or Back for the guide.", false);
     }
 
@@ -4430,11 +4432,13 @@ public class MainActivity extends Activity {
     }
 
     private void updatePlaybackScreenAwake() {
-        if (!phoneLayout || video == null || player == null) return;
-        int state = player.getPlaybackState();
-        video.setKeepScreenOn(resumed && player.getPlayWhenReady()
+        int state = player == null ? Player.STATE_IDLE : player.getPlaybackState();
+        boolean keepAwake = resumed && !guideVisible && !ejectingTape && !playbackFailed && player != null
+                && player.getPlayWhenReady()
                 && player.getPlaybackSuppressionReason() == Player.PLAYBACK_SUPPRESSION_REASON_NONE
-                && (state == Player.STATE_BUFFERING || state == Player.STATE_READY));
+                && (state == Player.STATE_BUFFERING || state == Player.STATE_READY);
+        int flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        getWindow().setFlags(keepAwake ? flag : 0, flag);
     }
 
     @Override protected void onResume() {
@@ -4595,6 +4599,7 @@ public class MainActivity extends Activity {
         video.setFocusable(false);
         video.setVisibility(View.GONE);
         guideVisible = true;
+        updatePlaybackScreenAwake();
         hideLiveControls();
         guide.setVisibility(View.VISIBLE);
         if (touchGuideButton != null) touchGuideButton.setVisibility(View.GONE);
