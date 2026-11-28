@@ -1009,8 +1009,9 @@ sub playChannel(index as integer)
   showChannelBanner(item)
 end sub
 sub videoStateChanged()
-  if m.guide.visible or m.ejectingMovie or m.resolvingLive or m.resolvingMovie or m.retryPending then return
   state = m.video.state
+  m.video.disableScreenSaver = m.video.visible and not m.guide.visible and not m.ejectingMovie and (state = "playing" or state = "buffering")
+  if m.guide.visible or m.ejectingMovie or m.resolvingLive or m.resolvingMovie or m.retryPending then return
   if m.diagnosticClock <> invalid
     if state = "buffering" and m.diagnosticFirst >= 0
       if m.diagnosticBuffer = invalid

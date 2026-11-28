@@ -62,7 +62,7 @@ sub main()
   verify(movieResumePosition(bookmarks, "new film", []) = 0, "a completed movie starts over")
 
   m.guide = {visible: false}
-  m.video = {state: "buffering", content: {title: "QA"}, position: 15}
+  m.video = {state: "buffering", content: {title: "QA"}, position: 15, visible: true}
   m.bufferTitle = {} : m.bufferDetails = {} : m.bufferPanel = {}
   m.progressTimer = {} : m.liveRetryTimer = {}
   m.programBoundaryTimer = {} : m.upcomingTimer = {}
@@ -72,6 +72,7 @@ sub main()
   m.movieRetries = 0 : m.moviePosition = 15
   videoStateChanged()
   verify(m.waitingForVideo and m.progressTimer.control = "start", "post-start buffering arms a deadline")
+  verify(m.video.disableScreenSaver, "movie buffering keeps the display awake")
   m.lastProgress = fakeClock(21)
   videoStateChanged()
   m.video.state = "playing"
@@ -90,6 +91,7 @@ sub main()
   m.video.state = "paused"
   videoStateChanged()
   verify(not m.waitingForVideo and m.progressTimer.control = "stop", "pause cannot trigger stall recovery")
+  verify(not m.video.disableScreenSaver, "pause releases the display")
   m.video.state = "playing" : m.video.position = 12 : m.moviePosition = 12
   videoStateChanged()
   m.lastProgress = fakeClock(18)
@@ -124,6 +126,8 @@ sub main()
   m.lastProgress = elapsed
   m.liveItem = {title: "Live QA"}
   m.liveRetries = 0 : m.activeMovie = invalid
+  videoStateChanged()
+  verify(m.video.disableScreenSaver, "live playback keeps the display awake")
   checkPlaybackProgress()
   verify(m.liveRetries = 1 and m.retryPending, "silent stall while playing triggers a bounded live retry")
   m.retryPending = false : m.guide.visible = true

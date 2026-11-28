@@ -522,8 +522,8 @@ public class MainActivity extends Activity {
         else if (!phoneLayout) updateButton.requestFocus();
         player.addListener(new Player.Listener() {
             @Override public void onEvents(Player source, Player.Events events) {
-                if (events.containsAny(Player.EVENT_PLAY_WHEN_READY_CHANGED, Player.EVENT_PLAYBACK_STATE_CHANGED,
-                        Player.EVENT_PLAYBACK_SUPPRESSION_REASON_CHANGED)) updatePlaybackScreenAwake();
+                if (events.containsAny(Player.EVENT_PLAY_WHEN_READY_CHANGED, Player.EVENT_PLAYBACK_STATE_CHANGED))
+                    updatePlaybackScreenAwake();
             }
 
             @Override public void onPlaybackStateChanged(int state) {
@@ -4002,6 +4002,7 @@ public class MainActivity extends Activity {
     private void recover(String reason, boolean deadlineExpired) {
         if (guideVisible || ejectingTape || playbackFailed || recovering) return;
         recovering = true;
+        updatePlaybackScreenAwake();
         finishRebuffer();
         clearPlaybackDeadline();
         video.removeCallbacks(continueLive);
@@ -4433,10 +4434,10 @@ public class MainActivity extends Activity {
 
     private void updatePlaybackScreenAwake() {
         int state = player == null ? Player.STATE_IDLE : player.getPlaybackState();
-        boolean keepAwake = resumed && !guideVisible && !ejectingTape && !playbackFailed && player != null
-                && player.getPlayWhenReady()
-                && player.getPlaybackSuppressionReason() == Player.PLAYBACK_SUPPRESSION_REASON_NONE
+        boolean requestingVideo = player != null && player.getPlayWhenReady()
                 && (state == Player.STATE_BUFFERING || state == Player.STATE_READY);
+        boolean keepAwake = resumed && !guideVisible && !ejectingTape && !playbackFailed
+                && (recovering || requestingVideo);
         int flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
         getWindow().setFlags(keepAwake ? flag : 0, flag);
     }

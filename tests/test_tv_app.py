@@ -212,6 +212,9 @@ class TvAppTests(unittest.TestCase):
         self.assertIn("Signature[] actual = signatures(candidate)", updater)
         self.assertIn("Arrays.equals(expected, actual)", updater)
         self.assertLess(updater.index("verifyPackage(context, apk)"), updater.index("return stagePackage("))
+        self.assertIn("if (isNewer(apiVersion, BuildConfig.VERSION_NAME)) return api;", updater)
+        self.assertIn('if (isNewer(manifest.getString("tag_name").substring(1), apiVersion)) return manifest;', updater)
+        self.assertIn("(recovering || requestingVideo)", activity)
 
     def test_roku_is_viewer_only_with_fallback_pairing_and_branding(self):
         root = Path(__file__).resolve().parents[1]
@@ -284,10 +287,11 @@ class TvAppTests(unittest.TestCase):
         audio_end = tv.HTML.index("function minimizePlayer(", audio_start)
         setup = '''
 const assert = require('node:assert/strict');
-const handlers = {}, retries = [], messages = [];
+const handlers = {}, retries = [], messages = [], awake = [];
 const video = {currentTime: 10, volume: 0.8, addEventListener: (event, fn) => handlers[event] = fn};
 const $ = () => video, programAt = () => null, setBuffering = () => {}, armPlaybackDeadline = () => {};
 const advanceLive = failed => retries.push(failed), setPlayerState = message => messages.push(message);
+const setPlaybackAwake = active => awake.push(active);
 let now = 100, playingSince = 0, lastPlaybackTime = -1, playbackTimer, liveBoundaryTimer, playbackGeneration = 1;
 let liveRetries = 2, movieRetries = 2, liveMode = true, activeStreamUrl = 'fixture', liveChannels = [];
 let liveStallStarted = 0, recentLiveStalls = [], hls = {};
@@ -335,6 +339,21 @@ for (const [duration, expectedRetries] of [[100, 2], [2100, 2], [2400, 2], [2900
     assert.equal(retries.length, expectedRetries);
 }
 assert.equal(retries.at(-1), true);
+video.paused = false; video.ended = false;
+handlers.playing();
+assert.equal(awake.at(-1), true, 'live playback keeps the display awake');
+liveMode = false;
+handlers.play();
+assert.equal(awake.at(-1), true, 'movie playback keeps the display awake');
+video.paused = true;
+handlers.pause();
+assert.equal(awake.at(-1), false, 'a paused movie releases the display');
+video.paused = false;
+handlers.playing();
+assert.equal(awake.at(-1), true, 'resuming restores the display request');
+video.ended = true;
+handlers.ended();
+assert.equal(awake.at(-1), false, 'completed playback releases the display');
 (async () => {
     const channel = {id:'channel', studio_id:'studio'};
     assert.equal((await refreshTunedChannel(channel)).stream_url, 'new');
@@ -349,6 +368,23 @@ assert.equal(retries.at(-1), true);
                                + tv.HTML[audio_start:audio_end] + tv.HTML[start:end] + checks, encoding="utf-8")
             checked = subprocess.run(["node", str(program)], encoding="utf-8", capture_output=True, timeout=30)
         self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_desktop_awake_request_releases_on_pause_and_shutdown(self):
+        backend = "inhibit_windows_playback" if tv.sys.platform == "win32" else "inhibit_linux_playback"
+        release = mock.Mock()
+        with mock.patch.object(tv, backend, return_value=release) as inhibit:
+            controls = tv.DesktopControls(0)
+            controls.set_playback_awake(True)
+            controls.set_playback_awake(True)
+            inhibit.assert_called_once()
+            controls.set_playback_awake(False)
+            controls.set_playback_awake(False)
+            release.assert_called_once()
+            controls.set_playback_awake(True)
+            controls._close()
+            controls.set_playback_awake(True)
+            self.assertEqual(inhibit.call_count, 2)
+            self.assertEqual(release.call_count, 2)
 
     def test_tv_scans_online_channels_into_guide_and_keeps_home_focused(self):
         self.assertIn('id="scan-channels"', tv.HTML)

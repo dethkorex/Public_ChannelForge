@@ -1,8 +1,8 @@
 title=ChannelForge TV
 major_version=4
 minor_version=5
-build_version=8
-channelforge_version=4.5.8
+build_version=9
+channelforge_version=4.5.9
 supports_input_launch=1
 ui_resolutions=fhd
 mm_icon_focus_fhd=pkg:/images/channel-icon-fhd.png

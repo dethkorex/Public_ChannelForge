@@ -25,7 +25,7 @@ from linux_runtime import apply_linux_update, can_apply_linux_update, clean_linu
 from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "4.5.8"
+VERSION = "4.5.9"
 VERSION_LABEL = f"Alpha Version {VERSION.removesuffix('.0')}"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
@@ -1372,6 +1372,7 @@ function setPlayerState(message,error=false,canRetry=error){
     state.textContent=message;
     state.classList.toggle('error',error);
     if(!error)return;
+    setPlaybackAwake(false);
     if(activeMedia?.cinema&&!activeMedia.ejecting){clearCinemaTape();activeMedia.transportPending=false}
     clearTimeout(playbackTimer);playbackTimer=null;
     setBuffering(true,message,false);
@@ -1394,6 +1395,16 @@ function showChannelOffline(){
     setPlayerState('This channel is offline.',true);
 }
 let playbackGeneration=0, liveRetryTimer, liveBoundaryTimer, liveRetries=0, movieRetries=0, playbackTimer, lastPlaybackTime=-1, playingSince=0;
+let playbackAwake=false, playbackAwakeUpdate=Promise.resolve();
+function setPlaybackAwake(active){
+    if(playbackAwake===active)return;
+    playbackAwake=active;
+    syncPlaybackAwake();
+}
+function syncPlaybackAwake(){
+    playbackAwakeUpdate=playbackAwakeUpdate.then(()=>window.pywebview?.api?.set_playback_awake?.(playbackAwake)).catch(()=>{});
+}
+window.addEventListener('pywebviewready',syncPlaybackAwake);
 let usingPreferredRelay=false, skipPreferredRelay=false;
 let liveStallStarted=0, recentLiveStalls=[];
 const newPlaybackTrace=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('');
@@ -1583,6 +1594,7 @@ function play(url,media=null,continuing=false){
     const start=()=>{
         if(generation!==playbackGeneration||activeMedia.ejecting)return;
         if(activeMedia.transportPending){activeMedia.startAfterTransport=start;return}
+        setPlaybackAwake(true);
         v.play().catch(error=>{
             if(generation===playbackGeneration)setPlayerState(error.message||'PRESS PLAY TO START',true);
         });
@@ -1699,6 +1711,7 @@ function minimizePlayer(){
     showScreen('live');dockMiniPlayer();setPlayerState('MINI PLAYER · BROWSE THE GUIDE');
 }
 function stopPlayer(){
+    setPlaybackAwake(false);
     window.dispatchEvent(new Event('cf-playback-stop'));
     releaseLivePlayback();
     saveCurrentMovie();
@@ -1720,6 +1733,11 @@ function stopPlayer(){
 }
 {
     const video=$('#player');
+    const holdScreen=()=>{
+        if(activeStreamUrl&&!activeMedia?.ejecting&&!video.paused&&!video.ended)setPlaybackAwake(true);
+    };
+    video.addEventListener('play',holdScreen);
+    video.addEventListener('playing',holdScreen);
     video.addEventListener('seeking',()=>liveEdge(video));
     video.addEventListener('seeked',()=>{
         lastPlaybackTime=-1;
@@ -1783,9 +1801,10 @@ function stopPlayer(){
             setBuffering(false);setPlayerState('Broadcast finished. Return to the guide.',true,false);
         }else if(liveMode)advanceLive(Boolean(activeMedia?.channel?.continuous_url));
         else if(activeMedia?.cinema){
+            setPlaybackAwake(false);
             activeMedia.finished=true;
             closeVideoView();
-        }
+        }else setPlaybackAwake(false);
     });
     video.addEventListener('error',()=>{
         if(video!==$('#player')||!activeStreamUrl)return;
@@ -1806,6 +1825,7 @@ function stopPlayer(){
     video.addEventListener('pause',()=>{
         playingSince=0;
         if(video===$('#player')&&liveMode&&!video.ended&&video.readyState>=2&&video.classList.contains('playing'))video.play().catch(()=>{});
+        else if(!liveMode&&video.paused)setPlaybackAwake(false);
     });
 }
 $('#scan-channels').onclick=()=>scanChannels();
@@ -2057,6 +2077,7 @@ function closeVideoView(){
             if(media.ejecting)return;
             saveCurrentMovie();
             media.ejecting=true;
+            setPlaybackAwake(false);
             $('#player').pause();
             animateCinemaTape(false,media.movie,async()=>{
                 if(activeMedia!==media)return;
@@ -2642,6 +2663,8 @@ class DesktopControls:
         self._player = None
         self._lock = threading.Lock()
         self._fullscreen = fullscreen
+        self._release_playback_inhibition = None
+        self._closing = False
         self.health = {}
 
     def tv_fullscreen(self) -> bool:
@@ -2658,6 +2681,19 @@ class DesktopControls:
                 self._fullscreen = active
             return self._fullscreen
 
+    def set_playback_awake(self, active: bool) -> None:
+        with self._lock:
+            if active is True and not self._closing:
+                if self._release_playback_inhibition is None:
+                    if sys.platform == "win32":
+                        self._release_playback_inhibition = inhibit_windows_playback()
+                    elif sys.platform.startswith("linux"):
+                        self._release_playback_inhibition = inhibit_linux_playback()
+            elif self._release_playback_inhibition is not None:
+                release = self._release_playback_inhibition
+                self._release_playback_inhibition = None
+                release()
+
     def play_in_linux_player(self, url: str, live: bool) -> dict:
         player = shutil.which("mpv") if sys.platform.startswith("linux") else None
         if not player:
@@ -2667,12 +2703,14 @@ class DesktopControls:
             if not re.fullmatch(r"/(?:live|vault)/[a-zA-Z0-9_-]+\.m3u8", urllib.parse.urlsplit(url).path):
                 raise ValueError("The selection is not a ChannelForge stream.")
             args = [player, "--no-config", "--no-terminal", "--ytdl=no", "--network-timeout=12",
-                    "--force-window=yes", "--title=ChannelForge TV"]
+                    "--stop-screensaver=yes", "--force-window=yes", "--title=ChannelForge TV"]
             if live:
                 args.extend(["--input-default-bindings=no", "--osc=no"])
             source = f"http://127.0.0.1:{self._port}/stream?" + urllib.parse.urlencode({"url": url})
             with self._lock:
                 self._stop_player()
+                if self._closing:
+                    return {"error": "ChannelForge TV is closing"}
                 self._player = subprocess.Popen([*args, "--", source], stdin=subprocess.DEVNULL,
                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, TypeError, ValueError) as exc:
@@ -2682,6 +2720,82 @@ class DesktopControls:
     def _stop_player(self):
         if self._player is not None and self._player.poll() is None:
             self._player.terminate()
+
+    def _close(self) -> None:
+        with self._lock:
+            self._closing = True
+            self._stop_player()
+        self.set_playback_awake(False)
+
+
+def inhibit_windows_playback():
+    import ctypes
+    from ctypes import wintypes
+
+    class DetailedReason(ctypes.Structure):
+        _fields_ = [("module", wintypes.HMODULE), ("reason_id", wintypes.ULONG),
+                    ("string_count", wintypes.ULONG), ("strings", ctypes.POINTER(wintypes.LPWSTR))]
+
+    class Reason(ctypes.Union):
+        _fields_ = [("text", wintypes.LPWSTR), ("detail", DetailedReason)]
+
+    class ReasonContext(ctypes.Structure):
+        _fields_ = [("version", wintypes.ULONG), ("flags", wintypes.DWORD), ("reason", Reason)]
+
+    kernel = ctypes.WinDLL("kernel32")
+    kernel.PowerCreateRequest.argtypes = [ctypes.POINTER(ReasonContext)]
+    kernel.PowerCreateRequest.restype = wintypes.HANDLE
+    kernel.PowerSetRequest.argtypes = kernel.PowerClearRequest.argtypes = [wintypes.HANDLE, ctypes.c_int]
+    kernel.PowerSetRequest.restype = kernel.PowerClearRequest.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    context = ReasonContext(version=0, flags=1, reason=Reason(text="ChannelForge TV video playback"))
+    handle = kernel.PowerCreateRequest(ctypes.byref(context))
+    if handle in (None, ctypes.c_void_p(-1).value):
+        return None
+    # Win32 POWER_REQUEST_TYPE values for display and system idle.
+    held = [kind for kind in (0, 1) if kernel.PowerSetRequest(handle, kind)]
+
+    def release():
+        for kind in held:
+            kernel.PowerClearRequest(handle, kind)
+        kernel.CloseHandle(handle)
+
+    if held:
+        return release
+    release()
+    return None
+
+
+def inhibit_linux_playback():
+    from gi.repository import Gio, GLib
+
+    call_options = (Gio.DBusCallFlags.NO_AUTO_START, 1500, None)
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    except GLib.Error:
+        return None
+
+    reason = "ChannelForge TV video playback"
+    services = (
+        ("org.gnome.SessionManager", "/org/gnome/SessionManager", GLib.Variant("(susu)", ("channelforge-tv", 0, reason, 12)), "Uninhibit"),
+        ("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", GLib.Variant("(ss)", ("channelforge-tv", reason)), "UnInhibit"),
+        ("org.freedesktop.ScreenSaver", "/ScreenSaver", GLib.Variant("(ss)", ("channelforge-tv", reason)), "UnInhibit"),
+    )
+    for service, path, params, release_method in services:
+        try:
+            (cookie,) = bus.call_sync(service, path, service, "Inhibit", params, GLib.VariantType.new("(u)"), *call_options).unpack()
+        except GLib.Error:
+            continue
+
+        def release():
+            try:
+                bus.call_sync(service, path, service, release_method, GLib.Variant("(u)", (cookie,)), None, *call_options)
+            except GLib.Error:
+                logging.getLogger(__name__).debug("Playback idle inhibitor already released.")
+
+        return release
+    return None
 
 
 def main():
@@ -2714,7 +2828,7 @@ def main():
         failure = error
         raise
     finally:
-        controls._stop_player()
+        controls._close()
         server.shutdown()
         if reports:
             reports.submit(controls.health, failure=failure)

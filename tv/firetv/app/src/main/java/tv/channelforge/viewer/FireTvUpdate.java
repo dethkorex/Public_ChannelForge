@@ -103,11 +103,21 @@ final class FireTvUpdate {
                 // The stable manifest still offers the final release when the API is unavailable.
             }
         }
+        JSONObject api;
         try {
-            return readRelease(BuildConfig.GITHUB_RELEASES_API);
+            api = readRelease(BuildConfig.GITHUB_RELEASES_API);
         } catch (Exception unavailable) {
             return readRelease(RELEASE_MANIFEST);
         }
+        String apiVersion = api.getString("tag_name").substring(1);
+        if (isNewer(apiVersion, BuildConfig.VERSION_NAME)) return api;
+        try {
+            JSONObject manifest = readRelease(RELEASE_MANIFEST);
+            if (isNewer(manifest.getString("tag_name").substring(1), apiVersion)) return manifest;
+        } catch (Exception unavailable) {
+            // A verified API response still works when the static manifest is unreachable.
+        }
+        return api;
     }
 
     private static boolean validRelease(JSONObject release, boolean preview) {
@@ -290,6 +300,8 @@ final class FireTvUpdate {
                 connection.setReadTimeout(20_000);
                 connection.setRequestProperty("User-Agent", "ChannelForge-TV/" + BuildConfig.VERSION_NAME);
                 connection.setRequestProperty("Accept-Encoding", "identity");
+                connection.setUseCaches(false);
+                connection.setRequestProperty("Cache-Control", "no-cache");
                 int status = connection.getResponseCode();
                 if (status == 200) return connection;
                 if (status != 301 && status != 302 && status != 303 && status != 307 && status != 308) {
