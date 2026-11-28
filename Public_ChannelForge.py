@@ -36,7 +36,7 @@ import webbrowser
 import wave
 import zlib
 from contextlib import contextmanager, nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -51,7 +51,7 @@ from windows_distribution import clean_windows_update_cache, published_hash, rel
 
 APP_NAME = "Public_ChannelForge"
 APP_TITLE = "ChannelForge Studio"
-VERSION = "4.5.7"
+VERSION = "4.5.8"
 DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -1458,6 +1458,8 @@ def plex_items(section: str) -> list[dict]:
             "id": rating_key,
             "title": (f'{node.get("grandparentTitle", "")} · S{int(node.get("parentIndex", "0") or 0):02d}E{int(node.get("index", "0") or 0):02d} · {node.get("title", "Untitled")}' if node.get("type") == "episode" else node.get("title", "Untitled")),
             "year": parent_metadata.get("year") or node.get("year", ""),
+            "release_date": node.get("originallyAvailableAt", ""),
+            "release_year": node.get("year", ""),
             "type": node.get("type", "video"),
             "duration_ms": int(node.get("duration", "1800000") or 1800000),
             "added_at": node.get("addedAt", ""),
@@ -1712,6 +1714,7 @@ def jellyfin_items(section):
                 title = f"{series} · S{season:02d}E{episode:02d} · {title}"
             result.append({"id": identity, "title": title, "section": section, "source": "jellyfin",
                            "type": kind, "duration_ms": duration, "year": row.get("ProductionYear") or "", "summary": row.get("Overview") or "",
+                           "release_date": row.get("PremiereDate", ""), "release_year": row.get("ProductionYear") or "",
                            "program_tags": (row.get("Tags") or [])[:96],
                            "program_aliases": [str(row["OriginalTitle"])[:120]] if row.get("OriginalTitle") else [],
                            "added_at": row.get("DateCreated", ""),
@@ -1842,8 +1845,11 @@ def local_items(section: str) -> list[dict]:
         identity = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:24]
         poster = local_poster(resolved, root)
         title = resolved.stem.replace("_", " ").replace(".", " ").strip()
+        date_tag = re.search(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b", resolved.stem)
+        year_tag = re.search(r"\(((?:19|20)\d{2})\)", resolved.stem)
         result.append({
             "id": f"local-{identity}", "title": title, "year": "", "type": "video",
+            "release_date": date_tag[0] if date_tag else "", "release_year": year_tag[1] if year_tag else "",
             "duration_ms": cached_local_duration(resolved, info.st_mtime_ns, info.st_size), "key": f"local:{identity}",
             "thumb": f"local:{identity}" if poster else "", "summary": str(relative.parent) if relative.parent != Path(".") else "Local media",
             "art": f"local:{identity}" if poster else "",
@@ -1956,6 +1962,8 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
             "id": str(item["id"]), "title": str(item.get("title", "Untitled"))[:300],
             "section": str(item.get("section") or section)[:700],
             "year": str(item.get("year", ""))[:10], "type": str(item.get("type", "video"))[:30],
+            "release_date": original_release_date(item.get("release_date")),
+            "release_year": str(item.get("release_year") or "")[:4],
             "duration_ms": max(1000, min(86400000, int(item.get("duration_ms", 1800000)))),
             "key": str(item.get("key", f"/library/metadata/{item['id']}"))[:500],
             "thumb": str(item.get("thumb", ""))[:500], "series_thumb": str(item.get("series_thumb", ""))[:500],
@@ -1980,6 +1988,7 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         raise ValueError("The selected titles were invalid.")
     if ceiling and any(not 0 < media_rating_level(item["content_rating"]) <= ceiling for item in normalized):
         raise ValueError(f"A {channel_rating} channel can only contain titles with a known rating of {channel_rating} or lower.")
+    mode = str(payload.get("playback_mode", "ordered"))
     return {
         "id": existing_id or secrets.token_hex(8), "name": name[:100], "number": number[:12],
         "section": section, "items": normalized, "channel_rating": channel_rating,
@@ -1987,7 +1996,9 @@ def clean_channel(payload: dict, existing_id: str = "") -> dict:
         **{field: str(payload.get(field, "" if existing_id else asset_id))[:80]
            for field, asset_id in DEFAULT_CHANNEL_ARTWORK.items()},
         "branding": studio_branding.settings(payload.get("branding")),
-        "playback_mode": str(payload.get("playback_mode", "ordered")) if str(payload.get("playback_mode", "ordered")) in {"custom", "ordered", "shuffle", "shuffle_in_order", "marathon", "franchise"} else "ordered",
+        "playback_mode": mode if mode in {"custom", "ordered", "shuffle", "shuffle_in_order", "marathon", "franchise"} else "ordered",
+        **({"franchise_timeline_version": FRANCHISE_TIMELINE_VERSION,
+            "franchise_order": "story" if payload.get("franchise_order") == "story" else "release"} if mode == "franchise" else {}),
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "schedule_anchor": str(payload.get("schedule_anchor") or datetime.now(timezone.utc).isoformat()),
     }
@@ -2045,6 +2056,10 @@ def write_channel(payload: dict, channel_id: str, item: dict) -> dict:
         if channel_id and previous:
             restore = payload.get("restore_preset") is True
             mode = item["playback_mode"]
+            if (mode == previous.get("playback_mode") == "franchise" and not restore
+                    and item["franchise_order"] == previous.get("franchise_order", "release")):
+                # Keep the running schedule stable until the creator reapplies its preset.
+                item["franchise_timeline_version"] = previous.get("franchise_timeline_version", 1)
             manual_order = payload.get("lineup_reordered") is True and mode in {"ordered", "marathon", "franchise"}
             if previous.get("shuffle_seed") and not (restore or manual_order) and mode == previous.get("playback_mode", "ordered"):
                 item["shuffle_seed"] = previous["shuffle_seed"]
@@ -2238,6 +2253,7 @@ def schedule_window(channel: dict, start: datetime, end: datetime, *, items: lis
     return result
 
 
+FRANCHISE_TIMELINE_VERSION = 2
 FRANCHISE_TIMELINES = {
     "alien": {
         "prometheus": 0, "alien covenant": 1, "alien": 2, "alien earth": 3,
@@ -2245,10 +2261,59 @@ FRANCHISE_TIMELINES = {
     },
     "it": {"welcome to derry": 0, "it": 1, "it chapter two": 2, "it chapter 2": 2},
 }
+STAR_WARS_TIMELINE = {
+    "the acolyte": 10, "the phantom menace": 20, "attack of the clones": 30,
+    "the clone wars": 40, "tales of the jedi": 50, "revenge of the sith": 60,
+    "tales of the empire": 70, "tales of the underworld": 80, "the bad batch": 90,
+    "maul shadow lord": 100, "solo": 110, "obi wan kenobi": 120, "andor": 130,
+    "rebels": 140, "rogue one": 150, "a new hope": 160, "the empire strikes back": 170,
+    "return of the jedi": 180, "the mandalorian": 190, "the book of boba fett": 200,
+    "ahsoka": 210, "skeleton crew": 220, "the mandalorian and grogu": 230,
+    "resistance": 240, "the force awakens": 250, "the last jedi": 260, "the rise of skywalker": 270,
+}
+STAR_WARS_EPISODE_RANKS = (20, 30, 60, 160, 170, 180, 250, 260, 270)
+STAR_WARS_EPISODES = ("i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix")
 
 
 def normalized_title(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def original_release_date(value: object) -> str:
+    text = str(value or "")[:10]
+    try:
+        return date.fromisoformat(text).isoformat() if len(text) == 10 else ""
+    except ValueError:
+        return ""
+
+
+def release_sort_date(item: dict) -> str:
+    premiere = original_release_date(item.get("release_date"))
+    if not premiere:
+        year = str(item.get("release_year") or (item.get("year") if not item.get("series") else "") or "")
+        return year + "-12-31" if re.fullmatch(r"(?:18|19|20|21)\d{2}", year) else "9999-12-31"
+    return premiere
+
+
+def star_wars_timeline_rank(title: str, *, show: bool) -> int | None:
+    name = re.sub(r" (?:19|20)\d{2}$", "", normalized_title(title))
+    if name == "star wars" and not show:
+        return 160  # The original film is sometimes listed under its theatrical title.
+    if name in {"solo", "rebels", "resistance"}:
+        return None  # These bare titles are ambiguous without the franchise name.
+    prefixed = name.startswith("star wars ")
+    name = name.removeprefix("star wars ").removesuffix(" a star wars story")
+    episode = re.search(r"\bepisode ([ivx]+|[1-9])\b", name)
+    if episode and not show:
+        name = (name[:episode.start()] + name[episode.end():]).strip()
+        if prefixed:
+            token = episode[1]
+            numbers = tuple(str(number) for number in range(1, 10))
+            for labels in (STAR_WARS_EPISODES, numbers):
+                if token in labels:
+                    return STAR_WARS_EPISODE_RANKS[labels.index(token)]
+    rank = STAR_WARS_TIMELINE.get(name)
+    return rank - 1 if name == "the clone wars" and not show else rank
 
 
 def franchise_family(value: object) -> str:
@@ -2305,6 +2370,15 @@ def scheduled_items(channel: dict) -> list[dict]:
     if mode == "shuffle" or (mode == "ordered" and channel.get("shuffle_seed")):
         return sorted(items, key=stable_key)
     if mode == "franchise":
+        updated_timeline = channel.get("franchise_timeline_version") == FRANCHISE_TIMELINE_VERSION
+        if updated_timeline and channel.get("franchise_order") == "release":
+            release_entries = []
+            series_positions = {}
+            for index, item in distinct_items():
+                premiere = release_sort_date(item)
+                position = series_positions.setdefault((premiere, series_group(item)), index) if item.get("series") else index
+                release_entries.append(((premiere, position, item.get("season", 0), item.get("episode", 0), index), item))
+            return [item for _, item in sorted(release_entries, key=lambda entry: entry[0])]
         # Build mixed movie/show blocks. A show's episodes stay in strict
         # season/episode order, while movies and shows are placed on one smart
         # franchise timeline. This keeps examples such as Alien -> Alien:
@@ -2315,7 +2389,8 @@ def scheduled_items(channel: dict) -> list[dict]:
             series = str(item.get("series", "")).strip()
             title = series or str(item.get("title") or item_id)
             block_id = ("show", series_group(item)) if series else ("movie", original)
-            block = blocks.setdefault(block_id, {"title": title, "year": item.get("year", ""), "original": original, "items": []})
+            block = blocks.setdefault(block_id, {"title": title, "year": item.get("year", ""), "original": original,
+                                                 "show": bool(series), "items": []})
             block["items"].append(item)
             if str(item.get("year", "")).isdigit() and (not str(block["year"]).isdigit() or int(item["year"]) < int(block["year"])):
                 block["year"] = item["year"]
@@ -2323,6 +2398,9 @@ def scheduled_items(channel: dict) -> list[dict]:
         family_order: dict[str, int] = {}
         for block in blocks.values():
             family = franchise_family(block["title"])
+            block["story_rank"] = star_wars_timeline_rank(block["title"], show=block["show"]) if updated_timeline else None
+            if updated_timeline and (block["story_rank"] is not None or normalized_title(block["title"]).startswith("star wars ")):
+                family = "star wars"
             families.setdefault(family, []).append(block)
             family_order[family] = min(family_order.get(family, block["original"]), block["original"])
         result = []
@@ -2330,7 +2408,11 @@ def scheduled_items(channel: dict) -> list[dict]:
         if channel.get("shuffle_seed"):
             family_names.sort(key=lambda name: hashlib.sha256(f"{seed}:{name}".encode()).digest())
         for family in family_names:
-            ordered = sorted(families[family], key=lambda block: franchise_block_order(family, block["title"], block["year"], block["original"]))
+            if updated_timeline and family == "star wars":
+                ordered = sorted(families[family], key=lambda block: (block["story_rank"] is None,
+                                 block["story_rank"] or 0, block["original"]))
+            else:
+                ordered = sorted(families[family], key=lambda block: franchise_block_order(family, block["title"], block["year"], block["original"]))
             for block in ordered:
                 result.extend(sorted(block["items"], key=lambda value: (int(value.get("season", 0)), int(value.get("episode", 0)), str(value.get("title", "")))))
         return result
@@ -5015,7 +5097,7 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     except ValueError:
                         pass
-                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": values, "now_playing": now_playing, "assets": asset_manifest(), "tools": plugin_tools(), "backup_count": len(list(BACKUP_DIR.glob("*.json"))), "data_dir": str(DATA_DIR), "server_base": server_base(), "playback_engine": ffmpeg_status(), "broadcasts": channel_activity()})
+                self.send_json(200, {"app": APP_NAME, "version": VERSION, "config": config(True), "channels": values, "now_playing": now_playing, "assets": asset_manifest(), "branding_styles": studio_branding.style_options(), "tools": plugin_tools(), "backup_count": len(list(BACKUP_DIR.glob("*.json"))), "data_dir": str(DATA_DIR), "server_base": server_base(), "playback_engine": ffmpeg_status(), "broadcasts": channel_activity()})
             elif parsed.path == "/api/plex/libraries":
                 self.send_json(200, {"libraries": plex_libraries()})
             elif parsed.path == "/api/plex/items":
@@ -5251,8 +5333,13 @@ class Handler(BaseHTTPRequestHandler):
                 query = urllib.parse.parse_qs(parsed.query)
                 result = upload_local_media(self, query.get("section", [""])[0], self.headers.get("X-File-Name", ""))
                 return self.send_json(201, {"upload": result})
-            payload = self.body(CHANNEL_SAVE_BODY_BYTES) if parsed.path == "/api/channels" else self.body()
-            if parsed.path == "/api/setup":
+            payload = self.body(CHANNEL_SAVE_BODY_BYTES) if parsed.path in {"/api/channels", "/api/channels/lineup-preview"} else self.body()
+            if parsed.path == "/api/channels/lineup-preview":
+                draft = clean_channel({**payload, "name": "Lineup preview", "number": "1", "playback_mode": "franchise"})
+                self.send_json(200, {"items": [{"title": item["title"], "type": item["type"],
+                    "date": item.get("release_date") or item.get("release_year") or (item.get("year", "") if not item.get("series") else "")}
+                    for item in scheduled_items(draft)]})
+            elif parsed.path == "/api/setup":
                 old = config()
                 plex_url, pasted_token = normalize_plex_connection(str(payload.get("plex_url", old["plex_url"])), str(payload.get("plex_token", "")))
                 token = pasted_token or old["plex_token"]

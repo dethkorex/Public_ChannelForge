@@ -527,7 +527,7 @@ class CoreTests(unittest.TestCase):
             {"id": "alien", "title": "Alien", "type": "movie", "year": "1979"},
             {"id": "earth-1", "title": "Alien: Earth · S01E01", "series": "Alien: Earth", "season": 1, "episode": 1, "year": "2025"},
         ]
-        channel = app.clean_channel({"name": "Alien Timeline", "number": "7", "playback_mode": "franchise", "items": items})
+        channel = app.clean_channel({"name": "Alien Timeline", "number": "7", "playback_mode": "franchise", "franchise_order": "story", "items": items})
         lineup = app.scheduled_items(channel)
         self.assertEqual([item["id"] for item in lineup], ["alien", "earth-1", "earth-2", "aliens"])
 
@@ -538,9 +538,53 @@ class CoreTests(unittest.TestCase):
             {"id": "it-1", "title": "It", "type": "movie", "year": "2017"},
             {"id": "derry-1", "title": "Welcome to Derry · S01E01", "series": "Welcome to Derry", "season": 1, "episode": 1, "year": "2025"},
         ]
-        channel = app.clean_channel({"name": "Derry Timeline", "number": "8", "playback_mode": "franchise", "items": items})
+        channel = app.clean_channel({"name": "Derry Timeline", "number": "8", "playback_mode": "franchise", "franchise_order": "story", "items": items})
         lineup = app.scheduled_items(channel)
         self.assertEqual([item["id"] for item in lineup], ["derry-1", "derry-2", "it-1", "it-2"])
+
+    def test_franchise_release_order_interleaves_a_film_with_episodes(self):
+        for name in ("Star Wars", "Alien and Predator", "Demon Slayer", "Unlisted franchise"):
+            with self.subTest(name=name):
+                episodes = {"series": name, "type": "episode", "season": 1, "year": "1990"}
+                items = [
+                    {**episodes, "id": "ep3", "episode": 3, "release_date": "2024-04-12"},
+                    {"id": "film", "title": name + " movie", "type": "movie", "release_date": "2024-04-09T00:00:00Z", "added_at": "2027-11-30"},
+                    {**episodes, "id": "ep2", "episode": 2, "release_date": "2024-04-05"},
+                    {**episodes, "id": "ep1", "episode": 1, "release_date": "2024-03-29"},
+                    {**episodes, "id": "unknown", "episode": 1, "release_date": "invalid"},
+                ]
+                channel = app.clean_channel({"name": name, "number": "31", "playback_mode": "franchise", "items": items})
+                self.assertEqual(channel["franchise_order"], "release")
+                self.assertEqual([item["id"] for item in app.scheduled_items(channel)], ["ep1", "ep2", "film", "ep3", "unknown"])
+
+    def test_star_wars_story_order_recognizes_prefixes_numbered_films_and_series_aliases(self):
+        items = [
+            {"id": "ahsoka", "series": "Ahsoka", "type": "episode", "episode": 1},
+            {"id": "visions", "series": "Star Wars: Visions", "type": "episode", "episode": 1},
+            {"id": "earth", "title": "Different Series: Episode 1", "type": "movie"},
+            {"id": "hope", "title": "Star Wars: Episode IV (1977)", "type": "movie"},
+            {"id": "andor-2", "series": "Andor: A Star Wars Story", "type": "episode", "episode": 2},
+            {"id": "clones", "title": "Star Wars: The Clone Wars", "type": "movie"},
+            {"id": "clone-tv", "series": "Star Wars: The Clone Wars", "type": "episode", "episode": 1},
+            {"id": "acolyte", "series": "The Acolyte", "type": "episode", "episode": 1},
+            {"id": "rogue", "title": "Rogue One: A Star Wars Story", "type": "movie"},
+            {"id": "andor-1", "series": "Andor: A Star Wars Story", "type": "episode", "episode": 1},
+        ]
+        channel = app.clean_channel({"name": "Star Wars", "number": "31", "playback_mode": "franchise", "franchise_order": "story", "items": items})
+        self.assertEqual([item["id"] for item in app.scheduled_items(channel)],
+                         ["acolyte", "clones", "clone-tv", "andor-1", "andor-2", "rogue", "hope", "ahsoka", "visions", "earth"])
+
+    def test_existing_franchise_lineup_waits_for_explicit_preset_restore(self):
+        items = [{"id": "second", "title": "Sequel", "release_date": "2025-01-01"}, {"id": "first", "title": "Original", "release_date": "2000-01-01"}]
+        saved = app.clean_channel({"name": "Existing", "number": "4", "playback_mode": "franchise", "items": items})
+        saved.pop("franchise_timeline_version")
+        saved.pop("franchise_order")
+        saved["repeat_on_air"] = True
+        app.atomic_json(app.CHANNELS_FILE, [saved])
+        existing = app.save_channel(saved, saved["id"])
+        self.assertEqual([item["id"] for item in app.scheduled_items(existing)], ["second", "first"])
+        restored = app.save_channel({**existing, "restore_preset": True}, saved["id"])
+        self.assertEqual([item["id"] for item in app.scheduled_items(restored)], ["first", "second"])
 
     def test_tv_library_returns_playable_episodes(self):
         libraries = [{"key": "2", "title": "TV", "type": "show"}]

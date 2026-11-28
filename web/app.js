@@ -173,23 +173,50 @@ function renderWorkspaceMedia(){
 function updateMediaSelection() {
   const choices = [...selectedLineup.values()];
   const videos = choices.reduce((total, choice) => total + choice.items.length, 0);
-  $("#selection-count").textContent = choices.length ? `${choices.length.toLocaleString()} selected · Reorder` : "0 selected";
+  $("#selection-count").textContent = `${choices.length.toLocaleString()} selected`;
   $("#selection-count").title = `${videos.toLocaleString()} playable videos`;
-  const list = $("#selected-media-list");
-  if (!$("#selected-media-panel").hidden) list.innerHTML = choices.length ? choices.map((choice, index) => `
-    <article class="lineup-row" data-lineup-index="${index}" draggable="true">
-      <span class="lineup-position" aria-hidden="true">${index + 1}</span>
-      <span class="lineup-title"><b>${escapeHtml(choice.title)}</b>
-      <small>${choice.type === "show" ? choice.items.length + " episodes" : escapeHtml(choice.type)}${choice.year ? " · " + escapeHtml(choice.year) : ""}</small></span>
-      <button type="button" data-lineup-move="-1" aria-label="Move ${escapeHtml(choice.title)} up" ${index === 0 ? "disabled" : ""}>↑</button>
-      <button type="button" data-lineup-move="1" aria-label="Move ${escapeHtml(choice.title)} down" ${index === choices.length - 1 ? "disabled" : ""}>↓</button>
-      <button type="button" data-remove-media aria-label="Remove ${escapeHtml(choice.title)}">×</button>
-    </article>`).join("") : '<div class="muted">No shows or movies selected yet.</div>';
+  if (builderStep === 2) renderLineup(choices);
   const selected = selectedMediaKeys();
   document.querySelectorAll("#media-list input").forEach(input => {
     const choice=mediaChoices[Number(input.value)];
     input.checked = Boolean(choice && choice.items.every(item=>selected.has(mediaIdentity(item))));
   });
+}
+function renderLineup(choices) {
+  const list = $("#selected-media-list");
+  const position = list.scrollTop;
+  list.innerHTML = choices.map((choice, index) => {
+    const title = escapeHtml(choice.title);
+    const format = choice.type === "show" ? `${choice.items.length} episodes` : choice.episodeLabel || choice.type;
+    const artwork = choice.thumb ? `<img src="${mediaThumb(choice, choice.section)}" alt="" draggable="false" loading="lazy" decoding="async">` : "";
+    return `<article class="lineup-card" data-lineup-index="${index}" draggable="true">
+      <div class="lineup-art"><i class="film-icon" aria-hidden="true"></i>${artwork}<span class="lineup-position" aria-hidden="true">${index + 1}</span></div>
+      <div class="lineup-title"><b>${title}</b><small>${escapeHtml([format, choice.year].filter(Boolean).join(" · "))}</small></div>
+      <div class="lineup-actions">
+        <label>Position<input type="number" data-lineup-position min="1" max="${choices.length}" value="${index + 1}" aria-label="Position for ${title}"></label>
+        <button type="button" data-lineup-move="-1" aria-label="Move ${title} earlier" ${index === 0 ? "disabled" : ""}>↑</button>
+        <button type="button" data-lineup-move="1" aria-label="Move ${title} later" ${index === choices.length - 1 ? "disabled" : ""}>↓</button>
+        <button type="button" data-remove-media aria-label="Remove ${title}">×</button>
+      </div>
+    </article>`;
+  }).join("");
+  filterLineup();
+  list.scrollTop = position;
+}
+function filterLineup() {
+  const query = mediaSearchText($("#lineup-search").value).trim();
+  const cards = [...$("#selected-media-list").children];
+  let visible = 0;
+  for (const card of cards) {
+    card.hidden = !mediaSearchText(card.querySelector(".lineup-title").textContent).includes(query);
+    if (!card.hidden) visible++;
+  }
+  $("#lineup-count").textContent = query ? `${visible.toLocaleString()} of ${cards.length.toLocaleString()} titles` : `${cards.length.toLocaleString()} titles`;
+  const empty = $("#lineup-empty");
+  empty.hidden = visible > 0;
+  empty.textContent = cards.length ? "No titles in your lineup match that search." : "Go back to choose movies or shows for this channel.";
+  $("#clear-media").disabled = cards.length === 0;
+  $("#preview-lineup").disabled = cards.length === 0;
 }
 async function diagnosePlayback(channelId) {
   const generation = previewGeneration;
@@ -211,13 +238,15 @@ function setBuilderStep(step) {
   builderStep = step;
   document.querySelectorAll("[data-builder-step]").forEach(section => section.classList.toggle("active", Number(section.dataset.builderStep) === step));
   const editing = Boolean($("#channel-id").value);
-  $("#dialog-title").textContent = [editing ? "Edit channel rating" : "Set channel rating", "Choose titles", "Name & playback", "Channel branding", "Review channel"][step];
-  $("#builder-description").textContent = ["Choose the highest rating you want this channel to carry.", "Build a custom channel from your Plex, Jellyfin, or local libraries.", "Choose the channel name, number, and lineup order.", "Choose how your channel looks in the guide and player.", "Confirm your lineup and sharing settings."][step];
+  $("#dialog-title").textContent = [editing ? "Edit channel rating" : "Set channel rating", "Choose titles", "Arrange lineup", "Channel settings", "Channel branding", "Review channel"][step];
+  $("#builder-description").textContent = ["Choose the highest rating you want this channel to carry.", "Build a channel from your Plex, Jellyfin, or local libraries.", "Drag a card, use the arrows, or enter a position to move it.", "Choose the channel name, number, and broadcast quality.", "Choose how your channel looks in the guide and player.", "Confirm your lineup and sharing settings."][step];
   $("#selection-count").hidden = step !== 1;
   $("#builder-back").hidden = step === 0;
-  $("#builder-next").hidden = step === 4;
-  $("#builder-save").hidden = step !== 4;
-  if (step === 4) {
+  $("#builder-next").hidden = step === 5;
+  $("#builder-next").textContent = step === 1 ? "Arrange lineup" : "Continue";
+  $("#builder-save").hidden = step !== 5;
+  if (step === 2) renderLineup([...selectedLineup.values()]);
+  if (step === 5) {
     const choices = [...selectedLineup.values()];
     const videos = choices.reduce((count, choice) => count + choice.items.length, 0);
     $("#builder-summary").innerHTML = `<b>CH ${escapeHtml($("#channel-number").value)} · ${escapeHtml($("#channel-name").value)}</b><p>${choices.length} selected · ${videos} playable videos</p><small>${escapeHtml($("#channel-rating").value || "Unrated")} · ${escapeHtml($("#playback-mode").selectedOptions[0]?.textContent || "")}</small>`;
@@ -239,6 +268,10 @@ function readBranding(form) {
     seconds:Number(form.querySelector('[name="up-next-duration"]').value),
     ambience:form.querySelector('[name="up-next-ambience"]').value};
 }
+function brandingStyleOptions(selected) {
+  const styles = state.branding_styles || [{id:"studio",label:"Clean Studio"},{id:"rewind",label:"Rewind"},{id:"midnight",label:"Midnight"}];
+  return styles.map(({id,label}) => `<option value="${escapeHtml(id)}"${id===selected?" selected":""}>${escapeHtml(label)}</option>`).join("");
+}
 function refreshAmbiencePreview(form) {
   const audio=form.querySelector("audio"), selected=form.querySelector('[name="up-next-ambience"]').value;
   const clip=state.assets.find(asset=>asset.id===selected&&asset.kind==="ambience");
@@ -259,7 +292,6 @@ function renderBrandingWorkspace() {
     grid.innerHTML='<p class="empty">Create a channel to preview and configure its Up Next card.</p>';
     return;
   }
-  const styles=[["studio","Clean Studio"],["rewind","Rewind"],["midnight","Midnight"]];
   grid.innerHTML=state.channels.map(channel=>{
     const branding=channel.branding||{};
     const currentStyle=branding.style || "studio";
@@ -269,9 +301,10 @@ function renderBrandingWorkspace() {
       <div class="brand-card-body"><span class="channel-number">CH ${escapeHtml(channel.number)}</span><h3>${escapeHtml(channel.name)}</h3>
       <details><summary>Settings &amp; audio <small>${branding.enabled ? branding.seconds + "s post-roll" : "Post-roll off"}</small></summary>
       <form class="brand-card-controls" data-branding-form><label class="wide"><input type="checkbox" name="up-next-enabled"${branding.enabled?" checked":""}> Air after each programme</label>
-      <label>Card style<select name="up-next-style">${styles.map(([key,label])=>`<option value="${key}"${key===currentStyle?" selected":""}>${label}</option>`).join("")}</select></label>
+      <label>Card style<select name="up-next-style">${brandingStyleOptions(currentStyle)}</select></label>
       <label>Duration in seconds<input type="number" min="5" max="25" name="up-next-duration" value="${branding.seconds||18}" required></label>
       <label>Ambience<select name="up-next-ambience">${ambienceOptions(branding.ambience)}</select></label>
+      <button type="button" data-branding-package>Use matching ambience</button>
       <button type="button" data-preview-branding>Full preview</button><audio controls hidden preload="none" aria-label="Preview ambience"></audio>
       <button type="submit" class="primary wide">Save branding</button></form></details></div></article>`;
   }).join("");
@@ -300,6 +333,16 @@ document.addEventListener("change", event=>{
   if (card&&event.target.name==="up-next-style") card.querySelector("img").src=brandingPreviewUrl(card.dataset.brandChannel,event.target.value);
 });
 document.addEventListener("click", event=>{
+  const packageButton=event.target.closest("[data-branding-package]");
+  if (packageButton) {
+    const controls=packageButton.closest(".brand-card-controls");
+    const selection=state.branding_styles?.find(style=>style.id===readBranding(controls).style);
+    if (selection) {
+      controls.querySelector('[name="up-next-ambience"]').value=`builtin-ambience-${selection.ambience}`;
+      refreshAmbiencePreview(controls);
+    }
+    return;
+  }
   const button=event.target.closest("[data-preview-branding]");
   if (!button) return;
   const controls=button.closest(".brand-card-controls");
@@ -777,6 +820,14 @@ async function loadMedia(section) {
     if (request !== mediaLoadRequest || !builderIsOpen()) return;
     if (failures.length && failures.length === sources.length) throw new Error(failures[0]);
     groupedMediaChoices = choices.sort((a,b) => a.title.localeCompare(b.title) || a.section.localeCompare(b.section));
+    if (selectedLineup.size) {
+      const media = new Map(choices.flatMap(choice => choice.items.map(item => [mediaIdentity(item), item])));
+      for (const choice of selectedLineup.values()) for (const item of choice.items) {
+        const indexed = media.get(mediaIdentity(item));
+        if (indexed?.release_date) item.release_date = indexed.release_date;
+        if (indexed?.release_year) item.release_year = indexed.release_year;
+      }
+    }
     detailedMediaChoices=null;
     mediaChoices=groupedMediaChoices;
     const genres = [...new Set(mediaChoices.flatMap(choice => [...choice.genres,...choice.tags]))].sort();
@@ -818,19 +869,32 @@ const presetDescriptions = {
   shuffle: "Mixes every individual episode and movie.",
   shuffle_in_order: "Rotates between shows while advancing each show’s episodes in order.",
   marathon: "Plays each show’s selected episodes together, then advances to the next title in your lineup.",
-  franchise: "Keeps each show together and uses known franchise timelines or release years to order the titles.",
+  franchise: "Original release order uses movie premieres and individual episode air dates. Story order uses known franchise timelines. Moving a card switches to selection order.",
 };
 function updatePresetDescription() {
-  $("#preset-description").textContent = presetDescriptions[$("#playback-mode").value] || "";
+  const mode = $("#playback-mode").value;
+  $("#franchise-order-field").hidden = $("#preview-lineup").hidden = mode !== "franchise";
+  const description = presetDescriptions[mode] || "";
+  const existing = state.channels.find(channel => channel.id === $("#channel-id").value);
+  const notice = restorePresetOnSave ? "Saving restarts this preset from its beginning."
+    : mode === "franchise" && existing?.playback_mode === "franchise" && (existing.franchise_timeline_version || 1) < 2
+      ? "Restore the preset on save to apply this timeline to your existing channel." : "";
+  $("#preset-description").textContent = [description, notice].filter(Boolean).join(" ");
 }
 $("#playback-mode").addEventListener("change", () => {
+  restorePresetOnSave = false;
   updatePresetDescription();
   if ($("#playback-mode").value === "custom") expandSelectedEpisodes();
   refreshSmartMatches();
   updateMediaSelection();
 });
+$("#franchise-order").addEventListener("change", () => {
+  restorePresetOnSave = Boolean($("#channel-id").value);
+  updatePresetDescription();
+});
 $("#restore-preset").onclick = () => {
   restorePresetOnSave = true;
+  updatePresetDescription();
   toast("Save the channel to start its selected preset from the beginning.");
 };
 async function openChannel(channel = null) {
@@ -843,7 +907,7 @@ async function openChannel(channel = null) {
   builderReturnView = $(".view.active")?.id || "channels";
   $("#channel-form").reset();
   setBuilderPanel("builder-filter-toggle", "builder-filters", false);
-  setBuilderPanel("selection-count", "selected-media-panel", false);
+  $("#lineup-edit-status").textContent = "";
   restorePresetOnSave = false;
   lineupReordered = false;
   $("#restore-preset").hidden = !channel;
@@ -854,12 +918,13 @@ async function openChannel(channel = null) {
   $("#broadcast-height").value = String(channel?.broadcast_height ?? 720);
   $("#broadcast-kbps").value = String(channel?.broadcast_kbps ?? 2500);
   $("#playback-mode").value = channel?.playback_mode || "ordered";
+  $("#franchise-order").value = channel?.franchise_order || "release";
   updatePresetDescription();
   const branding=channel?.branding || {enabled:!channel, seconds:18, style:"studio", ambience:channel?"silent":"soft-synth"};
   const brandFields=$("#builder-branding");
   brandFields.querySelector('[name="up-next-enabled"]').checked=branding.enabled;
   brandFields.querySelector('[name="up-next-enabled"]').disabled=!channel;
-  brandFields.querySelector('[name="up-next-style"]').value=branding.style || "studio";
+  brandFields.querySelector('[name="up-next-style"]').innerHTML=brandingStyleOptions(branding.style || "studio");
   brandFields.querySelector('[name="up-next-duration"]').value=branding.seconds || 18;
   brandFields.querySelector('[name="up-next-duration"]').readOnly=!channel;
   brandFields.querySelector('[name="up-next-ambience"]').innerHTML=ambienceOptions(branding.ambience);
@@ -946,7 +1011,7 @@ $("#channel-library").addEventListener("change", event => {
 });
 $("#channel-form").addEventListener("submit", async event => {
   event.preventDefault();
-  if (builderStep !== 4 || builderSaving) return;
+  if (builderStep !== 5 || builderSaving) return;
   const items = [...selectedLineup.values()].flatMap(choice => choice.items);
   if (!items.length) return;
   const id = $("#channel-id").value;
@@ -956,7 +1021,7 @@ $("#channel-form").addEventListener("submit", async event => {
     channel_rating: $("#channel-rating").value,
     broadcast_height: Number($("#broadcast-height").value),
     broadcast_kbps: Number($("#broadcast-kbps").value || 2500),
-    playback_mode: $("#playback-mode").value, logo_asset_id: $("#channel-logo").value,
+    playback_mode: $("#playback-mode").value, franchise_order: $("#franchise-order").value, logo_asset_id: $("#channel-logo").value,
     background_asset_id: $("#channel-background").value, corner_bug_asset_id: $("#channel-corner-bug").value,
     branding: readBranding($("#builder-branding")), items
   };
@@ -1062,12 +1127,6 @@ for(const selector of ["#smart-genre","#smart-year-min","#smart-year-max","#smar
 $("#builder-filter-toggle").onclick = () => {
   setBuilderPanel("builder-filter-toggle", "builder-filters", $("#builder-filters").hidden);
 };
-$("#selection-count").onclick = () => {
-  const expanded = $("#selected-media-panel").hidden;
-  setBuilderPanel("selection-count", "selected-media-panel", expanded);
-  updateMediaSelection();
-  if (expanded) $("#selected-media-list button:not(:disabled)")?.focus({preventScroll:true});
-};
 $("#select-all-media").onclick = () => {
   const keys=selectedMediaKeys();
   for (const choice of filteredMediaChoices()) selectMediaChoice(choice,true,keys);
@@ -1116,17 +1175,58 @@ $("#media-list").addEventListener("error", event => {
   if (event.target.matches("img")) event.target.hidden = true;
 }, true);
 const lineupList = $("#selected-media-list");
+$("#lineup-search").addEventListener("input", filterLineup);
+let lineupPreviewRequest = 0;
+$("#preview-lineup").onclick = async () => {
+  const request = ++lineupPreviewRequest;
+  const dialog = $("#lineup-preview-dialog"), status = $("#lineup-preview-status"), rows = $("#lineup-preview-items");
+  rows.replaceChildren();
+  status.textContent = "Preparing your timeline…";
+  dialog.showModal();
+  const items = [...selectedLineup.values()].flatMap(choice => choice.items);
+  try {
+    const preview = await api("/api/channels/lineup-preview", {method:"POST", body:JSON.stringify({items, franchise_order:$("#franchise-order").value})});
+    if (request !== lineupPreviewRequest) return;
+    const entries = document.createDocumentFragment();
+    for (const item of preview.items) {
+      const row = document.createElement("li");
+      const title = document.createElement("b");
+      title.textContent = item.title;
+      const details = document.createElement("small");
+      details.textContent = `${item.type === "episode" ? "Episode" : item.type === "movie" ? "Movie" : "Video"} · ${item.date || "Release date unavailable"}`;
+      row.append(title, details);
+      entries.append(row);
+    }
+    rows.append(entries);
+    const missing = preview.items.filter(item => !item.date).length;
+    status.textContent = `${preview.items.length.toLocaleString()} programmes${missing ? ` · ${missing.toLocaleString()} without a release date` : ""}`;
+  } catch (error) {
+    if (request === lineupPreviewRequest) status.textContent = error.message;
+  }
+};
+lineupList.addEventListener("error", event => {
+  if (event.target.matches("img")) event.target.hidden = true;
+}, true);
 function moveSelectedTitle(from, to, direction = "") {
-  if (from === to || from < 0 || to < 0 || from >= selectedLineup.size || to >= selectedLineup.size) return;
+  if (!Number.isInteger(to) || from === to || from < 0 || to < 0 || from >= selectedLineup.size || to >= selectedLineup.size) return;
   const entries = [...selectedLineup];
   const [entry] = entries.splice(from, 1);
   entries.splice(to, 0, entry);
   selectedLineup.clear();
   for (const [key, choice] of entries) selectedLineup.set(key, choice);
   lineupReordered = true;
+  restorePresetOnSave = false;
+  const preset = $("#playback-mode");
+  const automatic = ["franchise", "shuffle", "shuffle_in_order"].includes(preset.value);
+  if (automatic) {
+    preset.value = "ordered";
+    toast("Playback now follows your arranged order.");
+  }
+  updatePresetDescription();
   updateMediaSelection();
   const row = lineupList.children[to];
-  const control = direction && row?.querySelector(`[data-lineup-move="${direction}"]:not(:disabled)`);
+  const control = direction === "position" ? row?.querySelector("[data-lineup-position]")
+    : direction && row?.querySelector(`[data-lineup-move="${direction}"]:not(:disabled)`);
   (control || row?.querySelector("button:not(:disabled)"))?.focus({preventScroll:true});
   row?.scrollIntoView({block:"nearest"});
   $("#lineup-edit-status").textContent = `${entry[1].title} moved to position ${to + 1}.`;
@@ -1140,26 +1240,56 @@ lineupList.addEventListener("click", event => {
   if (direction) return moveSelectedTitle(from, from + Number(direction), direction);
   selectedLineup.delete([...selectedLineup.keys()][from]);
   updateMediaSelection();
-  (lineupList.children[Math.min(from, selectedLineup.size - 1)]?.querySelector("[data-remove-media]") || $("#selection-count")).focus();
+  (lineupList.children[Math.min(from, selectedLineup.size - 1)]?.querySelector("[data-remove-media]") || $("#lineup-search")).focus();
 });
-let draggingLineupRow = null;
+lineupList.addEventListener("change", event => {
+  const field = event.target.closest("[data-lineup-position]");
+  if (!field) return;
+  const from = Number(field.closest("[data-lineup-index]").dataset.lineupIndex);
+  if (!field.checkValidity() || !Number.isInteger(field.valueAsNumber)) {
+    field.value = from + 1;
+    return;
+  }
+  moveSelectedTitle(from, field.valueAsNumber - 1, "position");
+});
+lineupList.addEventListener("keydown", event => {
+  if (event.key !== "Enter" || !event.target.matches("[data-lineup-position]")) return;
+  event.preventDefault();
+  event.target.blur();
+});
+let draggingLineupRow = null, lineupDropTarget = null;
+function showLineupDropTarget(target) {
+  if (lineupDropTarget === target) return;
+  lineupDropTarget?.classList.remove("lineup-drop-target");
+  lineupDropTarget = target;
+  lineupDropTarget?.classList.add("lineup-drop-target");
+}
 lineupList.addEventListener("dragstart", event => {
+  if (event.target.closest("button, input")) return;
   draggingLineupRow = event.target.closest("[data-lineup-index]");
   if (!draggingLineupRow) return;
   event.dataTransfer.effectAllowed = "move";
   event.dataTransfer.setData("text/plain", draggingLineupRow.dataset.lineupIndex);
 });
 lineupList.addEventListener("dragover", event => {
-  if (draggingLineupRow && event.target.closest("[data-lineup-index]")) event.preventDefault();
+  const target = event.target.closest("[data-lineup-index]");
+  if (!draggingLineupRow || !target || target === draggingLineupRow) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  showLineupDropTarget(target);
 });
 lineupList.addEventListener("drop", event => {
   const row = event.target.closest("[data-lineup-index]");
   if (!draggingLineupRow || !row) return;
   event.preventDefault();
+  showLineupDropTarget(null);
   moveSelectedTitle(Number(draggingLineupRow.dataset.lineupIndex), Number(row.dataset.lineupIndex));
   draggingLineupRow = null;
 });
-lineupList.addEventListener("dragend", () => { draggingLineupRow = null; });
+lineupList.addEventListener("dragleave", event => {
+  if (!lineupList.contains(event.relatedTarget)) showLineupDropTarget(null);
+});
+lineupList.addEventListener("dragend", () => { draggingLineupRow = null; showLineupDropTarget(null); });
 $("#overview-create").onclick=$("#library-create-channel").onclick=()=>openChannel();
 $("#builder-next").onclick = () => {
   if (builderStep === 0) {
@@ -1170,11 +1300,11 @@ $("#builder-next").onclick = () => {
     updateMediaSelection();
     refreshSmartMatches();
   }
-  if (builderStep === 1 && !selectedLineup.size) {
+  if ((builderStep === 1 || builderStep === 2) && !selectedLineup.size) {
     toast("Select at least one playable title.", true);
     return;
   }
-  if (builderStep === 2) {
+  if (builderStep === 3) {
     for (const input of [$("#channel-name"), $("#channel-number"), $("#broadcast-kbps")]) {
       input.value = input.value.trim();
       if (!input.reportValidity()) return;
@@ -1255,7 +1385,7 @@ setInterval(async()=>{
 // One navigation model for keyboard, PC gamepads, and television-style D-pads.
 function controllerTargets(){const dialog=$("dialog[open]"),view=$(".view.active"),selector='button:not([disabled]),a[href],input:not([type="hidden"]):not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';const elements=dialog?[...dialog.querySelectorAll(selector)]:[...$(".studio-sidebar nav").querySelectorAll(selector),...(view?.querySelectorAll(selector)||[])];return elements.filter(element=>!element.hidden&&element.offsetParent!==null&&getComputedStyle(element).visibility!=="hidden")}
 function moveControllerFocus(direction){const targets=controllerTargets();if(!targets.length)return;const current=targets.includes(document.activeElement)?document.activeElement:null;if(!current){targets[0].focus({preventScroll:true});targets[0].scrollIntoView({block:"nearest",inline:"nearest"});return}const origin=current.getBoundingClientRect(),ox=origin.left+origin.width/2,oy=origin.top+origin.height/2;let best=null,bestScore=Infinity;for(const target of targets){if(target===current)continue;const rect=target.getBoundingClientRect(),tx=rect.left+rect.width/2,ty=rect.top+rect.height/2,dx=tx-ox,dy=ty-oy,primary=direction==="left"?-dx:direction==="right"?dx:direction==="up"?-dy:dy,secondary=direction==="left"||direction==="right"?Math.abs(dy):Math.abs(dx);if(primary<=4)continue;const score=primary+secondary*2.25;if(score<bestScore){bestScore=score;best=target}}if(best){best.focus({preventScroll:true});best.scrollIntoView({behavior:"smooth",block:"nearest",inline:"nearest"})}}
-function controllerBack(){const dialog=document.querySelector("dialog[open]");if(dialog){dialog.close();return}if(builderIsOpen()){for(const [button,panel] of [["selection-count","selected-media-panel"],["builder-filter-toggle","builder-filters"]]){if(builderStep===1&&!document.getElementById(panel).hidden){setBuilderPanel(button,panel,false);document.getElementById(button).focus();return}}cancelBuilder();return}showView("start");document.querySelector('nav button[data-view="start"]')?.focus()}
+function controllerBack(){const dialog=document.querySelector("dialog[open]");if(dialog){dialog.close();return}if(builderIsOpen()){if(builderStep===1&&!$("#builder-filters").hidden){setBuilderPanel("builder-filter-toggle","builder-filters",false);$("#builder-filter-toggle").focus();return}if(builderStep>0)setBuilderStep(builderStep-1);else cancelBuilder();return}showView("start");document.querySelector('nav button[data-view="start"]')?.focus()}
 function controllerActivate(){const target=document.activeElement;if(!target||target===document.body)return;const item=target.closest("label.media-item");if(item){const input=item.querySelector('input[type="checkbox"]');input.checked=!input.checked;input.dispatchEvent(new Event("change",{bubbles:true}));return}target.click()}
 document.addEventListener("keydown",event=>{const editable=event.target.matches?.('input:not([type="checkbox"]),textarea,select,[contenteditable="true"]');if(editable&&event.key!=="Escape")return;const direction={ArrowLeft:"left",ArrowRight:"right",ArrowUp:"up",ArrowDown:"down"}[event.key];if(direction){event.preventDefault();moveControllerFocus(direction)}else if((event.key==="Enter"||event.key===" ")&&document.activeElement?.matches?.('[tabindex]:not([tabindex="-1"]),.media-item input')){event.preventDefault();controllerActivate()}else if(event.key==="Escape"){event.preventDefault();controllerBack()}});
 let gamepadState={},gamepadRepeat=0;
