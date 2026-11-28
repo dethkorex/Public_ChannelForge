@@ -20,7 +20,7 @@ sub itemChanged()
   upcoming = []
   if channel.programs <> invalid
     for each program in channel.programs
-      if program.title <> invalid and program.start_epoch_ms <> invalid and program.stop_epoch_ms <> invalid
+      if program.type <> "interstitial" and program.title <> invalid and program.start_epoch_ms <> invalid and program.stop_epoch_ms <> invalid
         if program.start_epoch_ms / 1000# > now
           upcoming.Push(program)
           if upcoming.Count() = 7 then exit for

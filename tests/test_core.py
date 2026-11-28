@@ -416,7 +416,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(brief["programs"]), 2)
         current = brief["programs"][0]
         self.assertEqual(current["title"], "Example")
-        self.assertEqual(set(current), {"title", "start_epoch_ms", "stop_epoch_ms"})
+        self.assertEqual(set(current), {"title", "type", "start_epoch_ms", "stop_epoch_ms"})
+        self.assertEqual(current["type"], "movie")
+        self.assertEqual(brief["programs"][1]["type"], "interstitial")
 
     def test_public_channel_catalog_hides_missing_local_source(self):
         channel = app.save_channel({"name": "Missing Local", "number": "13", "items": [{"id": "local-9", "title": "Offline", "source": "local", "file_path": str(app.DATA_DIR / "missing-video.mkv"), "duration_ms": 3600000}]})

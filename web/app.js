@@ -1,5 +1,6 @@
 let state={channels:[],assets:[],tools:[],config:{}},libraries=[],mediaChoices=[],workspaceMedia=[],libraryMediaCache=new Map(),hlsPlayer=null,activeChannel="",draggedChannel="",builderStep=1,retuneTimer=0,updateRelease=null,plexSigninTimer=0,guideOffsetHours=0;
 const selectedLineup = new Map();
+let displayedLineup = [], lineupOrderRequest = 0;
 let mediaLoadRequest = 0, workspaceLibraryRequest = 0, workspaceMediaRequest = 0;
 let libraryRequest, libraryFetchedAt = 0;
 let builderLibraryKind = "all", builderLibraries = [], builderLibraryRequest = 0;
@@ -175,7 +176,7 @@ function updateMediaSelection() {
   const videos = choices.reduce((total, choice) => total + choice.items.length, 0);
   $("#selection-count").textContent = `${choices.length.toLocaleString()} selected`;
   $("#selection-count").title = `${videos.toLocaleString()} playable videos`;
-  if (builderStep === 2) renderLineup(choices);
+  if (builderStep === 2) refreshLineup(choices);
   const selected = selectedMediaKeys();
   document.querySelectorAll("#media-list input").forEach(input => {
     const choice=mediaChoices[Number(input.value)];
@@ -183,11 +184,14 @@ function updateMediaSelection() {
   });
 }
 function renderLineup(choices) {
+  displayedLineup = choices;
   const list = $("#selected-media-list");
   const position = list.scrollTop;
   list.innerHTML = choices.map((choice, index) => {
     const title = escapeHtml(choice.title);
-    const format = choice.type === "show" ? `${choice.items.length} episodes` : choice.episodeLabel || choice.type;
+    const format = choice.type === "show"
+      ? [`${choice.items.length} ${choice.items.length === 1 ? "episode" : "episodes"}`, choice.episodeLabel].filter(Boolean).join(" · ")
+      : choice.episodeLabel || choice.type;
     const artwork = choice.thumb ? `<img src="${mediaThumb(choice, choice.section)}" alt="" draggable="false" loading="lazy" decoding="async">` : "";
     return `<article class="lineup-card" data-lineup-index="${index}" draggable="true">
       <div class="lineup-art"><i class="film-icon" aria-hidden="true"></i>${artwork}<span class="lineup-position" aria-hidden="true">${index + 1}</span></div>
@@ -202,6 +206,54 @@ function renderLineup(choices) {
   }).join("");
   filterLineup();
   list.scrollTop = position;
+}
+function fetchLineupPlan(items) {
+  return api("/api/channels/lineup-preview", {method:"POST", body:JSON.stringify({
+    items, franchise_order:$("#franchise-order").value, channel_id:$("#channel-id").value,
+    restore_preset:restorePresetOnSave, lineup_reordered:lineupReordered,
+  })});
+}
+async function refreshLineup(choices = [...selectedLineup.values()]) {
+  const request = ++lineupOrderRequest;
+  const list = $("#selected-media-list");
+  const next = $("#builder-next");
+  const status = $("#lineup-edit-status");
+  const automatic = $("#playback-mode").value === "franchise" && choices.length > 0;
+  list.inert = next.disabled = automatic;
+  if (!automatic) {
+    status.textContent = "";
+    renderLineup(choices);
+    return;
+  }
+  status.textContent = "Updating timeline…";
+  const indexed = choices.flatMap(choice => choice.items.map(item => ({choice, item})));
+  try {
+    const preview = await fetchLineupPlan(indexed.map(entry => entry.item));
+    if (request !== lineupOrderRequest || builderStep !== 2 || !builderIsOpen()) return;
+    const segments = [];
+    for (const slot of preview.items) {
+      const {choice, item} = indexed[slot.position];
+      const last = segments.at(-1);
+      if (last?.choice === choice) last.items.push(item);
+      else segments.push({choice, items:[item]});
+    }
+    const episodeLabel = item => `S${String(item.season ?? 0).padStart(2, "0")}E${String(item.episode ?? 0).padStart(2, "0")}`;
+    renderLineup(segments.map(({choice, items}, index) => ({
+      ...choice, items, key: JSON.stringify([choice.key, index]),
+      episodeLabel: choice.type === "show" && items.length < choice.items.length
+        ? [episodeLabel(items[0]), ...(items.length > 1 ? [episodeLabel(items.at(-1))] : [])].join("–")
+        : choice.episodeLabel,
+    })));
+    status.textContent = "Timeline updated.";
+  } catch (error) {
+    if (request !== lineupOrderRequest || builderStep !== 2 || !builderIsOpen()) return;
+    renderLineup(choices);
+    status.textContent = "Timeline preview unavailable. Select the timeline again to retry.";
+  } finally {
+    if (request === lineupOrderRequest && builderStep === 2 && builderIsOpen()) {
+      list.inert = next.disabled = false;
+    }
+  }
 }
 function filterLineup() {
   const query = mediaSearchText($("#lineup-search").value).trim();
@@ -236,6 +288,8 @@ async function diagnosePlayback(channelId) {
 }
 function setBuilderStep(step) {
   builderStep = step;
+  ++lineupOrderRequest;
+  $("#builder-next").disabled = false;
   document.querySelectorAll("[data-builder-step]").forEach(section => section.classList.toggle("active", Number(section.dataset.builderStep) === step));
   const editing = Boolean($("#channel-id").value);
   $("#dialog-title").textContent = [editing ? "Edit channel rating" : "Set channel rating", "Choose titles", "Arrange lineup", "Channel settings", "Channel branding", "Review channel"][step];
@@ -245,7 +299,10 @@ function setBuilderStep(step) {
   $("#builder-next").hidden = step === 5;
   $("#builder-next").textContent = step === 1 ? "Arrange lineup" : "Continue";
   $("#builder-save").hidden = step !== 5;
-  if (step === 2) renderLineup([...selectedLineup.values()]);
+  if (step === 2) {
+    renderLineup([...selectedLineup.values()]);
+    refreshLineup();
+  }
   if (step === 5) {
     const choices = [...selectedLineup.values()];
     const videos = choices.reduce((count, choice) => count + choice.items.length, 0);
@@ -284,7 +341,8 @@ function refreshAmbiencePreview(form) {
   audio.hidden=!clip;
 }
 function brandingPreviewUrl(channel, style) {
-  return "/api/branding/preview?" + new URLSearchParams({channel:channel || "", style});
+  const revision = state.channels.find(item => item.id === channel)?.updated_at || "";
+  return "/api/branding/preview?" + new URLSearchParams({channel:channel || "", style, revision});
 }
 function renderBrandingWorkspace() {
   const grid=$("#channel-branding-grid");
@@ -321,6 +379,7 @@ $("#channel-branding-grid").addEventListener("submit", async event => {
     const result=await api(`/api/channels/${encodeURIComponent(card.dataset.brandChannel)}/branding`,{method:"PUT",body:JSON.stringify(payload)});
     state.channels=state.channels.map(channel=>channel.id===result.channel.id?result.channel:channel);
     card.querySelector("summary small").textContent=payload.enabled?`${payload.seconds}s post-roll`:"Post-roll off";
+    card.querySelector("img").src=brandingPreviewUrl(result.channel.id,payload.style);
     toast("Channel branding saved.");
   } catch (error) {toast(error.message,true)}
   finally {button.disabled=false}
@@ -876,13 +935,13 @@ function updatePresetDescription() {
   $("#franchise-order-field").hidden = $("#preview-lineup").hidden = mode !== "franchise";
   const description = presetDescriptions[mode] || "";
   const existing = state.channels.find(channel => channel.id === $("#channel-id").value);
-  const notice = restorePresetOnSave ? "Saving restarts this preset from its beginning."
+  const notice = restorePresetOnSave ? "Saving starts this lineup from its beginning."
     : mode === "franchise" && existing?.playback_mode === "franchise" && (existing.franchise_timeline_version || 1) < 2
       ? "Restore the preset on save to apply this timeline to your existing channel." : "";
   $("#preset-description").textContent = [description, notice].filter(Boolean).join(" ");
 }
 $("#playback-mode").addEventListener("change", () => {
-  restorePresetOnSave = false;
+  restorePresetOnSave = Boolean($("#channel-id").value) && $("#playback-mode").value === "franchise";
   updatePresetDescription();
   if ($("#playback-mode").value === "custom") expandSelectedEpisodes();
   refreshSmartMatches();
@@ -891,10 +950,12 @@ $("#playback-mode").addEventListener("change", () => {
 $("#franchise-order").addEventListener("change", () => {
   restorePresetOnSave = Boolean($("#channel-id").value);
   updatePresetDescription();
+  if (builderStep === 2) refreshLineup();
 });
 $("#restore-preset").onclick = () => {
   restorePresetOnSave = true;
   updatePresetDescription();
+  if (builderStep === 2) refreshLineup();
   toast("Save the channel to start its selected preset from the beginning.");
 };
 async function openChannel(channel = null) {
@@ -1185,7 +1246,7 @@ $("#preview-lineup").onclick = async () => {
   dialog.showModal();
   const items = [...selectedLineup.values()].flatMap(choice => choice.items);
   try {
-    const preview = await api("/api/channels/lineup-preview", {method:"POST", body:JSON.stringify({items, franchise_order:$("#franchise-order").value})});
+    const preview = await fetchLineupPlan(items);
     if (request !== lineupPreviewRequest) return;
     const entries = document.createDocumentFragment();
     for (const item of preview.items) {
@@ -1208,18 +1269,18 @@ lineupList.addEventListener("error", event => {
   if (event.target.matches("img")) event.target.hidden = true;
 }, true);
 function moveSelectedTitle(from, to, direction = "") {
-  if (!Number.isInteger(to) || from === to || from < 0 || to < 0 || from >= selectedLineup.size || to >= selectedLineup.size) return;
-  const entries = [...selectedLineup];
+  if (lineupList.inert || !Number.isInteger(to) || from === to || from < 0 || to < 0 || from >= displayedLineup.length || to >= displayedLineup.length) return;
+  const entries = [...displayedLineup];
   const [entry] = entries.splice(from, 1);
   entries.splice(to, 0, entry);
   selectedLineup.clear();
-  for (const [key, choice] of entries) selectedLineup.set(key, choice);
+  for (const choice of entries) selectedLineup.set(choice.key, choice);
   lineupReordered = true;
   restorePresetOnSave = false;
   const preset = $("#playback-mode");
   const automatic = ["franchise", "shuffle", "shuffle_in_order"].includes(preset.value);
   if (automatic) {
-    preset.value = "ordered";
+    preset.value = preset.value === "franchise" ? "custom" : "ordered";
     toast("Playback now follows your arranged order.");
   }
   updatePresetDescription();
@@ -1229,16 +1290,16 @@ function moveSelectedTitle(from, to, direction = "") {
     : direction && row?.querySelector(`[data-lineup-move="${direction}"]:not(:disabled)`);
   (control || row?.querySelector("button:not(:disabled)"))?.focus({preventScroll:true});
   row?.scrollIntoView({block:"nearest"});
-  $("#lineup-edit-status").textContent = `${entry[1].title} moved to position ${to + 1}.`;
+  $("#lineup-edit-status").textContent = `${entry.title} moved to position ${to + 1}.`;
 }
 lineupList.addEventListener("click", event => {
   const row = event.target.closest("[data-lineup-index]");
   const button = event.target.closest("[data-lineup-move], [data-remove-media]");
-  if (!row || !button) return;
+  if (!row || !button || lineupList.inert) return;
   const from = Number(row.dataset.lineupIndex);
   const direction = button.dataset.lineupMove;
   if (direction) return moveSelectedTitle(from, from + Number(direction), direction);
-  selectedLineup.delete([...selectedLineup.keys()][from]);
+  selectMediaChoice(displayedLineup[from], false, selectedMediaKeys());
   updateMediaSelection();
   (lineupList.children[Math.min(from, selectedLineup.size - 1)]?.querySelector("[data-remove-media]") || $("#lineup-search")).focus();
 });

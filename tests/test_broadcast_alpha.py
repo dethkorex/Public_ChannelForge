@@ -101,6 +101,28 @@ class BroadcastTests(unittest.TestCase):
                 app.ensure_files()
                 self.assertEqual(app.channels()[0], current)
 
+    def test_prepared_up_next_encoder_is_not_reused_after_a_lineup_edit(self):
+        moment = app.datetime.now(app.timezone.utc)
+        channel = {"id": "fixture", "updated_at": "before"}
+        slot = {"start": moment, "stop": moment + app.timedelta(seconds=18),
+                "item": {"id": "up-next-0", "source": "interstitial", "next_program": {"id": "movie-a"}}}
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "index.m3u8").touch()
+            process = unittest.mock.Mock()
+            process.poll.return_value = None
+            with (patch.object(app, "STREAM_DIR", folder), patch.object(app, "FFMPEG_SESSIONS", {}),
+                  patch.object(app, "reserve_encoder", return_value=app.STREAM_ROLLING_BUDGET),
+                  patch.object(app, "launch_encoder", return_value="prepared") as launch):
+                self.assertEqual(app.start_or_reuse_encoder(channel, position=slot), "prepared")
+                key = launch.call_args.kwargs["reuse_key"]
+                app.FFMPEG_SESSIONS["cached"] = {"reuse_key": key, "process": process, "directory": folder}
+                self.assertEqual(app.start_or_reuse_encoder(channel, position=slot), "cached")
+                updated = {**channel, "updated_at": "after"}
+                slot["item"]["next_program"] = {"id": "movie-b"}
+                self.assertEqual(app.start_or_reuse_encoder(updated, position=slot), "prepared")
+                self.assertNotEqual(key, launch.call_args.kwargs["reuse_key"])
+
     def test_up_next_matches_playback_when_the_scheduled_movie_is_missing(self):
         anchor = app.datetime(2026, 11, 27, tzinfo=app.timezone.utc)
         first = {"id": "ep-7", "title": "A visit on Christmas Eve", "duration_ms": 1_800_000}

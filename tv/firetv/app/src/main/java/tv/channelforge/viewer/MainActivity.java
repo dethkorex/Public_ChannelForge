@@ -2385,7 +2385,7 @@ public class MainActivity extends Activity {
         if (channel.programs == null) return next;
         for (int i = 0; i < channel.programs.length() && next.size() < 7; i++) {
             JSONObject entry = channel.programs.optJSONObject(i);
-            if (entry != null && guideTimeMillis(entry, "start") > now) next.add(entry);
+            if (isGuideProgram(entry) && guideTimeMillis(entry, "start") > now) next.add(entry);
         }
         return next;
     }
@@ -2409,7 +2409,7 @@ public class MainActivity extends Activity {
         showProgram(channels.get(displayed.get(0)));
         for (int index : displayed) {
             Channel channel = channels.get(index);
-            JSONObject current = programAt(channel, moment);
+            JSONObject current = guideProgramAt(channel, moment);
             List<JSONObject> next = upcomingPrograms(channel, moment);
             LinearLayout row = new LinearLayout(this);
             row.setGravity(Gravity.CENTER_VERTICAL);
@@ -2615,7 +2615,7 @@ public class MainActivity extends Activity {
             markLabel.setGravity(Gravity.CENTER);
             markLabel.setTextColor(color("#52F0FB"));
             mark.addView(markLabel, new FrameLayout.LayoutParams(-1, -1));
-            JSONObject scheduled = programAt(channel, guideTime);
+            JSONObject scheduled = guideProgramAt(channel, guideTime);
             String art = channelArtwork(channel, scheduled);
             if (!art.isEmpty()) {
                 ImageView logo = new ImageView(this);
@@ -2793,7 +2793,7 @@ public class MainActivity extends Activity {
         if (channel.programs == null) return false;
         for (int i = 0; i < channel.programs.length(); i++) {
             JSONObject program = channel.programs.optJSONObject(i);
-            if (program != null && program.optString("title").toLowerCase(Locale.ROOT).contains(query)) return true;
+            if (isGuideProgram(program) && program.optString("title").toLowerCase(Locale.ROOT).contains(query)) return true;
         }
         return false;
     }
@@ -2916,9 +2916,18 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    private static boolean isGuideProgram(JSONObject item) {
+        return item != null && !"interstitial".equals(item.optString("type"));
+    }
+
+    private JSONObject guideProgramAt(Channel channel, long time) {
+        JSONObject item = programAt(channel, time);
+        return isGuideProgram(item) ? item : null;
+    }
+
     private void updateProgram(Channel channel) {
         long now = System.currentTimeMillis();
-        JSONObject item = programAt(channel, now);
+        JSONObject item = guideProgramAt(channel, now);
         programTitle.setText(item == null ? channel.name : item.optString("title", channel.name));
         programTime.setText(channel.studio + (channel.number.isEmpty() ? "" : "  •  CH " + channel.number)
                 + (item == null || item.optString("content_rating").isEmpty() ? "" : "  •  " + item.optString("content_rating")));

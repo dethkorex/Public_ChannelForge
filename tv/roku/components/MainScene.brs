@@ -149,7 +149,7 @@ sub showGuideSchedule()
   finish = start + 3600
   text = ""
   for each program in channel.programs
-    if program.start_epoch_ms <> invalid and program.stop_epoch_ms <> invalid and program.title <> invalid
+    if program.type <> "interstitial" and program.start_epoch_ms <> invalid and program.stop_epoch_ms <> invalid and program.title <> invalid
       if program.start_epoch_ms / 1000# < finish and program.stop_epoch_ms / 1000# > start
         clock = CreateObject("roDateTime")
         clock.FromSeconds(Int(program.start_epoch_ms / 1000#))
@@ -440,7 +440,7 @@ function guideFeature(channel as object) as object
   result = {title: channel.title, artwork: channel.hdPosterUrl, fraction: 0.0}
   now = CreateObject("roDateTime").AsSeconds()
   for each program in channel.programs
-    if program.start_epoch_ms <> invalid and program.stop_epoch_ms <> invalid
+    if program.type <> "interstitial" and program.start_epoch_ms <> invalid and program.stop_epoch_ms <> invalid
       start = program.start_epoch_ms / 1000# : finish = program.stop_epoch_ms / 1000#
       if start <= now and now < finish
         if program.title <> invalid then result.title = program.title

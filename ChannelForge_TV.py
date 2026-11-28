@@ -25,7 +25,7 @@ from linux_runtime import apply_linux_update, can_apply_linux_update, clean_linu
 from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "4.5.9"
+VERSION = "4.6.0"
 VERSION_LABEL = f"Alpha Version {VERSION.removesuffix('.0')}"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
@@ -440,6 +440,7 @@ function parsePlaylist(text,creator){
     return channels;
 }
 function programAt(channel,moment=Date.now()){return(channel?.programs||[]).find(program=>Date.parse(program.start)<=moment&&moment<Date.parse(program.stop))}
+function isGuideProgram(program){return Boolean(program&&program.type!=='interstitial')}
 const GUIDE_STEP=30*60*1000;
 const GUIDE_AHEAD_STEPS=24;
 const guideTime=new Intl.DateTimeFormat(undefined,{hour:'numeric',minute:'2-digit'});
@@ -460,7 +461,8 @@ function renderNowPlaying(channel,now,tuned){
         preview.innerHTML='<article class="guide-preview"><span><small>LIVE GUIDE</small><b>No channels to show</b><em>Try another studio or scan for channels.</em></span></article>';
         return;
     }
-    const current=programAt(channel,now);
+    const scheduled=programAt(channel,now);
+    const current=isGuideProgram(scheduled)?scheduled:null;
     const artwork=[...new Set([current?.backdrop_url,current?.series_poster_url,current?.poster_url].filter(Boolean))];
     const start=Date.parse(current?.start), stop=Date.parse(current?.stop);
     const duration=stop-start, elapsed=now-start;
@@ -522,8 +524,9 @@ function renderCompactGuide(channels,now,moment,tuned){
     const focused=document.activeElement?.closest('.compact-guide-row');
     const focusedIndex=focused?[...focused.querySelectorAll('button')].indexOf(document.activeElement):-1;
     for(const [index,channel] of channels.entries()){
-        const current=programAt(channel,moment);
-        const upcoming=(channel.programs||[]).filter(program=>Date.parse(program.start)>moment);
+        const scheduled=programAt(channel,moment);
+        const current=isGuideProgram(scheduled)?scheduled:null;
+        const upcoming=(channel.programs||[]).filter(program=>isGuideProgram(program)&&Date.parse(program.start)>moment);
         const programs=[current,...upcoming.slice(0,7)];
         const columnLabels=[guideWindowOffset?'At selected time':'On Now','Up Next','Later','Later 2','Later 3','Later 4','Later 5','Later 6'];
         const art=channelArt(channel,current), row=document.createElement('section');
@@ -563,7 +566,7 @@ function renderLiveGuide(){
         [...filterBar.children].find(item=>item.dataset.studio===activeStudio)?.focus();
     });
     const channels=liveChannels.filter(channel=>(activeStudio==='all'||channel.creator_name===activeStudio)
-        &&(!search||[channel.name,channel.creator_name,...(channel.programs||[]).map(program=>program.title)].join(' ').toLowerCase().includes(search)));
+        &&(!search||[channel.name,channel.creator_name,...(channel.programs||[]).filter(isGuideProgram).map(program=>program.title)].join(' ').toLowerCase().includes(search)));
     const sortByRating=$('#guide-sort').value==='rating';
     if(sortByRating)channels.sort((left,right)=>channelRatingOrder(left)-channelRatingOrder(right));
     const tuned=liveMode&&(liveChannels.find(channel=>channel.stream_url===activeStreamUrl)||activeMedia?.channel);

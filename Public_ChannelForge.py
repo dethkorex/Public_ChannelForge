@@ -51,7 +51,7 @@ from windows_distribution import clean_windows_update_cache, published_hash, rel
 
 APP_NAME = "Public_ChannelForge"
 APP_TITLE = "ChannelForge Studio"
-VERSION = "4.5.9"
+VERSION = "4.6.0"
 DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -2048,26 +2048,29 @@ def save_channel(payload: dict, channel_id: str = "") -> dict:
         return saved
 
 
+def preserve_lineup_preset(item: dict, previous: dict, payload: dict) -> None:
+    restore = payload.get("restore_preset") is True
+    mode = item["playback_mode"]
+    if (mode == previous.get("playback_mode") == "franchise" and not restore
+            and item["franchise_order"] == previous.get("franchise_order", "release")):
+        item["franchise_timeline_version"] = previous.get("franchise_timeline_version", 1)
+    if (previous.get("shuffle_seed") and not (restore or payload.get("lineup_reordered") is True)
+            and mode == previous.get("playback_mode", "ordered")):
+        item["shuffle_seed"] = previous["shuffle_seed"]
+
+
 def write_channel(payload: dict, channel_id: str, item: dict) -> dict:
     with LOCK:
         backup_state("edit channel" if channel_id else "create channel")
         values = channels()
         previous = next((value for value in values if value.get("id") == channel_id), None) if channel_id else None
         if channel_id and previous:
-            restore = payload.get("restore_preset") is True
-            mode = item["playback_mode"]
-            if (mode == previous.get("playback_mode") == "franchise" and not restore
-                    and item["franchise_order"] == previous.get("franchise_order", "release")):
-                # Keep the running schedule stable until the creator reapplies its preset.
-                item["franchise_timeline_version"] = previous.get("franchise_timeline_version", 1)
-            manual_order = payload.get("lineup_reordered") is True and mode in {"ordered", "marathon", "franchise"}
-            if previous.get("shuffle_seed") and not (restore or manual_order) and mode == previous.get("playback_mode", "ordered"):
-                item["shuffle_seed"] = previous["shuffle_seed"]
+            preserve_lineup_preset(item, previous, payload)
             item["repeat_on_air"] = not run_finished(previous)
             item["air_until"] = "" if item["repeat_on_air"] else previous["air_until"]
             if "branding" not in payload:
                 item["branding"] = studio_branding.settings(previous.get("branding"))
-            if restore and not run_finished(previous):
+            if payload.get("restore_preset") is True and not run_finished(previous):
                 now = datetime.now(timezone.utc)
                 item["schedule_anchor"] = now.isoformat()
         else:
@@ -3535,6 +3538,11 @@ def start_or_reuse_encoder(channel: dict, *, public_delivery: bool = False, cons
     profile = "constrained" if constrained_live else "public" if public_delivery else "standard"
     reuse_key = (channel["id"], media_source_identity(item), start_key, profile,
                  None if on_demand else broadcast_settings(channel))
+    if item.get("source") == "interstitial":
+        upcoming = item["next_program"]
+        # A prefetched card can occupy the same UTC slot after a channel edit.
+        # Its encoded segments still belong to the old title or branding.
+        reuse_key += (channel.get("updated_at"), media_source_identity(upcoming))
     with LOCK:
         generation = ENCODER_GENERATION
         for identity, existing in FFMPEG_SESSIONS.items():
@@ -4717,6 +4725,7 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
             "logo_url": f"{base}/user-assets/{urllib.parse.quote(str(logo.get('filename', '')))}" if logo else "",
             "programs": [{
                 "title": str(slot["item"].get("title", "Untitled")),
+                "type": str(slot["item"].get("type", "video")),
                 "start_epoch_ms": int(slot["start"].timestamp() * 1000),
                 "stop_epoch_ms": int(slot["stop"].timestamp() * 1000),
             } for slot in slots[:2]] if brief else [{
@@ -5146,7 +5155,8 @@ class Handler(BaseHTTPRequestHandler):
                 for channel in channels():
                     if run_finished(channel):
                         continue
-                    slots = schedule_window(channel, moment, moment + timedelta(hours=6))
+                    slots = [slot for slot in schedule_window(channel, moment, moment + timedelta(hours=6))
+                             if slot["item"].get("source") != "interstitial"]
                     guide.append({"channel_id": channel["id"], "name": channel["name"], "number": channel["number"], "logo_asset_id": channel.get("logo_asset_id", ""), "programs": [{"title": slot["item"].get("title", "Untitled"), "year": slot["item"].get("year", ""), "type": slot["item"].get("type", "video"), "start": slot["start"].isoformat(), "stop": slot["stop"].isoformat()} for slot in slots]})
                 self.send_json(200, {"generated_at": moment.isoformat(), "channels": guide})
             elif parsed.path == "/api/public/vault":
@@ -5336,7 +5346,12 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.body(CHANNEL_SAVE_BODY_BYTES) if parsed.path in {"/api/channels", "/api/channels/lineup-preview"} else self.body()
             if parsed.path == "/api/channels/lineup-preview":
                 draft = clean_channel({**payload, "name": "Lineup preview", "number": "1", "playback_mode": "franchise"})
+                previous = next((channel for channel in channels() if channel["id"] == payload.get("channel_id")), None)
+                if previous:
+                    preserve_lineup_preset(draft, previous, payload)
+                positions = {id(item): index for index, item in enumerate(draft["items"])}
                 self.send_json(200, {"items": [{"title": item["title"], "type": item["type"],
+                    "position": positions[id(item)],
                     "date": item.get("release_date") or item.get("release_year") or (item.get("year", "") if not item.get("series") else "")}
                     for item in scheduled_items(draft)]})
             elif parsed.path == "/api/setup":
