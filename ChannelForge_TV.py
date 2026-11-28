@@ -21,11 +21,14 @@ import uuid
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from linux_runtime import apply_linux_update, can_apply_linux_update, clean_linux_update_cache, restart_linux_app, linux_install_command, linux_release_asset, start_webview
+from linux_runtime import (
+    apply_linux_update, can_apply_linux_update, claim_desktop_window, clean_linux_update_cache,
+    restart_linux_app, linux_install_command, linux_release_asset, start_webview,
+)
 from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "4.6.0"
+VERSION = "4.6.1"
 VERSION_LABEL = f"Alpha Version {VERSION.removesuffix('.0')}"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
@@ -1568,6 +1571,7 @@ function play(url,media=null,continuing=false){
     }
     activeStreamUrl=url;activeMedia=media||{kind:/\/live\//.test(url)?'live':'movie',title:'ChannelForge'};
     activeMedia.traceId=traceId;
+    setLiveAudioMode(activeMedia.kind==='live');
     liveMode=activeMedia.kind==='live';
     activeMedia.liveDeparture=liveMode?streamUrl.href:'';
     const moviePath=!liveMode&&streamUrl.pathname.match(/^(\/studio\/[a-f0-9]{16})?\/vault\/([a-f0-9]{24})\.m3u8$/);
@@ -1696,16 +1700,37 @@ function play(url,media=null,continuing=false){
     }
     else showNativePlayback();
 }
-let volumeBeforeGuide=null;
+let volumeBeforeGuide=null, movieVolume=null, liveVolume=1;
+try {
+    const saved=localStorage.getItem('channelforge-live-volume');
+    if(saved!==null&&Number.isFinite(Number(saved)))liveVolume=Math.max(0,Math.min(1,Number(saved)));
+} catch(_error) {}
+function setLiveAudioMode(active){
+    const video=$('#player');
+    if(active){
+        if(movieVolume===null)movieVolume=video.volume;
+        video.volume=volumeBeforeGuide===null?liveVolume:Math.min(liveVolume,0.1);
+    }else if(movieVolume!==null){
+        video.volume=movieVolume;
+        movieVolume=null;
+    }
+}
 function setGuideAudio(quiet){
     const video=$('#player');
     if(quiet&&volumeBeforeGuide===null){
         volumeBeforeGuide=video.volume;
-        video.volume=volumeBeforeGuide*0.35;
+        video.volume=Math.min(volumeBeforeGuide,0.1);
     }else if(!quiet&&volumeBeforeGuide!==null){
         video.volume=volumeBeforeGuide;
         volumeBeforeGuide=null;
     }
+}
+function changeLiveVolume(value){
+    if(!Number.isFinite(value))return;
+    liveVolume=Math.max(0,Math.min(1,value/100));
+    if(volumeBeforeGuide!==null)volumeBeforeGuide=liveVolume;
+    setLiveAudioMode(true);
+    try{localStorage.setItem('channelforge-live-volume',String(liveVolume))}catch(_error){}
 }
 function minimizePlayer(){
     if(!liveMode)return stopPlayer();
@@ -1727,7 +1752,7 @@ function stopPlayer(){
     const shell=ensurePlayerShell();
     document.body.append(shell);shell.className='mini-player-shell';
     document.body.classList.remove('player-controls-hidden');
-    liveMode=false;playerMini=false;setGuideAudio(false);activeStreamUrl='';activeMedia=null;
+    liveMode=false;playerMini=false;setGuideAudio(false);setLiveAudioMode(false);activeStreamUrl='';activeMedia=null;
     const v=$('#player');v.classList.remove('playing','mini');v.pause();
     if(hls){hls.destroy();hls=null}
     v.removeAttribute('src');v.load();setBuffering(false);
@@ -2039,6 +2064,16 @@ document.addEventListener('change',event=>{
     try{localStorage.setItem('channelforge-quality-cap',String(viewerQuality))}catch(_error){}
     applyViewerQuality(hls);
 });
+document.addEventListener('input',event=>{
+    if(liveMode&&event.target.matches('[data-live-volume]')){
+        changeLiveVolume(event.target.valueAsNumber);
+        event.target.parentElement.querySelector('output').textContent=event.target.value+'%';
+        showPlayerControls();
+    }
+});
+document.addEventListener('focusin',event=>{
+    if(event.target.matches('[data-live-volume]'))showPlayerControls();
+});
 function updateTunedIndicator(media,status='PLAYING'){
     const box=$('#tuned-channel'),hud=$('#player-hud'),bug=$('#player-bug');
     if(!media){
@@ -2063,6 +2098,7 @@ function updateTunedIndicator(media,status='PLAYING'){
         +esc(channel.name||title)+'</b><strong>'+esc(title)+'</strong><i><u style="width:'+progress+'%"></u></i><small id="player-state">'
         +esc(status)+'</small>'+(next?'<em>COMING UP NEXT · '+esc(next.title)+'</em>':'')+'</div>'
         +'<div class="player-hud-actions">'+qualityControl()
+        +(live?'<label class="player-quality player-volume">Volume <output>'+Math.round(liveVolume*100)+'%</output><input data-live-volume type="range" min="0" max="100" value="'+Math.round(liveVolume*100)+'" aria-label="Live TV volume"></label>':'')
         +(live?'<button data-player-surf="-1" aria-label="Previous channel">▲<br><small>CHANNEL</small></button><button data-player-surf="1" aria-label="Next channel">▼<br><small>CHANNEL</small></button><button data-player-guide aria-label="Open live guide">☰<br><small>GUIDE</small></button>':'')+'</div>';
     hud.hidden=false;
 }
@@ -2093,7 +2129,7 @@ function closeVideoView(){
     }
     else minimizePlayer();
 }
-function showPlayerControls(){document.body.classList.remove('player-controls-hidden');clearTimeout(playerControlsTimer);if(!playerMini&&!$('#player-state.error')&&$('#player-buffer')?.hidden)playerControlsTimer=setTimeout(()=>document.body.classList.add('player-controls-hidden'),3200)}
+function showPlayerControls(){document.body.classList.remove('player-controls-hidden');clearTimeout(playerControlsTimer);if(!playerMini&&!$('#player-state.error')&&$('#player-buffer')?.hidden)playerControlsTimer=setTimeout(()=>{if(!document.activeElement?.matches('[data-live-volume]'))document.body.classList.add('player-controls-hidden')},3200)}
 function surfChannel(direction){if(!liveChannels.length)return;let index=liveChannels.findIndex(channel=>channel.stream_url===activeStreamUrl);index=index<0?0:(index+direction+liveChannels.length)%liveChannels.length;let channel=liveChannels[index],program=programAt(channel);play(channel.stream_url,{kind:'live',channel,title:program?.title||channel.name})}
 document.addEventListener('mousemove',showPlayerControls,{passive:true});document.addEventListener('keydown',showPlayerControls);document.addEventListener('click',event=>{let surf=event.target.closest('[data-player-surf]');if(surf)surfChannel(Number(surf.dataset.playerSurf)||1);if(event.target.closest('[data-player-guide]'))minimizePlayer()});
 '''
@@ -2807,6 +2843,8 @@ def main():
     if sys.platform == "win32" and getattr(sys, "frozen", False):
         threading.Thread(target=clean_windows_update_cache, args=(VERSION,), daemon=True).start()
     elif sys.platform.startswith("linux"):
+        if not claim_desktop_window(UPDATE_DIR.parent, "tv-desktop", lambda: APP_WINDOW):
+            return
         clean_linux_update_cache(UPDATE_DIR, VERSION)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     url = f"http://127.0.0.1:{server.server_port}/"

@@ -1,14 +1,21 @@
 """Runtime and update helpers for the Linux desktop apps."""
 
+import atexit
 import hashlib
+import json
 import re
 import subprocess
 import tarfile
 import os
 import shlex
 import shutil
+import secrets
+import socket
+import socketserver
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import Collection
 from pathlib import Path
 
@@ -63,6 +70,84 @@ def start_webview(webview, *, application_id: str, icon: Path) -> None:
         webview.start(gui="gtk", debug=False)
     else:
         webview.start(debug=False)
+
+
+def present_desktop_window(window) -> None:
+    window.show()
+    window.restore()
+
+
+def claim_desktop_window(directory: Path, name: str, window) -> bool:
+    """Open the running app from its launcher instead of making a duplicate window."""
+    directory.mkdir(parents=True, exist_ok=True)
+    lock = (directory / f"{name}.lock").open("a+b")
+    lock.seek(0)
+    activation = directory / f"{name}-activation.json"
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            try:
+                info = json.loads(activation.read_text(encoding="utf-8"))
+                with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=0.4) as client:
+                    client.sendall(info["token"].encode("ascii"))
+                    if client.recv(1) == b"1":
+                        return False
+            except (OSError, AttributeError, KeyError, TypeError, ValueError):
+                pass
+            time.sleep(0.1)
+        return False
+
+    token = secrets.token_hex(32).encode("ascii")
+    pending = threading.Event()
+
+    class ActivationRequest(socketserver.StreamRequestHandler):
+        def handle(self):
+            self.connection.settimeout(0.5)
+            try:
+                if secrets.compare_digest(token, self.rfile.read(len(token))):
+                    pending.set()
+                    self.wfile.write(b"1")
+            except OSError:
+                pass
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), ActivationRequest)
+    fd, temp = tempfile.mkstemp(dir=directory, prefix=f".{name}-activation-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump({"port": server.server_address[1], "token": token.decode("ascii")}, file)
+        os.replace(temp, activation)
+    finally:
+        Path(temp).unlink(missing_ok=True)
+    threading.Thread(target=server.serve_forever, daemon=True, name=f"{name}-activation").start()
+
+    def run_activation():
+        while True:
+            pending.wait()
+            current = window()
+            if current is None:
+                time.sleep(0.1)
+                continue
+            pending.clear()
+            present_desktop_window(current)
+
+    threading.Thread(target=run_activation, daemon=True, name=f"{name}-window").start()
+
+    def cleanup():
+        server.shutdown()
+        server.server_close()
+        activation.unlink(missing_ok=True)
+        lock.close()
+
+    atexit.register(cleanup)
+    return True
 
 
 def linux_release_asset(names: Collection[str], version: str, app_directory: Path) -> str:

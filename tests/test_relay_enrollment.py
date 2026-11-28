@@ -84,6 +84,50 @@ class RelayEnrollmentTests(unittest.TestCase):
         self.assertEqual([request[1] for request in requests], ["/v1/creators/relay"] * 3 + ["/v1/creators"])
         self.assertEqual(len({request[3] for request in requests}), 1)
 
+    def test_publish_after_upgrade_replaces_an_inherited_lan_url(self):
+        inherited = "http://192.168.1.44:8787"
+        origin = "https://relay.tailnet.ts.net/studio/" + "a" * 16
+        first_profile = {"name": "Sample", "slug": "sample"}
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+            configuration = folder / "config.json"
+            # Old versions also stored the LAN address in public_url.
+            app.atomic_json(configuration, {"public_url": inherited, "creator_profile": first_profile})
+            with (mock.patch.multiple(app, DATA_DIR=folder, CONFIG_FILE=configuration, REGISTERED_ORIGIN="",
+                                      SHARING_STATUS="idle", SHARING_ERROR=""),
+                  mock.patch.object(app, "enrolled_relay_origin", return_value=origin) as enroll,
+                  mock.patch.object(app, "community_relay_profile", return_value=mock.Mock(origin=origin)),
+                  mock.patch.object(app, "start_public_media_server"),
+                  mock.patch.object(app, "connect_community_relay", return_value=mock.Mock()),
+                  mock.patch.object(app, "set_community_relay"),
+                  mock.patch.object(app, "generate_exports"),
+                  mock.patch.object(app, "publish_creator", return_value={"id": "sample"})):
+                app.publish_studio({**first_profile, "public_url": inherited})
+                enroll.assert_called_once()
+                saved = app.config()
+                self.assertTrue(saved["managed_relay"])
+                self.assertEqual(saved["public_url"], origin)
+                self.assertEqual(saved["creator_profile"], first_profile)
+        self.assertFalse(app.needs_default_relay("https://custom-media.example.org"))
+
+    def test_linux_update_closes_old_forward_before_exec(self):
+        stopping, wake = threading.Event(), threading.Event()
+        actions = []
+
+        def record(name):
+            self.assertTrue(stopping.is_set())
+            self.assertTrue(wake.is_set())
+            actions.append(name)
+
+        with (mock.patch.multiple(app, SHUTTING_DOWN=stopping, PUBLISH_CHANGED=wake),
+              mock.patch.object(app, "stop_public_tunnel", side_effect=lambda: record("funnel")),
+              mock.patch.object(app, "stop_legacy_relay", side_effect=lambda: record("fallback")),
+              mock.patch.object(app, "set_community_relay", side_effect=lambda _connection: record("managed")),
+              mock.patch.object(app, "stop_ffmpeg_sessions", side_effect=lambda: record("encoders")),
+              mock.patch.object(app, "restart_linux_app", side_effect=lambda: record("exec"))):
+            app.restart_updated_linux_studio()
+        self.assertEqual(actions, ["funnel", "fallback", "managed", "encoders", "exec"])
+
     def test_two_studios_enroll_and_only_own_slot_can_be_probed(self):
         ids = ("a" * 32, "b" * 32)
         slots = [{"origin": "https://relay.example.com/studio/" + value * 16, "remote_port": 18091 + index}

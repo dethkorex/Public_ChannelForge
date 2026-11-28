@@ -777,6 +777,9 @@ main.wrap .home-panels { grid-template-columns: minmax(0,1.13fr) minmax(0,1fr); 
 .viewer-shell .player-quality{display:grid;gap:3px;font-size:12px;color:#c6e3f2}
 .viewer-shell .player-quality select{min-height:34px;padding:4px 8px;color:#f5faff;background:#11233a;border:1px solid #40cce8;border-radius:6px}
 .viewer-shell .player-hud-actions{flex-wrap:wrap}
+.viewer-shell .player-volume{min-width:90px}
+.viewer-shell .player-volume output{color:#eaf6ff}
+.viewer-shell .player-volume input{width:100%;max-width:120px;margin:5px 0 0;accent-color:#0debf2}
 .viewer-shell .player-hud:focus-within{opacity:1!important;pointer-events:auto!important}
 .viewer-page-heading{
     display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;

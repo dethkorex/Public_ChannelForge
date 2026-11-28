@@ -7,6 +7,7 @@ import atexit
 import base64
 import concurrent.futures
 import hashlib
+import ipaddress
 import gzip
 import io
 import html
@@ -21,7 +22,6 @@ import secrets
 import select
 import shutil
 import socket
-import socketserver
 import ssl
 import subprocess
 import sys
@@ -43,7 +43,10 @@ from pathlib import Path
 from typing import NamedTuple
 from xml.etree import ElementTree as ET
 
-from linux_runtime import apply_linux_update, can_apply_linux_update, clean_linux_update_cache, restart_linux_app, linux_install_command, linux_release_asset, start_webview
+from linux_runtime import (
+    apply_linux_update, can_apply_linux_update, claim_desktop_window, clean_linux_update_cache,
+    restart_linux_app, linux_install_command, linux_release_asset, start_webview,
+)
 from collections import deque
 from release_metadata import read_latest_release, version_tuple
 import studio_branding
@@ -51,7 +54,7 @@ from windows_distribution import clean_windows_update_cache, published_hash, rel
 
 APP_NAME = "Public_ChannelForge"
 APP_TITLE = "ChannelForge Studio"
-VERSION = "4.6.0"
+VERSION = "4.6.1"
 DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -191,6 +194,7 @@ COMMUNITY_RELAY: CommunityRelayConnection | None = None
 SHUTTING_DOWN = threading.Event()
 PUBLISH_CHANGED = threading.Event()
 SHARING_STATUS = "idle"
+SHARING_ERROR = ""
 REGISTERED_ORIGIN = ""
 HEARTBEAT_STATUS = {"last_success": 0, "last_attempt": 0, "failures": 0}
 MOVIE_SCAN_STATUS = {"state": "idle"}
@@ -352,16 +356,23 @@ def apply_creator_update(result, shutdown):
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             result.update(can_launch=False, install_error=str(exc))
             return
-        def restart():
-            stop_public_tunnel()
-            stop_legacy_relay()
-            set_community_relay(None)
-            stop_ffmpeg_sessions()
-            restart_linux_app()
-        threading.Timer(1.5, restart).start()
+        threading.Timer(1.5, restart_updated_linux_studio).start()
     else:
         threading.Timer(0.8, lambda: launch_verified_windows_update(result["path"])).start()
         threading.Timer(1.5, lambda: exit_for_update(shutdown)).start()
+
+
+def restart_updated_linux_studio():
+    # exec preserves the process ID. Prevent the sharing thread from opening
+    # another forward while we drain the children from the old Studio.
+    SHUTTING_DOWN.set()
+    PUBLISH_CHANGED.set()
+    with PUBLISH_LOCK:
+        stop_public_tunnel()
+        stop_legacy_relay()
+        set_community_relay(None)
+        stop_ffmpeg_sessions()
+    restart_linux_app()
 
 
 def start_update_job(launch: bool, shutdown) -> str:
@@ -429,6 +440,7 @@ def config(public: bool = False) -> dict:
                                                and community.process.poll() is None)
         result["tunnel_active"] = result["community_relay_active"] or bool(TUNNEL_URL or LEGACY_RELAY_ORIGIN)
         result["sharing_status"] = SHARING_STATUS
+        result["sharing_error"] = SHARING_ERROR
         result["legacy_relay"] = is_legacy_relay(result["public_url"])
         result["directory_heartbeat"] = HEARTBEAT_STATUS.copy()
         result["movie_scan"] = MOVIE_SCAN_STATUS
@@ -621,25 +633,26 @@ def unpublish_creator() -> None:
 
 
 def publish_studio(payload: dict) -> dict:
-    global REGISTERED_ORIGIN, SHARING_STATUS, TUNNEL_URL
+    global REGISTERED_ORIGIN, SHARING_STATUS, SHARING_ERROR, TUNNEL_URL
     if not str(payload.get("name", "")).strip():
         raise ValueError("Enter a creator or studio name.")
     with PUBLISH_LOCK:
-        previous = load_json(CONFIG_FILE, {})
-        if not isinstance(previous, dict):
-            previous = {}
+        previous = config()
         changes = {}
         if payload.get("directory_url"):
             new_directory = str(payload["directory_url"]).strip().rstrip("/")
+            if new_directory == OLD_DIRECTORY_URL:
+                new_directory = DEFAULT_DIRECTORY_URL
             if new_directory != str(previous.get("directory_url", DEFAULT_DIRECTORY_URL)).rstrip("/"):
                 changes.update({"creator_id": "", "creator_key": ""})
             changes["directory_url"] = new_directory
         requested = str(payload.get("public_url", "")).strip().rstrip("/")
         default_directory = (changes.get("directory_url") or previous.get("directory_url") or DEFAULT_DIRECTORY_URL) == DEFAULT_DIRECTORY_URL
         saved = str(previous.get("public_url", ""))
-        first_publish = (default_directory and not previous.get("creator_id") and not requested and not saved
-                         and not (DATA_DIR / "community-relay.json").is_file())
-        managed = payload.get("managed_relay", first_publish or previous.get("managed_relay")) is True
+        inherited_origin = not requested or requested == saved
+        auto_relay = (default_directory and inherited_origin and needs_default_relay(saved)
+                      and not (DATA_DIR / "community-relay.json").is_file())
+        managed = payload.get("managed_relay", auto_relay or previous.get("managed_relay")) is True
         if managed and changes.get("creator_id") == "":
             raise ValueError("Use this Studio’s registered directory when enabling the ChannelForge relay.")
         if not managed and previous.get("managed_relay") is True:
@@ -696,14 +709,32 @@ def publish_studio(payload: dict) -> dict:
         set_community_relay(candidate)
         REGISTERED_ORIGIN = origin
         SHARING_STATUS = "live"
+        SHARING_ERROR = ""
         return creator
+
+
+def needs_default_relay(origin: str) -> bool:
+    """An inherited local or retired address cannot publish to the directory."""
+    try:
+        parsed = urllib.parse.urlsplit(origin)
+        host = parsed.hostname
+        if parsed.scheme != "https" or not host or is_legacy_relay(origin):
+            return True
+        if host in {"localhost", "trycloudflare.com"} or host.endswith((".local", ".localhost", ".trycloudflare.com")):
+            return True
+        try:
+            return not ipaddress.ip_address(host).is_global
+        except ValueError:
+            return "." not in host
+    except ValueError:
+        return True
 
 
 def can_use_managed_relay(settings: dict) -> bool:
     origin = str(settings.get("public_url", ""))
     directory = str(settings.get("directory_url", "")).strip().rstrip("/") or DEFAULT_DIRECTORY_URL
     return bool(directory == DEFAULT_DIRECTORY_URL and settings.get("creator_id") and settings.get("creator_key")
-                and not settings.get("managed_relay") and (not origin or is_legacy_relay(origin) or is_funnel_origin(origin)))
+                and not settings.get("managed_relay") and (needs_default_relay(origin) or is_funnel_origin(origin)))
 
 
 def queue_channel_publication(channel: dict, enabled: bool | None) -> bool:
@@ -2630,10 +2661,18 @@ foreach ($p in (Get-CimInstance Win32_Process -Filter "Name = 'ssh.exe'")) {
                 continue
             try:
                 stat = (proc / "stat").read_text().rsplit(")", 1)[1].split()
-                if stat[1] != "1" or proc.stat().st_uid != os.getuid():
+                if stat[1] not in {"1", str(os.getpid())} or proc.stat().st_uid != os.getuid():
                     continue
                 args = (proc / "cmdline").read_bytes().decode("utf-8", "replace").rstrip("\0").split("\0")
-                if Path(args[0]).name != "ssh" or "-i" not in args or args[args.index("-i") + 1] != str(identity) or "-R" not in args:
+                inherited = (stat[1] == str(os.getpid()) and len(args) > 3
+                             and Path(args[1]).name == "relay_child.py" and args[2] == str(os.getpid()))
+                if inherited:
+                    # Older in-app upgrades could exec while a relay wrapper
+                    # was starting. Its parent PID survives the replacement.
+                    args = args[3:]
+                if not (inherited or stat[1] == "1") or Path(args[0]).name != "ssh":
+                    continue
+                if "-i" not in args or args[args.index("-i") + 1] != str(identity) or "-R" not in args:
                     continue
                 target = args[args.index("-R") + 1]
                 if not target.startswith(forward):
@@ -2644,7 +2683,12 @@ foreach ($p in (Get-CimInstance Win32_Process -Filter "Name = 'ssh.exe'")) {
                     if connection.connect_ex((HOST, port)) == 0:
                         continue
                 if (proc / "stat").read_text().rsplit(")", 1)[1].split()[19] == stat[19]:
-                    os.kill(int(proc.name), signal.SIGTERM)
+                    pid = int(proc.name)
+                    os.kill(pid, signal.SIGTERM)
+                    if inherited:
+                        deadline = time.monotonic() + 1.5
+                        while time.monotonic() < deadline and os.waitpid(pid, os.WNOHANG)[0] == 0:
+                            time.sleep(0.05)
             except (OSError, IndexError, ValueError):
                 continue
 
@@ -5385,6 +5429,11 @@ class Handler(BaseHTTPRequestHandler):
                 queue_existing_publication()
                 PUBLISH_CHANGED.set()
                 self.send_json(200, {"ok": True})
+            elif parsed.path == "/api/directory/retry":
+                if not config()["auto_publish_channels"]:
+                    raise ValueError("Resume worldwide sharing first.")
+                PUBLISH_CHANGED.set()
+                self.send_json(200, {"ok": True})
             elif parsed.path == "/api/plex/test":
                 old = config()
                 plex_url, pasted_token = normalize_plex_connection(str(payload.get("plex_url", old["plex_url"])), str(payload.get("plex_token", "")))
@@ -5702,72 +5751,11 @@ def activate_desktop_window() -> None:
 
 
 def claim_creator_desktop() -> bool:
-    """Reuse the same Creator window, including when the Linux service owns the backend."""
-    lock = (DATA_DIR / "desktop.lock").open("a+b")
-    lock.seek(0)
-    activation_file = DATA_DIR / "desktop-activation.json"
-    try:
-        if sys.platform == "win32":
-            import msvcrt
-            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lock.close()
-        deadline = time.monotonic() + 4
-        while time.monotonic() < deadline:
-            info = load_json(activation_file, {})
-            try:
-                with socket.create_connection((HOST, int(info["port"])), timeout=0.4) as client:
-                    client.sendall(info["token"].encode("ascii"))
-                    if client.recv(1) == b"1":
-                        return False
-            except (OSError, KeyError, TypeError, ValueError):
-                pass
-            time.sleep(0.1)
-        return False
-
-    token = secrets.token_hex(32).encode("ascii")
-    pending = threading.Event()
-
-    class ActivationRequest(socketserver.StreamRequestHandler):
-        def handle(self):
-            self.connection.settimeout(0.5)
-            try:
-                if secrets.compare_digest(token, self.rfile.read(len(token))):
-                    pending.set()
-                    self.wfile.write(b"1")
-            except OSError:
-                pass
-
-    server = socketserver.TCPServer((HOST, 0), ActivationRequest)
-    atomic_json(activation_file, {"port": server.server_address[1], "token": token.decode("ascii")})
-    threading.Thread(target=server.serve_forever, daemon=True, name="creator-desktop-activation").start()
-
-    def run_activation():
-        while True:
-            pending.wait()
-            if APP_WINDOW is None:
-                time.sleep(0.1)
-                continue
-            pending.clear()
-            activate_desktop_window()
-
-    threading.Thread(target=run_activation, daemon=True, name="creator-window-activation").start()
-
-    def cleanup_activation():
-        server.shutdown()
-        server.server_close()
-        activation_file.unlink(missing_ok=True)
-        lock.close()
-
-    atexit.register(cleanup_activation)
-    return True
+    return claim_desktop_window(DATA_DIR, "desktop", lambda: APP_WINDOW)
 
 
 def restore_public_sharing() -> None:
-    global REGISTERED_ORIGIN, SHARING_STATUS
+    global REGISTERED_ORIGIN, SHARING_STATUS, SHARING_ERROR
     failures = 0
     relay_misses = 0
     next_relay_check = 0.0
@@ -5801,8 +5789,12 @@ def restore_public_sharing() -> None:
             settings = config()
             profile = settings["creator_profile"]
             pending = settings["pending_creator_profile"]
+            restore_unregistered = (settings.get("directory_url") == DEFAULT_DIRECTORY_URL
+                                    and not settings.get("creator_id") and not settings.get("creator_key")
+                                    and needs_default_relay(settings["public_url"]))
             migrate = (not pending and profile and settings.get("auto_publish_channels")
-                       and can_use_managed_relay(settings))
+                       and not (DATA_DIR / "community-relay.json").is_file()
+                       and (can_use_managed_relay(settings) or restore_unregistered))
             if migrate:
                 pending = {**profile, "managed_relay": True}
             failed_origin = ""
@@ -5818,7 +5810,7 @@ def restore_public_sharing() -> None:
                     wait_seconds = 1
                 elif profile:
                     saved_origin = settings.get("public_url", "")
-                    if not saved_origin or is_legacy_relay(saved_origin):
+                    if needs_default_relay(saved_origin):
                         if not REGISTERED_ORIGIN:
                             SHARING_STATUS = "connecting"
                         publish_studio({**profile, "public_url": saved_origin})
@@ -5890,17 +5882,20 @@ def restore_public_sharing() -> None:
                     if profile.get("heartbeat_supported") and now >= next_heartbeat:
                         heartbeat(settings, "reconnecting" if relay_misses else broadcast_health(None), now)
                     SHARING_STATUS = "retrying" if relay_misses or HEARTBEAT_STATUS["failures"] else "live"
+                    SHARING_ERROR = "The public relay stopped responding." if relay_misses else ""
                 else:
                     REGISTERED_ORIGIN = ""
                     next_heartbeat = 0.0
                     HEARTBEAT_STATUS.update(last_success=0, last_attempt=0, failures=0)
                     relay_misses = 0
                     SHARING_STATUS = "idle" if settings["auto_publish_channels"] else "private"
+                    SHARING_ERROR = ""
                 failures = 0
             except Exception as exc:
                 failures += 1
+                SHARING_ERROR = sharing_error_message(exc)
                 if failures == 1:
-                    print(f"ChannelForge public sharing could not connect: {sanitized_playback_error(exc)}")
+                    print(f"ChannelForge public sharing could not connect: {SHARING_ERROR}", flush=True)
                 SHARING_STATUS = "retrying"
                 saved = settings.get("public_url", "")
                 if (profile and settings.get("auto_publish_channels") and settings.get("creator_id")
@@ -5923,9 +5918,34 @@ def restore_public_sharing() -> None:
                             if current["creator_profile"].get("heartbeat_supported"):
                                 heartbeat(current, broadcast_health(None), time.monotonic())
                             SHARING_STATUS = "live"
+                            SHARING_ERROR = ""
                     except (OSError, ValueError, subprocess.SubprocessError):
                         pass
         PUBLISH_CHANGED.wait(min(120, 5 * 2 ** min(max(0, failures - 1), 5)) if failures else wait_seconds)
+
+
+def sharing_error_message(error: Exception) -> str:
+    reason = str(error).casefold()
+    reserved = re.search(r"channel (\d{1,12}(?:\.\d{1,8})?) is already reserved", reason)
+    if reserved:
+        return f"Channel {reserved[1]} is already reserved. Choose a different channel number in Studio."
+    if "already registered" in reason:
+        return "This Studio’s public name is already in use."
+    if "invalid creator key" in reason or "valid directory credentials" in reason:
+        return "The directory rejected this Studio’s saved registration."
+    if "already has a relay key" in reason:
+        return "The assigned relay expects a different Studio key."
+    if "openssh" in reason or "ssh-keygen" in reason:
+        return "Studio could not use OpenSSH or its relay key."
+    if "busy" in reason or "assign a studio slot" in reason:
+        return "The relay could not allocate a Studio slot yet."
+    if "enrollment" in reason and ("unavailable" in reason or "could not reach" in reason):
+        return "Studio could not reach the relay enrollment service."
+    if "hosted creator directory" in reason:
+        return "Studio could not reach the public directory."
+    if "did not reach this studio" in reason or "test segment" in reason or "media route" in reason:
+        return "The relay could not verify this Studio’s media route."
+    return "Worldwide sharing could not complete setup."
 
 
 def shut_down_creator_host(server, *, serving_in_background=True):
@@ -6043,6 +6063,15 @@ def run_windows_studio(url, server=None) -> None:
             tray.stop()
 
 
+def create_studio_window(webview, url):
+    class StudioControls:
+        def hide_studio(self):
+            APP_WINDOW.minimize()
+
+    return webview.create_window(APP_TITLE, url=url, js_api=StudioControls(), width=1500, height=920,
+                                 min_size=(760, 480), background_color="#08111f")
+
+
 def main() -> None:
     global APP_WINDOW, PUBLIC_MEDIA_PORT, ALPHA_REPORTS
     parser = argparse.ArgumentParser(description="Public_ChannelForge standalone TV server")
@@ -6086,7 +6115,7 @@ def main() -> None:
             return
         try:
             import webview
-            APP_WINDOW = webview.create_window(APP_TITLE, url=url, width=1500, height=920, min_size=(760, 480), background_color="#08111f")
+            APP_WINDOW = create_studio_window(webview, url)
             start_webview(webview, application_id="public-channelforge",
                           icon=CREATOR_ICON)
         except ImportError:
@@ -6113,7 +6142,7 @@ def main() -> None:
             import webview
             thread = threading.Thread(target=server.serve_forever, daemon=True, name="channel-forge-server")
             thread.start()
-            APP_WINDOW = webview.create_window(APP_TITLE, url=url, width=1500, height=920, min_size=(760, 480), background_color="#08111f")
+            APP_WINDOW = create_studio_window(webview, url)
             try:
                 start_webview(webview, application_id="public-channelforge",
                               icon=CREATOR_ICON)

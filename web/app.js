@@ -430,6 +430,7 @@ function renderSharingStatus(config){
   $("#unpublish-creator").hidden=privateStudio;
   $("#resume-publishing").hidden=!privateStudio;
   const sharing=privateStudio?"private":config.sharing_status;
+  $("#retry-publishing").hidden=sharing!=="retrying";
   const status=$("#creator-publish-status");
   let host="";
   try { host=new URL(config.public_url).hostname; } catch {}
@@ -438,7 +439,7 @@ function renderSharingStatus(config){
   status.textContent=({
     live:`Your studio is listed in ChannelForge TV via ${route}. Keep Creator running while sharing.`,
     connecting:"Connecting your studio to ChannelForge TV…",
-    retrying:"The connection dropped. Studio will retry automatically.",
+    retrying:[config.sharing_error || "The connection dropped.", "Studio will retry automatically."].join(" "),
     private:"Your studio is offline.",
   })[sharing]||"Channels and scanned Plex movies appear in ChannelForge TV automatically.";
   const overview=$("#overview-sharing");
@@ -1058,6 +1059,12 @@ async function publishStudio(event){
   }finally{button.disabled=false}
 }
 $("#creator-publish-form").addEventListener("submit",publishStudio);
+$("#retry-publishing").onclick=async()=>{
+  try {
+    await api("/api/directory/retry",{method:"POST",body:"{}"});
+    toast("Retrying worldwide sharing.");
+  } catch(error) { toast(error.message,true); }
+};
 $("#unpublish-creator").onclick=async()=>{if(!confirm("Remove this studio from ChannelForge TV? Your local channels will not be deleted."))return;try{await api("/api/directory/publish",{method:"DELETE"});await refresh();toast("Studio removed from the TV directory.")}catch(error){toast(error.message,true)}};
 $("#builder-library-types").addEventListener("click", event => {
   const type = event.target.closest("[data-builder-library-kind]")?.dataset.builderLibraryKind;
@@ -1426,7 +1433,11 @@ window.addEventListener("pywebviewready", () => {
   const hide = $("#hide-studio");
   if (!window.pywebview?.api?.hide_studio || !hide) return;
   hide.hidden = false;
-  hide.onclick = () => window.pywebview.api.hide_studio();
+  if (/Linux/i.test(navigator.platform)) hide.textContent = "Minimize Studio";
+  hide.onclick = () => {
+    stopCreatorPreview();
+    window.pywebview.api.hide_studio();
+  };
 });
 setInterval(async()=>{
   if (document.hidden || checkingStatus) return;

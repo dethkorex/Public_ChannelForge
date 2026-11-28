@@ -311,10 +311,21 @@ const scanStudio = async creator => {
 '''
         checks = '''
 setGuideAudio(true);
-assert.equal(video.volume, 0.8 * 0.35);
+assert.equal(video.volume, 0.1);
 setGuideAudio(true);
-assert.equal(video.volume, 0.8 * 0.35);
+assert.equal(video.volume, 0.1);
 setGuideAudio(false);
+assert.equal(video.volume, 0.8);
+setLiveAudioMode(true);
+changeLiveVolume(40);
+assert.equal(video.volume, 0.4);
+setGuideAudio(true);
+assert.equal(video.volume, 0.1);
+changeLiveVolume(5);
+assert.equal(video.volume, 0.05);
+setGuideAudio(false);
+assert.equal(video.volume, 0.05);
+setLiveAudioMode(false);
 assert.equal(video.volume, 0.8);
 handlers.ended();
 assert.deepEqual(retries, [true]);
