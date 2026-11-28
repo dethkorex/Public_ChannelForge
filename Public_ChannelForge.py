@@ -51,7 +51,7 @@ from windows_distribution import clean_windows_update_cache, published_hash, rel
 
 APP_NAME = "Public_ChannelForge"
 APP_TITLE = "ChannelForge Studio"
-VERSION = "4.5.5"
+VERSION = "4.5.6"
 DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
