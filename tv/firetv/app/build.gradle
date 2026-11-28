@@ -28,8 +28,8 @@ android {
         ]
         minSdk 21
         targetSdk 35
-        versionCode 403
-        versionName '4.6.2'
+        versionCode 404
+        versionName '4.6.3'
         buildConfigField 'String', 'GITHUB_RELEASES_API', '"https://api.github.com/repos/dethkorex/Public_ChannelForge/releases/latest"'
         buildConfigField 'String', 'DIRECTORY_URL', '"' + directoryUrl + '"'
         buildConfigField 'String', 'DIRECTORY_FALLBACK_URL', '"https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"'

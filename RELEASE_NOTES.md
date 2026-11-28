@@ -1,6 +1,5 @@
-# ChannelForge Alpha 4.6.2
+# ChannelForge Alpha 4.6.3
 
-- The Windows in-app updater waits for the updating app to close. Updating TV can leave a running Studio on its current build so it can keep hosting. Update Studio from its own System menu when ready.
-- Studio retries its existing VPS route when a startup check fails temporarily. It keeps the same relay key, channel lineup, and directory registration across upgrades.
-- Studio reports a planned Windows update as reconnecting while it restarts.
-- Includes the Linux relay recovery and desktop volume controls from Alpha 4.6.1.
+- Windows and Linux Studio open when a saved channel has an empty lineup. Keep the draft for editing while the guide and playlist show channels with scheduled titles.
+- Retry connection immediately rechecks the saved relay and directory registration, restarting the delay between attempts.
+- Includes the key-preserving Windows updater and VPS reconnection fixes from Alpha 4.6.2.

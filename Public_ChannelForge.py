@@ -54,7 +54,7 @@ from windows_distribution import clean_windows_update_cache, published_hash, rel
 
 APP_NAME = "Public_ChannelForge"
 APP_TITLE = "ChannelForge Studio"
-VERSION = "4.6.2"
+VERSION = "4.6.3"
 DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -193,6 +193,7 @@ class CommunityRelayConnection(NamedTuple):
 COMMUNITY_RELAY: CommunityRelayConnection | None = None
 SHUTTING_DOWN = threading.Event()
 PUBLISH_CHANGED = threading.Event()
+PUBLISH_RETRY = threading.Event()
 SHARING_STATUS = "idle"
 SHARING_ERROR = ""
 REGISTERED_ORIGIN = ""
@@ -813,6 +814,10 @@ def current_run_end(channel):
 def run_finished(channel, moment=None):
     return bool(not channel.get("repeat_on_air") and channel.get("air_until")
                 and (moment or datetime.now(timezone.utc)) >= parse_timestamp(channel["air_until"]))
+
+
+def has_guide_programming(channel, moment=None):
+    return bool(channel.get("items")) and not run_finished(channel, moment)
 
 
 def update_channel_run(channel_id, action):
@@ -2269,6 +2274,8 @@ def schedule_position(channel: dict, moment: datetime | None = None, *, items: l
 def schedule_window(channel: dict, start: datetime, end: datetime, *, items: list[dict] | None = None) -> list[dict]:
     if items is None:
         items = timeline_items(channel)
+    if not items:
+        return []
     if channel.get("air_until") and not channel.get("repeat_on_air"):
         finish = parse_timestamp(channel["air_until"])
         end = min(end, finish)
@@ -4528,7 +4535,7 @@ def fetch_plex_stream(url: str, range_header: str = "", channel_id: str = "") ->
 def generate_exports(values: list[dict] | None = None) -> dict:
     global EXPORT_CHANNEL_IDS, EXPORT_REFRESHED_AT
     values = values if values is not None else channels()
-    values = [channel for channel in values if not run_finished(channel)]
+    values = [channel for channel in values if has_guide_programming(channel)]
     settings = config()
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     tv = ET.Element("tv", {"generator-info-name": APP_NAME})
@@ -4731,7 +4738,7 @@ def public_channel_catalog(base: str | None = None, *, extended: bool = False, b
         size = "backdrop" if field in {"art", "series_art"} else "poster"
         return f"{base}/api/plex/image?path={urllib.parse.quote(image_path, safe='')}&server={urllib.parse.quote(str(item.get('plex_server_id', '')), safe='')}&size={size}"
     for channel in channels():
-        if run_finished(channel, moment):
+        if not has_guide_programming(channel, moment):
             continue
         current = {}
         try:
@@ -5206,7 +5213,7 @@ class Handler(BaseHTTPRequestHandler):
                 moment = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(hours=offset)
                 guide = []
                 for channel in channels():
-                    if run_finished(channel):
+                    if not has_guide_programming(channel):
                         continue
                     slots = [slot for slot in schedule_window(channel, moment, moment + timedelta(hours=6))
                              if slot["item"].get("source") != "interstitial"]
@@ -5303,7 +5310,7 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     values = channels()
                     if (not path.exists() or time.monotonic() - EXPORT_REFRESHED_AT >= 60
-                            or EXPORT_CHANNEL_IDS != tuple(c["id"] for c in values if not run_finished(c))):
+                            or EXPORT_CHANNEL_IDS != tuple(c["id"] for c in values if has_guide_programming(c))):
                         generate_exports(values)
                     body = path.read_bytes()
                 self.send_bytes(200, body, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
@@ -5441,6 +5448,8 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/directory/retry":
                 if not config()["auto_publish_channels"]:
                     raise ValueError("Resume worldwide sharing first.")
+                queue_existing_publication()
+                PUBLISH_RETRY.set()
                 PUBLISH_CHANGED.set()
                 self.send_json(200, {"ok": True})
             elif parsed.path == "/api/plex/test":
@@ -5796,6 +5805,10 @@ def restore_public_sharing() -> None:
         if SHUTTING_DOWN.is_set():
             return
         with PUBLISH_LOCK:
+            if PUBLISH_RETRY.is_set():
+                PUBLISH_RETRY.clear()
+                failures = 0
+                next_relay_check = next_heartbeat = 0
             settings = config()
             profile = settings["creator_profile"]
             pending = settings["pending_creator_profile"]

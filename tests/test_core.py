@@ -27,6 +27,60 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(value["plex_token"], "")
         self.assertTrue(value["token_saved"])
 
+    def test_saved_empty_channel_does_not_block_startup_or_publish_a_guide_row(self):
+        saved = [
+            {"id": "a" * 16, "name": "Draft", "number": "7", "items": [], "repeat_on_air": True},
+            {"id": "b" * 16, "name": "On air", "number": "8", "repeat_on_air": True, "branding": {},
+             "items": [{"id": "program", "key": "/program", "title": "Test programme", "duration_ms": 3600000}]},
+        ]
+        for channel in saved:
+            channel["schedule_anchor"] = app.datetime.now(app.timezone.utc).isoformat()
+        app.atomic_json(app.CHANNELS_FILE, saved)
+        with mock.patch.object(app, "install_default_assets"):
+            app.ensure_files()
+        self.assertEqual(app.channels(), saved)
+        self.assertEqual(app.EXPORT_CHANNEL_IDS, ("b" * 16,))
+        self.assertIn("Test programme", (app.EXPORT_DIR / "guide.xml").read_text(encoding="utf-8"))
+        self.assertNotIn("Draft", (app.EXPORT_DIR / "channels.m3u").read_text(encoding="utf-8"))
+        catalog = app.public_channel_catalog("http://example.test", brief=True)
+        self.assertEqual([channel["id"] for channel in catalog["channels"]], ["b" * 16])
+
+    def test_retry_rechecks_a_saved_relay_before_the_periodic_health_check(self):
+        origin = "https://relay.example.net/studio/123456789012abcd"
+        connection = mock.Mock(profile=mock.Mock(origin=origin))
+        auto_settings = {**app.config(), "public_url": origin, "community_relay_origin": origin,
+                         "creator_id": "a" * 32, "creator_key": "fixture-key",
+                         "creator_profile": {"name": "Existing Studio", "heartbeat_supported": True},
+                         "managed_relay": True, "auto_publish_channels": True}
+        wake = threading.Event()
+        retry = threading.Event()
+
+        def wait(seconds):
+            if retry.is_set():
+                raise AssertionError("The retry was not consumed before checking the route.")
+            if probe.call_count == 1 and directory.call_count == 1:
+                retry.set()
+                return True
+            raise InterruptedError
+
+        with (mock.patch.multiple(app, COMMUNITY_RELAY=connection, REGISTERED_ORIGIN=origin,
+                                  PUBLISH_CHANGED=wake, PUBLISH_RETRY=retry, HEARTBEAT_STATUS={"failures": 0}),
+              mock.patch.object(wake, "wait", side_effect=wait),
+              mock.patch.object(app, "config", return_value=auto_settings),
+              mock.patch.object(app, "community_relay_candidates", return_value=(connection.profile,)),
+              mock.patch.object(app, "accept_community_relay", return_value=connection),
+              mock.patch.object(app, "start_public_media_server"),
+              mock.patch.object(app, "relay_reaches_this_creator", return_value=True) as probe,
+              mock.patch.object(app, "sync_public_channel_numbers"),
+              mock.patch.object(app, "directory_request") as directory):
+            with self.assertRaises(InterruptedError):
+                app.restore_public_sharing()
+        self.assertEqual(probe.call_args_list, [mock.call(origin)] * 2)
+        self.assertEqual(directory.call_count, 2)
+        for call in directory.call_args_list:
+            self.assertEqual(call.args[:2], ("POST", f"/v1/creators/{'a' * 32}/heartbeat"))
+            self.assertEqual(call.args[3], "fixture-key")
+
     def test_guide_settings_save_while_the_existing_plex_connection_is_down(self):
         origin = "https://relay.example.net/studio/123456789012abcd"
         app.atomic_json(app.CONFIG_FILE, {**app.load_json(app.CONFIG_FILE, {}), "managed_relay": True, "public_url": origin})
