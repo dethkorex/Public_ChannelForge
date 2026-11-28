@@ -28,7 +28,7 @@ from linux_runtime import (
 from release_metadata import read_latest_release, version_tuple
 from windows_distribution import clean_windows_update_cache, published_hash, verified_download, verified_windows_setup, windows_setup_asset, windows_update_cache
 
-VERSION = "4.6.1"
+VERSION = "4.6.2"
 VERSION_LABEL = f"Alpha Version {VERSION.removesuffix('.0')}"
 DIRECTORY = "https://channelforge-directory.fresh-anorak.workers.dev/v1/catalog"
 DIRECTORY_FALLBACK = "https://raw.githubusercontent.com/dethkorex/Public_ChannelForge/main/directory/catalog.json"
@@ -334,11 +334,6 @@ def launch_tv_update(job_id: str) -> None:
     command = [str(path)]
     if getattr(sys, "frozen", False):
         command.extend(["--silent-update", "--target-exe", str(Path(sys.executable).resolve()), "--wait-pid", str(os.getpid())])
-        try:
-            request = urllib.request.Request("http://127.0.0.1:8787/api/update/prepare", data=b"{}", method="POST", headers={"Content-Type": "application/json"})
-            urllib.request.urlopen(request, timeout=2).close()
-        except Exception:
-            pass
     subprocess.Popen(command, cwd=str(path.parent), creationflags=0x08000000 if sys.platform == "win32" else 0)
     if APP_WINDOW is not None:
         threading.Timer(0.8, APP_WINDOW.destroy).start()

@@ -54,7 +54,7 @@ from windows_distribution import clean_windows_update_cache, published_hash, rel
 
 APP_NAME = "Public_ChannelForge"
 APP_TITLE = "ChannelForge Studio"
-VERSION = "4.6.1"
+VERSION = "4.6.2"
 DISCOVERY_VERSION = VERSION.partition("-")[0]
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -342,8 +342,11 @@ def exit_for_update(shutdown) -> None:
     global UPDATE_EXITING
     UPDATE_EXITING = True
     SHUTTING_DOWN.set()
-    set_community_relay(None)
-    stop_legacy_relay()
+    PUBLISH_CHANGED.set()
+    with PUBLISH_LOCK:
+        stop_public_tunnel()
+        stop_legacy_relay()
+        set_community_relay(None)
     shutdown()
     if APP_WINDOW is not None:
         APP_WINDOW.destroy()
@@ -358,8 +361,11 @@ def apply_creator_update(result, shutdown):
             return
         threading.Timer(1.5, restart_updated_linux_studio).start()
     else:
-        threading.Timer(0.8, lambda: launch_verified_windows_update(result["path"])).start()
-        threading.Timer(1.5, lambda: exit_for_update(shutdown)).start()
+        def restart():
+            launch_verified_windows_update(result["path"])
+            exit_for_update(shutdown)
+
+        threading.Timer(0.8, restart).start()
 
 
 def restart_updated_linux_studio():
@@ -2828,11 +2834,14 @@ def connect_community_relay(profile: CommunityRelayProfile) -> CommunityRelayCon
                         RELAY_JOB = relay_process_job()
                     RELAY_JOB(process)
                 deadline = time.monotonic() + 16
+                sample_failures = 0
                 while not SHUTTING_DOWN.is_set() and process.poll() is None and time.monotonic() < deadline:
                     if relay_reaches_this_creator(profile.origin):
                         if profile.funnel_host and not relay_transfers_media(profile.origin, hd=True):
-                            break
-                        if process.poll() is None and not SHUTTING_DOWN.is_set():
+                            sample_failures += 1
+                            if sample_failures >= 2:
+                                break
+                        elif process.poll() is None and not SHUTTING_DOWN.is_set():
                             accepted = True
                             return CommunityRelayConnection(profile, local_port, process)
                     SHUTTING_DOWN.wait(.5)
@@ -5782,6 +5791,7 @@ def restore_public_sharing() -> None:
 
     while not SHUTTING_DOWN.is_set():
         wait_seconds = 20
+        retry_delay = None
         PUBLISH_CHANGED.clear()
         if SHUTTING_DOWN.is_set():
             return
@@ -5898,7 +5908,13 @@ def restore_public_sharing() -> None:
                     print(f"ChannelForge public sharing could not connect: {SHARING_ERROR}", flush=True)
                 SHARING_STATUS = "retrying"
                 saved = settings.get("public_url", "")
-                if (profile and settings.get("auto_publish_channels") and settings.get("creator_id")
+                # Give the already-registered VPS route time to recover from
+                # the old process's shutdown before trying another origin.
+                if (failures <= 2 and not pending and settings.get("managed_relay")
+                        and saved and saved == settings.get("community_relay_origin")
+                        and not SHUTTING_DOWN.is_set()):
+                    retry_delay = 2 * failures
+                elif (profile and settings.get("auto_publish_channels") and settings.get("creator_id")
                         and settings.get("creator_key") and settings.get("directory_url") == DEFAULT_DIRECTORY_URL
                         and (settings.get("managed_relay") or pending.get("managed_relay") or is_legacy_relay(saved))
                         and not SHUTTING_DOWN.is_set()):
@@ -5921,7 +5937,9 @@ def restore_public_sharing() -> None:
                             SHARING_ERROR = ""
                     except (OSError, ValueError, subprocess.SubprocessError):
                         pass
-        PUBLISH_CHANGED.wait(min(120, 5 * 2 ** min(max(0, failures - 1), 5)) if failures else wait_seconds)
+        if retry_delay is None:
+            retry_delay = min(120, 5 * 2 ** min(failures - 1, 5)) if failures else wait_seconds
+        PUBLISH_CHANGED.wait(retry_delay)
 
 
 def sharing_error_message(error: Exception) -> str:
@@ -5960,8 +5978,9 @@ def shut_down_creator_host(server, *, serving_in_background=True):
         try:
             published = config()
             if published["creator_profile"].get("heartbeat_supported") and published["creator_id"] and published["creator_key"]:
+                state = "reconnecting" if UPDATE_EXITING else "offline"
                 directory_request("POST", f'/v1/creators/{published["creator_id"]}/heartbeat',
-                                  {"state": "offline"}, published["creator_key"], timeout=2)
+                                  {"state": state}, published["creator_key"], timeout=2)
         except (OSError, ValueError):
             # Existing directories can omit this state. Their origin probes still expire it.
             pass

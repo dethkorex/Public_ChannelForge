@@ -137,6 +137,40 @@ def stop_locked_channel_forge_apps(targets: list[Path]) -> None:
     )
 
 
+def wait_for_update_requester(target: Path, pid: int) -> None:
+    """Give the app that launched setup time to close its listeners and relay."""
+    if sys.platform != "win32" or pid <= 0 or pid == os.getpid():
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                 ctypes.POINTER(wintypes.DWORD)]
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    process = kernel.OpenProcess(0x101000, False, pid)  # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
+    if not process:
+        return
+    try:
+        image = ctypes.create_unicode_buffer(32768)
+        length = wintypes.DWORD(len(image))
+        if not kernel.QueryFullProcessImageNameW(process, 0, image, ctypes.byref(length)):
+            return
+        if os.path.normcase(image.value) != os.path.normcase(str(target)):
+            return
+        result = kernel.WaitForSingleObject(process, 90000)
+        if result == 258:  # WAIT_TIMEOUT
+            raise ValueError("ChannelForge did not finish shutting down. Close the app and check for updates again.")
+        if result != 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(process)
+
+
 def app_target(folder: Path, key: str) -> Path:
     return folder / f"{PRODUCTS[key]['app']}.exe"
 
@@ -245,7 +279,7 @@ def installation_lock():
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def install_binaries(folder: Path, keys: tuple[str, ...]) -> bool:
+def install_binaries(folder: Path, keys: tuple[str, ...], *, requested_app: str | None = None) -> bool:
     folder.mkdir(parents=True, exist_ok=True)
     replacements = []
     originals = {}
@@ -272,7 +306,8 @@ def install_binaries(folder: Path, keys: tuple[str, ...]) -> bool:
                     originals[installed] = original
                     shutil.copy2(installed, original)
         try:
-            replace_binaries(replacements, installed_paths)
+            optional = {app_target(folder, key) for key in keys if requested_app and key != requested_app}
+            replace_binaries(replacements, installed_paths, optional=optional, force_close=requested_app is None)
         except (OSError, ValueError):
             try:
                 for installed in reversed(installed_paths):
@@ -294,7 +329,8 @@ def install_binaries(folder: Path, keys: tuple[str, ...]) -> bool:
     return any(path.suffix.lower() == ".exe" for path in installed_paths)
 
 
-def replace_binaries(replacements: list[tuple[Path, Path]], installed_paths: list[Path]) -> None:
+def replace_binaries(replacements: list[tuple[Path, Path]], installed_paths: list[Path], *,
+                     optional: set[Path], force_close: bool) -> None:
     deadline = time.monotonic() + 120
     force_close_at = time.monotonic() + 8
     force_close_attempted = False
@@ -307,11 +343,14 @@ def replace_binaries(replacements: list[tuple[Path, Path]], installed_paths: lis
                 os.replace(replacement, installed)
                 installed_paths.append(installed)
             except PermissionError as exc:
+                if installed in optional:
+                    # The other app can update itself after it has stopped serving or playing.
+                    continue
                 last_error = exc
                 still_pending.append((installed, replacement))
         pending = still_pending
         if pending:
-            if not force_close_attempted and time.monotonic() >= force_close_at:
+            if force_close and not force_close_attempted and time.monotonic() >= force_close_at:
                 force_close_attempted = True
                 stop_locked_channel_forge_apps([installed for installed, _replacement in pending if installed.suffix.lower() == ".exe"])
             time.sleep(0.5)
@@ -383,7 +422,8 @@ def clean_legacy_shortcuts() -> None:
             (root / name).unlink(missing_ok=True)
 
 
-def clean_legacy_desktop_files(folder: Path, obsolete_folders: tuple[Path, ...] = (), include_desktop: bool = True) -> None:
+def clean_legacy_desktop_files(folder: Path, obsolete_folders: tuple[Path, ...] = (), include_desktop: bool = True,
+                               *, force_close: bool = True) -> None:
     desktop = desktop_folder().resolve()
     names = ("ChannelForge_Creator.exe", "ChannelForge_TV.exe", *LEGACY_PUBLIC_NAMES)
     roots = {directory.resolve() for directory in obsolete_folders}
@@ -392,16 +432,19 @@ def clean_legacy_desktop_files(folder: Path, obsolete_folders: tuple[Path, ...] 
     old_apps = [root / name for root in roots if root != folder
                 for name in names if (root / name).is_file() and not (root / name).is_symlink()]
     old_apps.extend(folder / name for name in LEGACY_PUBLIC_NAMES if (folder / name).is_file() and not (folder / name).is_symlink())
-    if old_apps:
+    if force_close and old_apps:
         stop_locked_channel_forge_apps(old_apps)
-        for path in old_apps:
-            for attempt in range(10):
-                try:
-                    path.unlink(missing_ok=True)
-                    break
-                except PermissionError:
-                    if attempt == 9:
-                        raise
+    removed_apps = []
+    for path in old_apps:
+        for attempt in range(10 if force_close else 1):
+            try:
+                path.unlink(missing_ok=True)
+                removed_apps.append(path)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                if force_close:
                     time.sleep(0.3)
     for root in roots | {folder}:
         for name in names:
@@ -413,7 +456,8 @@ def clean_legacy_desktop_files(folder: Path, obsolete_folders: tuple[Path, ...] 
                         path.unlink()
                 except OSError:
                     continue
-    if desktop != folder and any(path.parent == desktop for path in old_apps):
+    if desktop != folder and any(path.parent == desktop for path in removed_apps) and not any(
+            path.parent == desktop and path.exists() for path in old_apps):
         for name in ("channel-forge-creator.ico", "channel-forge-tv.ico"):
             (desktop / name).unlink(missing_ok=True)
 
@@ -464,6 +508,7 @@ def apply_silent_update(target: Path, wait_pid: int, product: str | None = None)
     """Update the registered suite, or migrate a legacy Desktop installation once."""
     product = product or target_product(target)
     with installation_lock():
+        wait_for_update_requester(target, wait_pid)
         source = target.parent.resolve()
         desktop = desktop_folder().resolve()
         downloads = (Path(os.environ.get("USERPROFILE", Path.home())) / "Downloads").resolve()
@@ -476,18 +521,18 @@ def apply_silent_update(target: Path, wait_pid: int, product: str | None = None)
         keys = tuple(key for key in INSTALL_PRODUCT_KEYS if (
             key == product or any(has_app(root, key) for root in (folder, source, desktop))
         ))
-        changed = install_binaries(folder, keys)
+        install_binaries(folder, keys, requested_app=product)
         if managed:
             desktop_shortcuts = source == desktop or any(
                 (desktop / f"{PRODUCTS[key]['name']}.lnk").is_file() for key in keys
             )
             register_installation(folder, keys, desktop_shortcuts, None)
             repair_taskbar_shortcuts(folder, keys, (source,))
-            clean_legacy_desktop_files(folder, (source,))
+            clean_legacy_desktop_files(folder, (source,), force_close=False)
         else:
-            clean_legacy_desktop_files(folder, include_desktop=False)
-        if changed or target != app_target(folder, product):
-            subprocess.Popen([str(app_target(folder, product))], cwd=str(folder))
+            clean_legacy_desktop_files(folder, include_desktop=False, force_close=False)
+        subprocess.Popen([str(app_target(folder, product))], cwd=str(folder),
+                         env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"})
 
 
 class Installer(tk.Tk):

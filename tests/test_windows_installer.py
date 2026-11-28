@@ -92,7 +92,8 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(note.read_text(), "user file")
         self.assertEqual((folder / old.name).read_bytes(), b"4.1")
         self.assertEqual(windows_installer.registered_installation(), folder)
-        launch.assert_called_once_with([str(folder / old.name)], cwd=str(folder))
+        launch.assert_called_once()
+        self.assertEqual(launch.call_args.args, ([str(folder / old.name)],))
 
     def test_silent_update_replaces_existing_executable_without_wizard(self):
         folder = Path(tempfile.mkdtemp(prefix="channel-forge-update-test-")).resolve()
@@ -105,7 +106,9 @@ class WindowsInstallerTests(unittest.TestCase):
         with mock.patch.object(windows_installer, "payload_for", return_value=payload), mock.patch.object(windows_installer, "icon_for", return_value=icon), mock.patch.object(windows_installer.subprocess, "Popen") as launch:
             windows_installer.apply_silent_update(target, 321)
         self.assertEqual(target.read_bytes(), b"new-version")
-        launch.assert_called_once_with([str(target)], cwd=str(folder))
+        launch.assert_called_once()
+        self.assertEqual(launch.call_args.args, ([str(target)],))
+        self.assertEqual(launch.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
 
     def test_silent_update_replaces_both_installed_apps(self):
         folder = self.root / "ChannelForge"
@@ -131,6 +134,46 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(tv.read_bytes(), b"new-tv")
         self.assertEqual(identity.read_bytes(), b"fixture-key")
         self.assertEqual(enrollment.read_bytes(), b'{"creator_id":"ab0123456789abcd"}')
+
+    def test_viewer_update_leaves_a_running_studio_and_its_publishing_files_alone(self):
+        folder = self.root / "installed"
+        folder.mkdir()
+        studio = folder / "ChannelForge_Creator.exe"
+        tv = folder / "ChannelForge_TV.exe"
+        studio.write_bytes(b"running-studio")
+        tv.write_bytes(b"old-tv")
+        data = Path(os.environ["LOCALAPPDATA"]) / "Public_ChannelForge"
+        data.mkdir(parents=True)
+        saved = {
+            "community-relay-identity": b"existing relay key",
+            "managed-community-relay.json": b'{"creator_id":"ab0123456789abcd","profile":{"remote_port":18091}}',
+            "config.json": b'{"creator_id":"ab0123456789abcd","creator_key":"fixture"}',
+            "channels.json": b'[{"id":"ab0123456789abcd","number":"7"}]',
+        }
+        for name, value in saved.items():
+            (data / name).write_bytes(value)
+        payload = folder / "payload.exe"
+        payload.write_bytes(b"new")
+        replace_file = os.replace
+
+        def replace(src, dst):
+            if dst == studio:
+                raise PermissionError("Studio is hosting")
+            return replace_file(src, dst)
+
+        with (mock.patch.object(windows_installer, "payload_for", return_value=payload),
+              mock.patch.object(windows_installer, "icon_for", return_value=payload),
+              mock.patch.object(windows_installer, "wait_for_update_requester") as wait,
+              mock.patch.object(windows_installer, "stop_locked_channel_forge_apps") as force_stop,
+              mock.patch.object(windows_installer.subprocess, "Popen") as launch,
+              mock.patch.object(windows_installer.os, "replace", side_effect=replace)):
+            windows_installer.apply_silent_update(tv, 321)
+        wait.assert_called_once_with(tv, 321)
+        force_stop.assert_not_called()
+        launch.assert_called_once()
+        self.assertEqual(studio.read_bytes(), b"running-studio")
+        self.assertEqual(tv.read_bytes(), b"new")
+        self.assertEqual({name: (data / name).read_bytes() for name in saved}, saved)
 
     def test_failed_suite_update_rolls_back_both_apps_and_cleans_temporary_files(self):
         folder = self.root / "installed"
@@ -207,7 +250,7 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in desktop.iterdir()), [
             "ChannelForge Studio.lnk", "ChannelForge TV.lnk", "ChannelForge.exe",
         ])
-        launch.assert_called_once_with([str(folder / creator.name)], cwd=str(folder))
+        self.assertEqual([call.args for call in launch.call_args_list], [([str(folder / creator.name)],)] * 2)
 
     def test_apps_share_verified_download_and_prune_only_old_updaters(self):
         directory = windows_distribution.windows_update_cache()

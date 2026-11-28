@@ -1251,6 +1251,16 @@ class CoreTests(unittest.TestCase):
         fallback.getsockname.return_value = (app.HOST, 19000)
         process = mock.Mock(poll=mock.Mock(return_value=None))
         media_proof = app.hashlib.sha256(app.RELAY_MEDIA_SAMPLE).hexdigest()
+        accept_relay = app.accept_community_relay
+        failed_once = False
+
+        def accept(*args, **kwargs):
+            nonlocal failed_once
+            if not failed_once:
+                failed_once = True
+                raise ValueError("The community relay did not reach this Studio.")
+            return accept_relay(*args, **kwargs)
+
         with (
             mock.patch.object(app, "REGISTERED_ORIGIN", ""),
             mock.patch.object(app, "SHARING_STATUS", "idle"),
@@ -1263,19 +1273,23 @@ class CoreTests(unittest.TestCase):
             mock.patch.object(app, "generate_exports"),
             mock.patch.object(app, "start_public_media_server"),
             mock.patch.object(app, "stop_legacy_relay"),
+            mock.patch.object(app, "fallback_studio_relay") as fallback_relay,
+            mock.patch.object(app, "accept_community_relay", side_effect=accept),
             mock.patch.object(app, "openssh_tool", return_value="ssh") as openssh,
             mock.patch.object(app, "start_relay_tls_bridge", return_value=fallback) as bridge,
             mock.patch.object(app, "set_community_relay") as activate,
             mock.patch.object(app.subprocess, "Popen", side_effect=[mock.Mock(poll=mock.Mock(return_value=1)), process]) as ssh,
             mock.patch.object(app, "directory_request", side_effect=[{"instance": app.RELAY_INSTANCE},
                                {"sha256": media_proof}, {"creator": {"id": studio_id}}]) as directory,
-            mock.patch.object(app.PUBLISH_CHANGED, "wait", side_effect=InterruptedError),
+            mock.patch.object(app.PUBLISH_CHANGED, "wait", side_effect=[False, InterruptedError]) as wait,
         ):
             app.ensure_files()
             with self.assertRaises(InterruptedError):
                 app.restore_public_sharing()
             self.assertEqual(app.SHARING_STATUS, "live")
             self.assertEqual(app.REGISTERED_ORIGIN, origin)
+        self.assertEqual(wait.call_args_list[0], mock.call(2))
+        fallback_relay.assert_not_called()
         openssh.assert_called_once_with("ssh")
         bridge.assert_called_once_with(relay["funnel_host"], relay["funnel_port"])
         self.assertEqual(ssh.call_args_list[0].args[0][-3:], ["-p", "18088", "vps.example.net"])

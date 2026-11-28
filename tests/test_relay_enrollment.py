@@ -199,7 +199,7 @@ class RelayEnrollmentTests(unittest.TestCase):
                   mock.patch.object(app, "openssh_tool", return_value="ssh"),
                   mock.patch.object(app, "start_relay_tls_bridge", return_value=bridge) as tls,
                   mock.patch.object(app, "relay_reaches_this_creator", return_value=True),
-                  mock.patch.object(app, "relay_transfers_media", return_value=True) as sample,
+                  mock.patch.object(app, "relay_transfers_media", side_effect=[False, True]) as sample,
                   mock.patch.object(app.subprocess, "Popen", side_effect=[failed, working]) as ssh):
                 accepted = app.connect_community_relay(profile)
                 self.assertIs(accepted.process, working)
@@ -210,7 +210,7 @@ class RelayEnrollmentTests(unittest.TestCase):
                 self.assertEqual(fallback[-1], "127.0.0.1")
                 self.assertIn("StrictHostKeyChecking=yes", fallback)
                 self.assertIn("127.0.0.1:18091:127.0.0.1:8789", fallback)
-                sample.assert_called_once_with(profile.origin, hd=True)
+                self.assertEqual(sample.call_args_list, [mock.call(profile.origin, hd=True)] * 2)
 
     def test_funnel_is_tried_when_direct_can_connect_but_is_too_slow(self):
         profile = app.CommunityRelayProfile("https://vps.example.com", "vps.example.com", "studio", 22, 18091,
@@ -227,12 +227,12 @@ class RelayEnrollmentTests(unittest.TestCase):
                   mock.patch.object(app, "openssh_tool", return_value="ssh"),
                   mock.patch.object(app, "start_relay_tls_bridge", return_value=bridge),
                   mock.patch.object(app, "relay_reaches_this_creator", return_value=True),
-                  mock.patch.object(app, "relay_transfers_media", side_effect=[False, True]) as sample,
+                  mock.patch.object(app, "relay_transfers_media", side_effect=[False, False, True]) as sample,
                   mock.patch.object(app, "stop_relay_process") as stop,
                   mock.patch.object(app.subprocess, "Popen", side_effect=[direct, fallback])):
                 self.assertIs(app.connect_community_relay(profile).process, fallback)
                 stop.assert_called_once_with(direct)
-                self.assertEqual(sample.call_args_list, [mock.call(profile.origin, hd=True)] * 2)
+                self.assertEqual(sample.call_args_list, [mock.call(profile.origin, hd=True)] * 3)
 
     def test_ipv4_only_socket_transports_both_directions_over_verified_tls(self):
         openssl = shutil.which("openssl") or Path("C:/Program Files/Git/usr/bin/openssl.exe")

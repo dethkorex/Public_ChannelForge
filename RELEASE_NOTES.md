@@ -1,7 +1,6 @@
-# ChannelForge Alpha 4.6.1
+# ChannelForge Alpha 4.6.2
 
-- Worldwide sharing automatically enrolls on the managed relay when Studio inherits an old local or retired publishing address. Failed connections show a specific cause and an optional retry button.
-- Linux Studio updates shut down publishing before restarting, so the old process cannot reopen the assigned relay port. Studio reconnects with the same saved registration and key.
-- On Linux, reopen Studio or TV from the launcher to bring back the existing window. Studio can minimize from System.
-- Windows and Linux TV have a live volume slider. The guide caps the mini-player at 10% volume and restores the selected volume when you return to full player view.
-- Includes Alpha 4.6’s guide, lineup, and Up Next branding fixes.
+- The Windows in-app updater waits for the updating app to close. Updating TV can leave a running Studio on its current build so it can keep hosting. Update Studio from its own System menu when ready.
+- Studio retries its existing VPS route when a startup check fails temporarily. It keeps the same relay key, channel lineup, and directory registration across upgrades.
+- Studio reports a planned Windows update as reconnecting while it restarts.
+- Includes the Linux relay recovery and desktop volume controls from Alpha 4.6.1.
